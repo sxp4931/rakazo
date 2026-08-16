@@ -131,6 +131,7 @@ model Invitation {
   inviterId      String
   user           User         @relation(fields: [inviterId], references: [id], onDelete: Cascade)
 
+  @@index([inviterId])
   @@index([organizationId])
   @@index([email])
   @@map("invitation")
@@ -274,6 +275,8 @@ model Task {
   runs        Run[]
 
   @@index([workspaceId, botId])
+  @@index([botId])
+  @@index([threadId])
   @@map("tasks")
 }
 
@@ -310,6 +313,9 @@ model Run {
   @@index([status, leaseExpiresAt])
   @@index([status, updatedAt, id])
   @@index([workspaceId, botId])
+  @@index([botId])
+  @@index([threadId])
+  @@index([taskId])
   @@map("runs")
 }
 
@@ -366,6 +372,7 @@ model Routine {
 
   @@index([active, nextRunAt])
   @@index([workspaceId, botId])
+  @@index([botId])
   @@map("routines")
 }
 
@@ -421,6 +428,7 @@ model MemoryDocument {
 
   @@unique([workspaceId, scope, botId, path])
   @@index([workspaceId, userId])
+  @@index([botId])
   @@map("memory_documents")
 }
 
@@ -503,6 +511,7 @@ model Artifact {
   createdAt   DateTime @default(now())
 
   @@index([workspaceId, botId])
+  @@index([botId])
   @@map("artifacts")
 }
 
@@ -522,6 +531,8 @@ model UsageRecord {
   createdAt    DateTime @default(now())
 
   @@index([workspaceId, userId, createdAt])
+  @@index([botId])
+  @@index([runId])
   @@map("usage_records")
 }
 

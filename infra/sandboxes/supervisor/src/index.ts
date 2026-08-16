@@ -94,7 +94,10 @@ app.post("/computers", async (c) => {
       } else {
         if (!info.State.Running) await existing.start();
         const screenUrl = await publishedScreenUrl(existing, info.State.Running ? info : undefined);
-        logger.info({ botId: body.botId, containerId: existing.id, resumed: true }, "computer ready");
+        logger.info(
+          { botId: body.botId, containerId: existing.id, resumed: true },
+          "computer ready",
+        );
         return c.json({ id: existing.id, image: COMPUTER_IMAGE, screenUrl, resumed: true });
       }
     }

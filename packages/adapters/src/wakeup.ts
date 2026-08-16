@@ -5,7 +5,10 @@ import {
   type JobPublisher,
   type JobWorkerHost,
 } from "@rakazo/adapter-kit";
+import { createLogger } from "@rakazo/core";
 import { makeWorkerUtils, type Runner, run, type WorkerUtils } from "graphile-worker";
+
+const logger = createLogger("jobs");
 
 export class GraphileJobPublisher implements JobPublisher {
   private utils: Promise<WorkerUtils> | undefined;
@@ -95,7 +98,7 @@ export class InMemoryJobQueue implements JobPublisher, JobWorkerHost {
       const handlers = this.handlers;
       if (!handlers) return;
       void dispatchBackgroundJob(handlers, job.name, job.payload).catch((error) =>
-        console.error(job.name, error),
+        logger.error({ err: error, job: job.name }, "background job failed"),
       );
     }, delay);
     this.timers.add(timer);

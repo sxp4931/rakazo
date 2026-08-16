@@ -24,6 +24,7 @@ import {
   ScriptedAgentRuntime,
 } from "@rakazo/adapters";
 import { blockedAuthPaths, createAuth } from "@rakazo/auth";
+import { createLogger } from "@rakazo/core";
 import { createDb, createThreadEvents, type PrismaClient, requireMembership } from "@rakazo/db";
 import { MarkdownMemoryStore } from "@rakazo/memory";
 import { Hono } from "hono";
@@ -46,6 +47,7 @@ export async function createApp(
   overrides: Partial<AppEnv> & { prisma?: PrismaClient; realtime?: RealtimeFanout } = {},
 ): Promise<AppHandles> {
   const env = { ...loadEnv(process.env), ...overrides };
+  const logger = createLogger("api");
   const created = overrides.prisma
     ? { prisma: overrides.prisma, pool: undefined }
     : createDb(env.databaseUrl);
@@ -176,6 +178,22 @@ export async function createApp(
   });
   const rpc = new RPCHandler(router);
   const app = new Hono();
+  app.use("*", async (c, next) => {
+    const startedAt = performance.now();
+    await next();
+    const fields = {
+      method: c.req.method,
+      path: c.req.path,
+      status: c.res.status,
+      durationMs: Math.round(performance.now() - startedAt),
+    };
+    if (c.req.path === "/health") logger.debug(fields, "request");
+    else logger.info(fields, "request");
+  });
+  app.onError((error, c) => {
+    logger.error({ err: error, method: c.req.method, path: c.req.path }, "unhandled request error");
+    return c.json({ error: "internal error" }, 500);
+  });
   app.use(
     "*",
     cors({

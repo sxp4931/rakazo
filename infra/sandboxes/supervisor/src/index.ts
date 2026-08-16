@@ -5,7 +5,7 @@ import path from "node:path";
 import { loadEnvFile } from "node:process";
 import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
-import { boundedSandboxCommandTimeoutMs, resolveSupervisorToken } from "@rakazo/core";
+import { boundedSandboxCommandTimeoutMs, createLogger, resolveSupervisorToken } from "@rakazo/core";
 import Docker from "dockerode";
 import { Hono } from "hono";
 import { z } from "zod";
@@ -41,6 +41,7 @@ const dataDir = path.resolve(repositoryRoot, process.env.DATA_DIR ?? "./data");
 let imageReady: Promise<void> | undefined;
 let supervisorInfo: Docker.ContainerInspectInfo | undefined;
 const supervisorToken = resolveSupervisorToken(process.env);
+const logger = createLogger("sandbox-supervisor");
 
 const app = new Hono();
 
@@ -93,6 +94,7 @@ app.post("/computers", async (c) => {
       } else {
         if (!info.State.Running) await existing.start();
         const screenUrl = await publishedScreenUrl(existing, info.State.Running ? info : undefined);
+        logger.info({ botId: body.botId, containerId: existing.id, resumed: true }, "computer ready");
         return c.json({ id: existing.id, image: COMPUTER_IMAGE, screenUrl, resumed: true });
       }
     }
@@ -109,8 +111,10 @@ app.post("/computers", async (c) => {
     );
     await container.start();
     const screenUrl = await publishedScreenUrl(container);
+    logger.info({ botId: body.botId, containerId: container.id, resumed: false }, "computer ready");
     return c.json({ id: container.id, image: COMPUTER_IMAGE, screenUrl, resumed: false });
   } catch (error) {
+    logger.error({ err: error, botId: body.botId }, "computer create failed");
     const message = error instanceof Error ? error.message : String(error);
     return c.json({ error: message }, 500);
   }
@@ -169,6 +173,9 @@ app.post("/computers/:id/exec", async (c) => {
         timeoutMs: boundedSandboxCommandTimeoutMs(body.timeoutMs),
       },
     );
+    if ((result.code ?? 0) !== 0) {
+      logger.warn({ containerId: id, argv: body.argv, code: result.code }, "computer exec failed");
+    }
     return c.json(result);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -414,6 +421,7 @@ app.delete("/computers/:id", async (c) => {
       c.req.header("x-rakazo-workspace-id"),
     );
     await container.remove({ force: true }).catch(() => undefined);
+    logger.info({ containerId: id }, "computer removed");
     return c.json({ ok: true });
   } catch {
     return c.json({ error: "computer not found" }, 404);
@@ -423,8 +431,8 @@ app.delete("/computers/:id", async (c) => {
 function startSupervisor() {
   const port = Number(process.env.SUPERVISOR_PORT ?? 7091);
   const hostname = process.env.SUPERVISOR_HOST ?? "127.0.0.1";
-  return serve({ fetch: app.fetch, hostname, port }, () => {
-    console.log(`sandbox supervisor on http://${hostname}:${port}`);
+  serve({ fetch: app.fetch, hostname, port }, () => {
+    logger.info({ hostname, port }, "sandbox supervisor listening");
   });
 }
 
@@ -447,6 +455,7 @@ async function ensureComputerImage() {
           `Missing ${COMPUTER_IMAGE}. Build it with: docker build -t ${COMPUTER_IMAGE} infra/sandboxes/computer`,
         );
       }
+      logger.info({ image: COMPUTER_IMAGE }, "building computer image");
       const stream = await docker.buildImage(
         {
           context: computerContext,

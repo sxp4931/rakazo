@@ -21,11 +21,12 @@ import {
   PostgresRealtimeFanout,
   ScriptedAgentRuntime,
 } from "@rakazo/adapters";
-import { resolveEncryptionKey } from "@rakazo/core";
+import { createLogger, resolveEncryptionKey } from "@rakazo/core";
 import { createDb, createThreadEvents } from "@rakazo/db";
 import { MarkdownMemoryStore } from "@rakazo/memory";
 
 async function main() {
+  const logger = createLogger("worker");
   const databaseUrl = process.env.DATABASE_URL;
   if (!databaseUrl) throw new Error("DATABASE_URL is required");
   const { prisma, pool } = createDb(databaseUrl);
@@ -101,10 +102,17 @@ async function main() {
   process.once("SIGTERM", () => void stop());
   process.once("SIGINT", () => void stop());
 
-  console.log("rakazo worker ready");
+  logger.info(
+    {
+      pid: process.pid,
+      wakeup: process.env.WAKEUP_DRIVER ?? "graphile",
+      sandbox: process.env.SANDBOX_PROVIDER ?? "docker",
+    },
+    "rakazo worker ready",
+  );
 }
 
 main().catch((error) => {
-  console.error(error);
+  createLogger("worker").error({ err: error }, "worker crashed");
   process.exit(1);
 });

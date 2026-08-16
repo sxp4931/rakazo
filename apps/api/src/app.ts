@@ -30,6 +30,7 @@ import { MarkdownMemoryStore } from "@rakazo/memory";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { type AppEnv, loadEnv } from "./env.js";
+import { createRateLimiter } from "./rate-limit.js";
 import { createRouter } from "./router.js";
 
 export interface AppHandles {
@@ -194,6 +195,13 @@ export async function createApp(
     logger.error({ err: error, method: c.req.method, path: c.req.path }, "unhandled request error");
     return c.json({ error: "internal error" }, 500);
   });
+  const globalLimiter = createRateLimiter({ windowMs: 5 * 60_000, max: 5000 }, "global");
+  const authLimiter = createRateLimiter({ windowMs: 5 * 60_000, max: 300 }, "auth");
+  const authAttemptLimiter = createRateLimiter({ windowMs: 5 * 60_000, max: 20 }, "auth-attempt");
+  app.use("*", globalLimiter.middleware);
+  app.use("/api/auth/*", authLimiter.middleware);
+  app.on("POST", "/api/auth/sign-in/*", authAttemptLimiter.middleware);
+  app.on("POST", "/api/auth/sign-up/*", authAttemptLimiter.middleware);
   app.use(
     "*",
     cors({

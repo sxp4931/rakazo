@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Structured pino logging across the API, worker, and sandbox supervisor (request logs, unhandled-error logs, computer lifecycle logs). `LOG_LEVEL` controls verbosity; logs are silent under test.
+- Rate limiting on the API: strict limits on sign-in and sign-up attempts, moderate limits on auth traffic, and a generous global backstop, returning `429` with `Retry-After`.
+- Database indexes for hot foreign keys (`tasks`, `runs`, `routines`, `memory_documents`, `artifacts`, `usage_records`, `invitation`), speeding up cascade deletes and bot/task-scoped queries as data grows. Migration `0009_fk_indexes`.
+- CI: Docker builds for the three sandbox images and weekly Dependabot updates.
 - Electron first-run: Docker (default) or this Mac. This Mac runs the bot shell as you, with working directories under your home folder. macOS does not show its own permission dialog; the consent is Rakazo's. The choice is owner-only and is refused when `SANDBOX_PROVIDER` is not `docker` (so E2B and test fakes cannot enable it).
 - GitHub Copilot and SuperGrok / X Premium sign-in via Pi device-code OAuth (`openai-codex`, `github-copilot`, `xai`). Claude Pro is still omitted because Pi's Claude login uses a localhost callback that does not work from the web app.
 - Spawn peer bots (each with its own thread and computer) and short-lived in-thread subagents.

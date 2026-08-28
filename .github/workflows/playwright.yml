@@ -1,8 +1,25 @@
 name: Playwright
 
 on:
+  workflow_dispatch:
+    inputs:
+      sandbox_provider:
+        description: Sandbox provider
+        required: true
+        type: choice
+        options:
+          - fake
+          - e2b
+          - daytona
+          - box
+        default: fake
   workflow_call:
     inputs:
+      sandbox_provider:
+        description: Sandbox provider
+        required: false
+        type: string
+        default: fake
       publish_report:
         description: Publish this run to the persistent visual dashboard
         required: false
@@ -20,6 +37,15 @@ on:
       S3_SECRET_ACCESS_KEY:
         description: Secret key used to publish visual reports
         required: false
+      E2B_API_KEY:
+        description: E2B API key used only when the E2B sandbox is selected
+        required: false
+      DAYTONA_API_KEY:
+        description: Daytona API key used only when the Daytona sandbox is selected
+        required: false
+      BOX_API_KEY:
+        description: Box API key used only when the Box sandbox is selected
+        required: false
 
 permissions:
   contents: read
@@ -28,7 +54,7 @@ jobs:
   playwright:
     name: Web E2E
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     concurrency:
       group: ${{ inputs.publish_report && 'playwright-publication' || format('playwright-{0}', github.run_id) }}
       cancel-in-progress: false
@@ -40,11 +66,38 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('pnpm-lock.yaml') }}
       - name: Install Chromium
-        run: pnpm --filter @rakazo/web exec playwright install --with-deps chromium
+        timeout-minutes: 5
+        # Skip --with-deps: GitHub ubuntu-latest already has Chromium's OS libraries,
+        # and apt-get against azure.archive.ubuntu.com can stall until the job timeout.
+        run: pnpm --filter @rakazo/web exec playwright install chromium
+      - name: Validate E2B credentials
+        if: inputs.sandbox_provider == 'e2b'
+        env:
+          E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
+        run: test -n "$E2B_API_KEY"
+      - name: Validate Daytona credentials
+        if: inputs.sandbox_provider == 'daytona'
+        env:
+          DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}
+        run: test -n "$DAYTONA_API_KEY"
+      - name: Validate Box credentials
+        if: inputs.sandbox_provider == 'box'
+        env:
+          BOX_API_KEY: ${{ secrets.BOX_API_KEY }}
+        run: test -n "$BOX_API_KEY"
       - name: Run Playwright tests
         id: playwright_tests
-        run: pnpm test:e2e
+        env:
+          SANDBOX_TEST_PROVIDER: ${{ inputs.sandbox_provider }}
+          E2B_API_KEY: ${{ inputs.sandbox_provider == 'e2b' && secrets.E2B_API_KEY || '' }}
+          DAYTONA_API_KEY: ${{ inputs.sandbox_provider == 'daytona' && secrets.DAYTONA_API_KEY || '' }}
+          BOX_API_KEY: ${{ inputs.sandbox_provider == 'box' && secrets.BOX_API_KEY || '' }}
+        run: pnpm test:e2e -- --sandbox="$SANDBOX_TEST_PROVIDER"
       - name: Record Playwright result
         if: always() && inputs.upload_artifacts
         env:

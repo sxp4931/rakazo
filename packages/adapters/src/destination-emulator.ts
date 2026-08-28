@@ -78,6 +78,7 @@ export class DestinationEmulator implements ConnectorProvider {
             body: { type: "string" },
           },
         },
+        route: { connectorId: "destination", toolName: "destination.write" },
       },
     ];
   }

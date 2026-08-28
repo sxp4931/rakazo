@@ -1,8 +1,33 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
-import { controlLabel, embeddableScreenUrl, previewPlaceholder } from "./computer.js";
+import { describe, expect, it, vi } from "vitest";
+import {
+  type ComputerStatus,
+  controlLabel,
+  embeddableScreenUrl,
+  previewPlaceholder,
+  readScreenUrl,
+} from "./computer.js";
+
+function computer(overrides: Partial<ComputerStatus> = {}): ComputerStatus {
+  return {
+    botId: "bot-1",
+    mode: "team",
+    kind: "fake",
+    state: "running",
+    controlHolder: "none",
+    controlBotId: null,
+    takeoverRequested: false,
+    screenAvailable: true,
+    screenWidth: 1280,
+    screenHeight: 800,
+    homeRevision: null,
+    busyBotName: null,
+    updateAvailable: true,
+    ...overrides,
+  };
+}
 
 describe("embeddableScreenUrl", () => {
   it("leaves a public stream URL alone", () => {
@@ -41,11 +66,88 @@ describe("computer copy", () => {
     );
     expect(previewPlaceholder("running", true, "Chief")).toBe("Booting live desktop…");
     expect(
-      controlLabel({ state: "running", controlHolder: "user", screenAvailable: true }, "Chief"),
+      controlLabel(
+        computer({
+          state: "running",
+          controlHolder: "user",
+          controlBotId: "bot-1",
+          takeoverRequested: true,
+        }),
+        "Chief",
+        "bot-1",
+      ),
     ).toBe("You have control");
     expect(
-      controlLabel({ state: "suspended", controlHolder: "none", screenAvailable: false }, "Chief"),
+      controlLabel(
+        computer({
+          state: "running",
+          controlHolder: "user",
+          controlBotId: "other-bot",
+        }),
+        "Chief",
+        "bot-1",
+      ),
+    ).toBe("Team Computer");
+    expect(
+      controlLabel(
+        computer({
+          state: "suspended",
+          controlHolder: "none",
+          controlBotId: null,
+          screenAvailable: false,
+        }),
+        "Chief",
+      ),
     ).toBe("Asleep");
+  });
+});
+
+describe("readScreenUrl", () => {
+  it("returns the first URL without retrying", async () => {
+    const request = vi.fn().mockResolvedValue({ url: "https://screen.example/embed" });
+    await expect(readScreenUrl(request)).resolves.toBe("https://screen.example/embed");
+    expect(request).toHaveBeenCalledOnce();
+  });
+
+  it("retries thrown RPC failures until a URL arrives", async () => {
+    const request = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("rpc computer/screenUrl failed"))
+      .mockResolvedValue({ url: "https://screen.example/embed" });
+    const sleep = vi.fn().mockResolvedValue(undefined);
+    await expect(readScreenUrl(request, { attempts: 3, delayMs: 25, sleep })).resolves.toBe(
+      "https://screen.example/embed",
+    );
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenCalledWith(25);
+  });
+
+  it("retries empty URLs until the screen is ready", async () => {
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce({ url: null })
+      .mockResolvedValueOnce({ url: "https://screen.example/embed" });
+    const sleep = vi.fn().mockResolvedValue(undefined);
+    await expect(readScreenUrl(request, { attempts: 3, sleep })).resolves.toBe(
+      "https://screen.example/embed",
+    );
+    expect(request).toHaveBeenCalledTimes(2);
+  });
+
+  it("rethrows the last RPC failure after the retry budget", async () => {
+    const error = new Error("rpc computer/screenUrl failed");
+    const request = vi.fn().mockRejectedValue(error);
+    const sleep = vi.fn().mockResolvedValue(undefined);
+    await expect(readScreenUrl(request, { attempts: 3, sleep })).rejects.toBe(error);
+    expect(request).toHaveBeenCalledTimes(3);
+    expect(sleep).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns null when every attempt succeeds without a URL", async () => {
+    const request = vi.fn().mockResolvedValue({ url: null });
+    const sleep = vi.fn().mockResolvedValue(undefined);
+    await expect(readScreenUrl(request, { attempts: 2, sleep })).resolves.toBeNull();
+    expect(request).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -63,5 +165,8 @@ describe("mobile computer screen", () => {
     expect(src).toContain("Release");
     expect(src).toContain("Close computer");
     expect(src).toContain("currentApiBase()");
+    expect(src).toContain("SafeAreaProvider");
+    expect(src).toContain("readScreenUrl");
+    expect(src).toContain("SCREEN_URL_OPEN_ATTEMPTS");
   });
 });

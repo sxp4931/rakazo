@@ -52,6 +52,16 @@ vi.mock("@earendil-works/pi-ai/providers/all", () => ({
   }),
 }));
 
+vi.mock("./pi-local-provider.js", () => ({
+  registerLocalProvider: (models: unknown) => models,
+}));
+
+vi.mock("./pi-openai-compatible-provider.js", () => ({
+  OPENAI_COMPATIBLE_PROVIDER_ID: "openai-compatible",
+  registerOpenAiCompatibleCatalog: (models: unknown) => models,
+  registerOpenAiCompatibleRuntime: (models: unknown) => models,
+}));
+
 import { PiAgentRuntime, pruneComputerScreenshotContext } from "./pi-runtime.js";
 
 const computerObserve: ConnectorTool = {
@@ -102,6 +112,43 @@ describe("Pi computer tool dispatch", () => {
       content: [{ type: "text" }, { type: "image", mimeType: "image/png", data: "iVBORw0KGgo=" }],
     });
     expect(fakeAgentState.systemPrompt).toBe("Follow the user's instructions.");
+  });
+
+  it("keeps the run alive when a graphical tool returns an error object", async () => {
+    const runtime = new PiAgentRuntime();
+    const events: Array<{ type: string; text?: string }> = [];
+    for await (const event of runtime.run(
+      {
+        botId: "bot",
+        threadId: "thread",
+        runId: "run-screen-error",
+        prompt: "look at the screen",
+        instructions: "Follow the user's instructions.",
+        history: [],
+        tools: [computerObserve],
+        model: { provider: "test", id: "computer-test-model" },
+        executeTool: async () => ({
+          error:
+            "This computer provider does not support multiple screens. Desktop tools are already in use on the shared display. File and shell tools still work.",
+        }),
+      },
+      {
+        operationId: "computer-test",
+        traceId: "computer-test",
+        workspaceId: "workspace",
+        userId: "user",
+        signal: new AbortController().signal,
+      },
+    )) {
+      events.push(event);
+    }
+
+    expect(fakeAgentState.result).toMatchObject({
+      content: [{ type: "text" }],
+      details: { error: expect.stringMatching(/does not support multiple screens/) },
+    });
+    expect(events.some((event) => event.text?.includes("I hit a problem"))).toBe(false);
+    expect(events.at(-1)?.type).toBe("done");
   });
 
   it("keeps only the two latest computer screenshots in model context", () => {

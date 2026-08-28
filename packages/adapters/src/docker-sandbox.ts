@@ -43,6 +43,7 @@ export class DockerSandboxProvider implements SandboxProvider {
         snapshots: true,
         takeover: true,
         persistentHome: true,
+        multiScreen: true,
       },
     };
   }
@@ -51,11 +52,23 @@ export class DockerSandboxProvider implements SandboxProvider {
     return `${this.supervisorUrl.replace(/\/$/, "")}${path}`;
   }
 
+  // No x-rakazo-screen-id here: the supervisor keys a screen off
+  // x-rakazo-bot-id alone (the ComputerRef's homeKey — shared across every
+  // bot on a Team Computer, distinct per bot on a dedicated one). Keying it
+  // off the calling bot's own id instead would give each bot on a shared
+  // Team Computer its own Xvfb/Chromium/x11vnc stack — several times the RAM
+  // for one container, and each stack fighting the same Chromium profile dir
+  // (homeKey is shared too) for its SingletonLock, so only the first bot to
+  // grab it gets the real logged-in session and the rest boot to a blank
+  // profile. Screen VIEWING is safely shared already (x11vnc -shared serves
+  // any number of simultaneous viewers of the one desktop); who gets to
+  // actually drive it is gated separately by the execution lease.
   private headers(context: AdapterContext, botId?: string) {
     return {
       authorization: `Bearer ${this.supervisorToken}`,
       "x-rakazo-workspace-id": context.workspaceId,
       ...(botId ? { "x-rakazo-bot-id": botId } : {}),
+      ...(context.screenLeaseId ? { "x-rakazo-screen-lease-id": context.screenLeaseId } : {}),
     };
   }
 
@@ -86,6 +99,8 @@ export class DockerSandboxProvider implements SandboxProvider {
       fresh: body.resumed !== true,
     };
   }
+
+  async prepare(_computer: ComputerRef, _context: AdapterContext): Promise<void> {}
 
   async *execute(
     computer: ComputerRef,
@@ -129,6 +144,10 @@ export class DockerSandboxProvider implements SandboxProvider {
       signal: context.signal,
     });
     if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      if (/cannot allocate another screen/i.test(detail)) {
+        throw new Error("This Team Computer cannot allocate another screen.");
+      }
       return { url: null, mimeType: "text/html", close: async () => undefined };
     }
     const body = (await res.json()) as { screenUrl?: string };
@@ -178,7 +197,10 @@ export class DockerSandboxProvider implements SandboxProvider {
       headers: this.headers(context, computer.botId),
       signal: context.signal,
     });
-    if (!res.ok) throw new Error(`sandbox observation failed: ${res.status}`);
+    if (!res.ok)
+      throw new Error(
+        `sandbox observation failed: ${res.status} ${await res.text().catch(() => "")}`.trim(),
+      );
     const body = (await res.json()) as {
       image: string;
       mimeType: "image/png" | "image/jpeg";
@@ -208,7 +230,10 @@ export class DockerSandboxProvider implements SandboxProvider {
       }),
       signal: context.signal,
     });
-    if (!res.ok) throw new Error(`sandbox action failed: ${res.status}`);
+    if (!res.ok)
+      throw new Error(
+        `sandbox action failed: ${res.status} ${await res.text().catch(() => "")}`.trim(),
+      );
     const body = (await res.json()) as {
       completed: number;
       observation?: {
@@ -297,6 +322,17 @@ export class DockerSandboxProvider implements SandboxProvider {
 
   async snapshot(computer: ComputerRef, _context: AdapterContext) {
     return { id: `docker-snap-${computer.id}`, createdAt: new Date().toISOString() };
+  }
+
+  async releaseScreen(computer: ComputerRef, context: AdapterContext): Promise<void> {
+    if (!context.botId) return;
+    const res = await fetch(this.url(`/computers/${computer.id}/screen`), {
+      method: "DELETE",
+      headers: this.headers(context, computer.botId),
+    });
+    if (!res.ok && res.status !== 404) {
+      throw new Error(`sandbox screen release failed: ${res.status}`);
+    }
   }
 
   async stop(computer: ComputerRef, context: AdapterContext): Promise<void> {

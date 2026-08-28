@@ -2,12 +2,15 @@ import { execSync, spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import type { ProcessEvent, SandboxProvider } from "@rakazo/adapter-kit";
+import type { ComputerRef, ProcessEvent, SandboxProvider } from "@rakazo/adapter-kit";
 import { afterAll, describe, expect, it } from "vitest";
+import { BoxSandboxEmulator } from "./box-emulator.js";
+import { DaytonaSandboxEmulator } from "./daytona-emulator.js";
 import { DesktopSandboxProvider } from "./desktop-sandbox.js";
 import { DockerSandboxProvider } from "./docker-sandbox.js";
 import { ManagedSandboxEmulator } from "./e2b-emulator.js";
 import { FakeSandboxProvider } from "./fake-sandbox.js";
+import { provisionPrepared } from "./sandbox-test-support.js";
 
 const ctx = {
   operationId: "1",
@@ -17,15 +20,7 @@ const ctx = {
   signal: new AbortController().signal,
 };
 
-async function drain(
-  provider: SandboxProvider,
-  computer: {
-    id: string;
-    botId: string;
-    kind: "fake" | "e2b" | "docker" | "desktop";
-    providerRef: string;
-  },
-) {
+async function drain(provider: SandboxProvider, computer: ComputerRef) {
   let stdout = "";
   for await (const event of provider.execute(computer, { argv: ["echo", "graphical-ok"] }, ctx)) {
     if (event.type === "stdout") stdout += event.data;
@@ -35,36 +30,50 @@ async function drain(
 }
 
 describe("sandbox conformance", () => {
-  it("runs the same graphical command on fake, managed-sandbox emulator, and desktop", async () => {
+  it("runs the same graphical command across fake, managed-provider emulators, and desktop", async () => {
     const fake = new FakeSandboxProvider();
     const managed = new ManagedSandboxEmulator();
+    const daytona = new DaytonaSandboxEmulator();
+    const box = new BoxSandboxEmulator();
     const desktop = new DesktopSandboxProvider();
-    const a = await fake.provision({ botId: "bot-a", homePath: "/tmp/a" }, ctx);
-    const b = await managed.provision({ botId: "bot-b", homePath: "/tmp/b" }, ctx);
-    const c = await desktop.provision({ botId: "bot-c", homePath: "/tmp/c" }, ctx);
+    const a = await provisionPrepared(fake, { botId: "bot-a", homePath: "/tmp/a" }, ctx);
+    const b = await provisionPrepared(managed, { botId: "bot-b", homePath: "/tmp/b" }, ctx);
+    const c = await provisionPrepared(daytona, { botId: "bot-c", homePath: "/tmp/c" }, ctx);
+    const d = await provisionPrepared(box, { botId: "bot-d", homePath: "/tmp/d" }, ctx);
+    const e = await provisionPrepared(desktop, { botId: "bot-e", homePath: "/tmp/e" }, ctx);
     const outA = await drain(fake, a);
     const outB = await drain(managed, b);
-    const outC = await drain(desktop, c);
+    const outC = await drain(daytona, c);
+    const outD = await drain(box, d);
+    const outE = await drain(desktop, e);
     expect(outA).toContain("graphical-ok");
     expect(outB).toContain("graphical-ok");
     expect(outC).toContain("graphical-ok");
-    expect(new Set([a.id, b.id, c.id]).size).toBe(3);
+    expect(outD).toContain("graphical-ok");
+    expect(outE).toContain("graphical-ok");
+    expect(new Set([a.id, b.id, c.id, d.id, e.id]).size).toBe(5);
     await fake.destroy(a, ctx);
     await managed.destroy(b, ctx);
-    await desktop.destroy(c, ctx);
+    await daytona.destroy(c, ctx);
+    await box.destroy(d, ctx);
+    await desktop.destroy(e, ctx);
   });
 
   it("offers the same observation, action, and workspace contract across providers", async () => {
     const providers: SandboxProvider[] = [
       new FakeSandboxProvider(),
       new ManagedSandboxEmulator(),
+      new DaytonaSandboxEmulator(),
+      new BoxSandboxEmulator(),
       new DesktopSandboxProvider(),
     ];
     for (const [index, provider] of providers.entries()) {
-      const computer = await provider.provision(
+      const computer = await provisionPrepared(
+        provider,
         { botId: `portable-${index}`, homePath: `/tmp/portable-${index}` },
         ctx,
       );
+      await provider.prepare(computer, ctx);
       await provider.writeFile(
         computer,
         { path: "notes/result.txt", content: new TextEncoder().encode("portable") },

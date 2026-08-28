@@ -9,6 +9,10 @@ export NPM_CONFIG_PREFIX="$AGENT_HOME/.local"
 export PIP_USER=1
 cd "$AGENT_HOME"
 
+if [[ -n "${RAKAZO_COMPUTER_CONTROL_TOKEN:-}" ]]; then
+  /usr/local/bin/rakazo-computer-control >/tmp/rakazo/control.log 2>&1 &
+fi
+
 rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
 
 Xvfb :1 -screen 0 1280x800x24 -ac +extension RANDR +render -noreset >/tmp/rakazo/xvfb.log 2>&1 &
@@ -75,7 +79,7 @@ if [[ ! -f "$NOVNC_ROOT/embed.html" ]]; then
   echo "noVNC embed.html is missing from the computer image" >&2
   exit 1
 fi
-websockify --web="$NOVNC_ROOT" 0.0.0.0:6080 127.0.0.1:5900 >/tmp/rakazo/novnc.log 2>&1 &
+websockify --heartbeat=30 --web="$NOVNC_ROOT" 0.0.0.0:6080 127.0.0.1:5900 >/tmp/rakazo/novnc.log 2>&1 &
 
 while kill -0 "$XVFB_PID" 2>/dev/null; do
   sleep 2

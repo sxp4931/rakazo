@@ -1,6 +1,14 @@
+import {
+  BOT_DESCRIPTION_MAX_LENGTH,
+  BOT_NAME_MAX_LENGTH,
+  BOT_TITLE_MAX_LENGTH,
+  type ComputerMode,
+  normalizeCreateBotProfile,
+} from "@rakazo/contracts";
 import { Stack, useRouter } from "expo-router";
 import { useState } from "react";
 import { Pressable, ScrollView, Text, TextInput } from "react-native";
+import { ComputerModePicker } from "../components/computer-mode-picker";
 import { type MobileBot, rpc } from "../lib/api";
 
 export default function NewBot() {
@@ -8,6 +16,7 @@ export default function NewBot() {
   const [name, setName] = useState("");
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
+  const [computerMode, setComputerMode] = useState<ComputerMode>("team");
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
 
@@ -29,11 +38,9 @@ export default function NewBot() {
     setError(null);
     try {
       const bot = await rpc<MobileBot>("bots/create", {
-        name: name.trim(),
-        title,
-        description,
-        instructions: description,
+        ...normalizeCreateBotProfile({ name, title, description }),
         notifyOnFinish: true,
+        computerMode,
       });
       router.replace({ pathname: "/thread", params: { botId: bot.id, name: bot.name } });
     } catch (err) {
@@ -68,6 +75,7 @@ export default function NewBot() {
         <Text style={{ color: "#85858A", fontSize: 14 }}>Name</Text>
         <TextInput
           value={name}
+          maxLength={BOT_NAME_MAX_LENGTH}
           onChangeText={setName}
           placeholder="Name this bot"
           placeholderTextColor="#6C6C70"
@@ -82,6 +90,7 @@ export default function NewBot() {
         <Text style={{ color: "#85858A", marginTop: 16, fontSize: 14 }}>Title</Text>
         <TextInput
           value={title}
+          maxLength={BOT_TITLE_MAX_LENGTH}
           onChangeText={setTitle}
           placeholder="Describe what this bot does"
           placeholderTextColor="#6C6C70"
@@ -96,6 +105,7 @@ export default function NewBot() {
         <Text style={{ color: "#85858A", marginTop: 16, fontSize: 14 }}>Description</Text>
         <TextInput
           value={description}
+          maxLength={BOT_DESCRIPTION_MAX_LENGTH}
           onChangeText={setDescription}
           placeholder="What this bot is for"
           placeholderTextColor="#6C6C70"
@@ -110,6 +120,7 @@ export default function NewBot() {
             textAlignVertical: "top",
           }}
         />
+        <ComputerModePicker value={computerMode} onChange={setComputerMode} />
         {error ? <Text style={{ color: "#E65707", marginTop: 16 }}>{error}</Text> : null}
         <Pressable
           onPress={() => void create()}

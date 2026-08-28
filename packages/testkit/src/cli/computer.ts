@@ -1,9 +1,10 @@
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { loadRootEnv } from "@rakazo/core/node/load-root-env";
 import { PostgreSqlContainer } from "@testcontainers/postgresql";
+import { runProcess } from "./process.js";
 
 async function main() {
   loadRootEnv();
@@ -24,10 +25,13 @@ async function main() {
     AGENT_RUNTIME: "pi",
     BETTER_AUTH_SECRET: "computer-e2e-auth-secret-32chars",
     ENCRYPTION_KEY: "computer-e2e-encryption-key-32chars",
+    SANDBOX_SUPERVISOR_TOKEN: "computer-e2e-supervisor-token-32chars",
+    SCREEN_PROXY_SECRET: "computer-e2e-screen-proxy-secret-32chars",
     BETTER_AUTH_URL: "http://127.0.0.1:5173",
     WEB_ORIGIN: "http://127.0.0.1:5173",
     DATA_DIR: dataDir,
     SIGNUPS_ENABLED: "true",
+    SIGNUP_ALLOWLIST: "",
   };
   try {
     execFileSync("pnpm", ["--filter", "@rakazo/db", "generate"], {
@@ -39,7 +43,7 @@ async function main() {
       env,
       cwd: path.resolve("packages/db"),
     });
-    await run(
+    await runProcess(
       "pnpm",
       ["exec", "vitest", "run", "packages/testkit/src/computer-use.e2e.test.ts"],
       env,
@@ -48,17 +52,6 @@ async function main() {
     await database.stop().catch(() => undefined);
     await rm(dataDir, { recursive: true, force: true });
   }
-}
-
-function run(command: string, args: string[], env: NodeJS.ProcessEnv) {
-  return new Promise<void>((resolve, reject) => {
-    const child = spawn(command, args, { stdio: "inherit", env, shell: false });
-    child.on("error", reject);
-    child.on("exit", (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`${command} ${args.join(" ")} exited ${code}`));
-    });
-  });
 }
 
 main().catch((error) => {

@@ -1,4 +1,4 @@
-import type { SandboxKind } from "@rakazo/contracts";
+import type { ConnectionCatalogItem, SandboxKind } from "@rakazo/contracts";
 
 export interface AdapterContext {
   operationId: string;
@@ -7,8 +7,21 @@ export interface AdapterContext {
   userId: string;
   botId?: string;
   runId?: string;
+  /** Opaque fence for releasing a graphical screen without tearing down its replacement. */
+  screenLeaseId?: string;
   signal: AbortSignal;
+  /** Connected external accounts available to this run, including their owning connector. */
+  connectedConnections?: ConnectedConnector[];
+  /** @deprecated Prefer connectedConnections so providers with the same app slug cannot collide. */
   connectedProviders?: string[];
+}
+
+export interface ConnectedConnector {
+  id: string;
+  connectorId: string;
+  externalId: string;
+  displayName: string;
+  providerRef?: string;
 }
 
 export interface AdapterDescriptor<TCapabilities> {
@@ -149,12 +162,23 @@ export interface SandboxCapabilities {
   snapshots: boolean;
   takeover: boolean;
   persistentHome: boolean;
+  /** Distinct graphical screens for concurrent Team bots on one computer. */
+  multiScreen?: boolean;
 }
 
 export interface ConnectorTool {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
+  readOnly?: boolean;
+  /** In-process routing metadata. It is never exposed to the model. */
+  route?: ConnectorRoute;
+}
+
+export interface ConnectorRoute {
+  connectorId: string;
+  toolName: string;
+  resourceId?: string;
 }
 
 export interface ConnectorCall {
@@ -162,6 +186,7 @@ export interface ConnectorCall {
   args: Record<string, unknown>;
   connectionId?: string;
   executionId: string;
+  route?: ConnectorRoute;
 }
 
 export type ConnectorEvent =
@@ -174,6 +199,8 @@ export interface ConnectorCapabilities {
   oauth: boolean;
   secretsBrokered: boolean;
 }
+
+export type ConnectorCatalogItem = ConnectionCatalogItem;
 
 export interface MemoryReadRequest {
   scope: "bot" | "user";
@@ -230,6 +257,46 @@ export interface MemoryCapabilities {
   markdownPortable: boolean;
 }
 
+export type DurableMemoryScope = "isolated" | "shared";
+
+export interface SemanticMemoryCapabilities {
+  recall: true;
+  save: true;
+  purgeHistory: true;
+  sharedScope: true;
+}
+
+export interface SemanticMemoryResult {
+  memory: string;
+  score: number;
+  updatedAt?: string;
+}
+
+export type SemanticMemoryResponse<T = void> =
+  | { ok: true; value: T }
+  | { ok: false; error: string };
+
+export interface SemanticMemoryRecallRequest {
+  query: string;
+  scope: DurableMemoryScope;
+  botId: string;
+  /** Omit until a thread has compacted history; the provider can then skip that namespace. */
+  historyGeneration?: number;
+  limit: number;
+}
+
+export interface SemanticMemorySaveRequest {
+  content: string;
+  scope: DurableMemoryScope;
+  botId: string;
+  source: { kind: "durable" } | { kind: "history"; generation: number };
+}
+
+export interface SemanticMemoryPurgeHistoryRequest {
+  botId: string;
+  generations: number[];
+}
+
 export interface AgentRunRequest {
   botId: string;
   threadId: string;
@@ -237,11 +304,19 @@ export interface AgentRunRequest {
   prompt: string;
   instructions: string;
   history: Array<{ role: "user" | "assistant" | "system"; content: string }>;
+  currentTurnImages?: Array<{
+    name: string;
+    mimeType: "image/jpeg" | "image/png" | "image/webp" | "image/gif";
+    data: Uint8Array;
+  }>;
   tools: ConnectorTool[];
   model: {
     provider: string;
     id: string;
     apiKey?: string;
+    baseUrl?: string;
+    /** Preferred thinking effort for reasoning models; clamped to the model’s supported set. */
+    thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | null;
     /** In-process OAuth credential from the encrypted store for this run. */
     oauth?: {
       credential: AgentModelOAuthCredential;
@@ -250,10 +325,16 @@ export interface AgentRunRequest {
   };
   resumeFromCheckpoint?: string;
   script?: ScriptedTurn[];
+  /**
+   * Bot-message wakes may finish with no text and no tools (FYI silence).
+   * When set, skip synthetic empty-turn fallbacks.
+   */
+  allowSilentEmpty?: boolean;
   executeTool?: (
     name: string,
     args: Record<string, unknown>,
     executionId: string,
+    route?: ConnectorRoute,
   ) => Promise<unknown>;
 }
 
@@ -293,11 +374,49 @@ export interface AgentRuntimeCapabilities {
   scripted: boolean;
 }
 
+export interface VoiceInfo {
+  id: string;
+  label: string;
+  description?: string;
+}
+
+export interface SpeechClip {
+  bytes: Uint8Array;
+  mimeType: "audio/mpeg" | "audio/wav" | "audio/ogg";
+}
+
+export interface VoiceCapabilities {
+  catalog: boolean;
+  synthesize: boolean;
+  transcribe: boolean;
+}
+
+export interface VoiceVerifyResult {
+  ok: boolean;
+  message?: string;
+}
+
+export interface VoiceSynthesizeRequest {
+  text: string;
+  voiceId: string;
+  apiKey: string;
+  signal?: AbortSignal;
+}
+
+export interface VoiceTranscribeRequest {
+  audio: Uint8Array;
+  mimeType: string;
+  apiKey: string;
+  signal?: AbortSignal;
+}
+
 export interface BackgroundJobPayloads {
   "run.continue": { runId: string };
   "routine.wakeup": { routineId: string; scheduledFor: string };
-  "computer.sleep": { botId: string };
-  "computer.control-expire": { botId: string; leaseId: string };
+  "computer.sleep": { computerId: string };
+  "computer.control-expire": { computerId: string; leaseId: string };
+  "skill.teaching-expire": { skillId: string };
+  "history.compact": { threadId: string };
 }
 
 export type BackgroundJobName = keyof BackgroundJobPayloads;

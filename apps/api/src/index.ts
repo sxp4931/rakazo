@@ -1,3 +1,4 @@
+import type { Socket } from "node:net";
 import { loadRootEnv } from "@rakazo/core/node/load-root-env";
 
 loadRootEnv();
@@ -10,15 +11,33 @@ import { loadEnv } from "./env.js";
 const logger = createLogger("api");
 const env = loadEnv();
 const { app, stop } = await createApp(env);
-const server = serve({ fetch: app.fetch, port: env.port }, () => {
-  logger.info({ port: env.port, url: `http://127.0.0.1:${env.port}` }, "rakazo api listening");
+const server = serve({ fetch: app.fetch, port: env.port, hostname: env.apiHost }, () => {
+  logger.info(
+    { host: env.apiHost, port: env.port, url: `http://${env.apiHost}:${env.port}` },
+    "rakazo api listening",
+  );
+});
+
+// Long-lived connections (threads.subscribe SSE streams) never end on their
+// own, so server.close() alone waits forever for them. Track sockets and
+// force-close any still open after a short grace period for in-flight
+// requests, or every restart/shutdown hangs until something force-kills it.
+const sockets = new Set<Socket>();
+server.on("connection", (socket) => {
+  sockets.add(socket);
+  socket.once("close", () => sockets.delete(socket));
 });
 
 let stopping = false;
 const shutdown = async () => {
   if (stopping) return;
   stopping = true;
-  server.close();
+  const closed = new Promise<void>((resolve) => server.close(() => resolve()));
+  const grace = setTimeout(() => {
+    for (const socket of sockets) socket.destroy();
+  }, 2_000);
+  await closed;
+  clearTimeout(grace);
   await stop();
 };
 process.once("SIGTERM", () => void shutdown());

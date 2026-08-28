@@ -4,8 +4,10 @@ import { PostgreSqlContainer } from "@testcontainers/postgresql";
 
 async function main() {
   const runOpenRouter = Boolean(process.env.OPENROUTER_API_KEY);
-  if (!process.env.E2B_API_KEY && !runOpenRouter) {
-    throw new Error("E2B_API_KEY or OPENROUTER_API_KEY is required for live provider canaries");
+  if (!process.env.E2B_API_KEY && !process.env.BOX_API_KEY && !runOpenRouter) {
+    throw new Error(
+      "E2B_API_KEY, BOX_API_KEY, or OPENROUTER_API_KEY is required for live provider canaries",
+    );
   }
 
   const postgres = runOpenRouter
@@ -18,9 +20,12 @@ async function main() {
       VERIFY_PROVIDERS: "1",
       BETTER_AUTH_SECRET: "provider-canary-auth-secret-at-least-32-characters",
       ENCRYPTION_KEY: "provider-canary-encryption-key-at-least-32-characters",
+      SANDBOX_SUPERVISOR_TOKEN: "provider-canary-supervisor-token-at-least-32-characters",
+      SCREEN_PROXY_SECRET: "provider-canary-screen-proxy-secret-at-least-32-characters",
       BETTER_AUTH_URL: "http://127.0.0.1:5173",
       WEB_ORIGIN: "http://127.0.0.1:5173",
       SIGNUPS_ENABLED: "true",
+      SIGNUP_ALLOWLIST: "",
       DATA_DIR: path.resolve("test-report/canary/data"),
     };
     if (postgres) {

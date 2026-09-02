@@ -509,7 +509,7 @@ export function PluginsOverlay({
                   ) : null}
                   <p className="text-xs leading-5 text-[#707077]">
                     <Trans>
-                      Rakazo verifies the source before saving it. Credentials are encrypted and are
+                      OtterBot verifies the source before saving it. Credentials are encrypted and are
                       never returned to clients or exposed to the model.
                     </Trans>
                   </p>

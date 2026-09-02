@@ -27,7 +27,7 @@
   },
   "build": {
     "appId": "dev.rakazo.desktop",
-    "productName": "Rakazo",
+    "productName": "OtterBot",
     "directories": {
       "output": "out",
       "buildResources": "assets"

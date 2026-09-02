@@ -73,7 +73,7 @@ export function classifyUpdaterFailure(error: unknown): UpdaterFailure {
   if (SIGNATURE.some((needle) => text.includes(needle))) {
     return {
       kind: "signature",
-      message: "This update could not be verified. Reinstall Rakazo from a trusted download.",
+      message: "This update could not be verified. Reinstall OtterBot from a trusted download.",
     };
   }
   return {
@@ -142,7 +142,7 @@ export function reduceUpdateState(
         phase: "ready",
         availableVersion: event.version,
         percent: 100,
-        message: "Restart Rakazo to finish the update.",
+        message: "Restart OtterBot to finish the update.",
       };
     case "failed": {
       // electron-updater can emit late errors after a verified download; keep installable

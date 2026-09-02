@@ -1,9 +1,9 @@
-# Set up Rakazo with a coding agent
+# Set up OtterBot with a coding agent
 
 Copy the prompt below into a coding agent. It sets up the local web app first; Electron is an optional final step.
 
 ```text
-Set up Rakazo locally and leave it running in a usable state.
+Set up OtterBot locally and leave it running in a usable state.
 
 Repository: https://github.com/elie222/rakazo.git
 
@@ -19,10 +19,10 @@ Safety rules:
 
 Before making changes, ask me these concise questions:
 
-1. Should you clone into the current directory, or what parent directory should contain `rakazo`? If you are already inside a Rakazo checkout, offer to use it without recloning.
+1. Should you clone into the current directory, or what parent directory should contain `rakazo`? If you are already inside an OtterBot checkout, offer to use it without recloning.
 2. How should models be connected?
    - Add a deployment-wide `OPENROUTER_API_KEY` to `.env`.
-   - Connect during Rakazo onboarding with a provider API key or with ChatGPT Plus/Pro, GitHub Copilot, or SuperGrok / X Premium.
+   - Connect during OtterBot onboarding with a provider API key or with ChatGPT Plus/Pro, GitHub Copilot, or SuperGrok / X Premium.
    - Defer model setup and verify infrastructure only. Make clear that bots cannot answer until a model is connected.
 3. Do I want a managed app catalog? If yes, choose Composio (`COMPOSIO_API_KEY`) or Pipedream Connect (`PIPEDREAM_CLIENT_ID`, `PIPEDREAM_CLIENT_SECRET`, and `PIPEDREAM_PROJECT_ID`); otherwise leave them empty. Explain that this is optional and that users can still add Treg, HTTPS MCP, or OpenAPI sources in the app.
 4. Set up the web app only (recommended), or also launch the Electron desktop shell after the web stack works?

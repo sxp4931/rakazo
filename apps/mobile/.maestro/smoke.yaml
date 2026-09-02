@@ -1,10 +1,10 @@
 appId: com.rakazo.app
-name: Rakazo mobile smoke
+name: OtterBot mobile smoke
 ---
 - launchApp:
     clearState: true
 
-- assertVisible: "Sign in to Rakazo"
+- assertVisible: "Sign in to OtterBot"
 - tapOn: "Email"
 - inputText: ${RAKAZO_E2E_EMAIL}
 - tapOn: "Password"

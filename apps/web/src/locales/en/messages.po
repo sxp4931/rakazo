@@ -522,8 +522,8 @@ msgid "Choose a model to get started."
 msgstr "Choose a model to get started."
 
 #: src/pages/ModelSettingsOverlay.tsx:310
-msgid "Choose which connected model Rakazo uses."
-msgstr "Choose which connected model Rakazo uses."
+msgid "Choose which connected model OtterBot uses."
+msgstr "Choose which connected model OtterBot uses."
 
 #: src/pages/Shell.tsx:4948
 msgid "Clear"
@@ -989,8 +989,8 @@ msgid "Create your first bot"
 msgstr "Create your first bot"
 
 #: src/pages/Auth.tsx:15
-msgid "Create your Rakazo"
-msgstr "Create your Rakazo"
+msgid "Create your OtterBot"
+msgstr "Create your OtterBot"
 
 #: src/pages/GroupPanel.tsx:134
 #: src/pages/Shell.tsx:4436
@@ -1863,8 +1863,8 @@ msgstr "Paste a replacement key"
 
 #: src/pages/ModelSettingsOverlay.tsx:416
 #: src/pages/Onboarding.tsx:280
-msgid "Paste the OpenAI-compatible address from your server. Rakazo adds /v1 if needed."
-msgstr "Paste the OpenAI-compatible address from your server. Rakazo adds /v1 if needed."
+msgid "Paste the OpenAI-compatible address from your server. OtterBot adds /v1 if needed."
+msgstr "Paste the OpenAI-compatible address from your server. OtterBot adds /v1 if needed."
 
 #: src/pages/VoiceSettingsOverlay.tsx:242
 msgid "Paste your API key"
@@ -1910,8 +1910,8 @@ msgid "Queued"
 msgstr "Queued"
 
 #: src/pages/PluginsOverlay.tsx:511
-msgid "Rakazo verifies the source before saving it. Credentials are encrypted and are never returned to clients or exposed to the model."
-msgstr "Rakazo verifies the source before saving it. Credentials are encrypted and are never returned to clients or exposed to the model."
+msgid "OtterBot verifies the source before saving it. Credentials are encrypted and are never returned to clients or exposed to the model."
+msgstr "OtterBot verifies the source before saving it. Credentials are encrypted and are never returned to clients or exposed to the model."
 
 #: src/pages/Shell.tsx:4684
 msgid "Read replies aloud"
@@ -2044,8 +2044,8 @@ msgid "Retry now"
 msgstr "Retry now"
 
 #: src/pages/McpOAuthCallback.tsx:65
-msgid "Return to Rakazo"
-msgstr "Return to Rakazo"
+msgid "Return to OtterBot"
+msgstr "Return to OtterBot"
 
 #: src/pages/AccountSettingsOverlay.tsx:157
 msgid "Robot"
@@ -2228,8 +2228,8 @@ msgid "Sign in  →"
 msgstr "Sign in  →"
 
 #: src/pages/Auth.tsx:15
-msgid "Sign in to Rakazo"
-msgstr "Sign in to Rakazo"
+msgid "Sign in to OtterBot"
+msgstr "Sign in to OtterBot"
 
 #: src/pages/Auth.tsx:107
 msgid "Sign up"
@@ -2441,8 +2441,8 @@ msgid "This server uses browser sign-in. Authorize it to let your agents use its
 msgstr "This server uses browser sign-in. Authorize it to let your agents use its tools — a popup will open."
 
 #: src/pages/ModelSettingsOverlay.tsx:687
-msgid "This subscription sign-in is not available in Rakazo yet. Use a deployment credential or choose another provider."
-msgstr "This subscription sign-in is not available in Rakazo yet. Use a deployment credential or choose another provider."
+msgid "This subscription sign-in is not available in OtterBot yet. Use a deployment credential or choose another provider."
+msgstr "This subscription sign-in is not available in OtterBot yet. Use a deployment credential or choose another provider."
 
 #: src/pages/RoutineSchedule.tsx:206
 msgid "Time of day"

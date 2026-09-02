@@ -1,15 +1,15 @@
-# Rakazo
+# OtterBot
 
 [![GitHub stars](https://img.shields.io/github/stars/elie222/rakazo?labelColor=black&style=for-the-badge&color=2563EB)](https://github.com/elie222/rakazo/stargazers)
 [![Discord](https://img.shields.io/badge/Discord-Join%20the%20community-5865F2?labelColor=black&style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/RWwKa2Sn7h)
 
-![Rakazo — AI teammates you actually own](./docs/readme-hero.png)
+![OtterBot — AI teammates you actually own](./docs/readme-hero.png)
 
-Rakazo is an open-source platform for running persistent AI teammates. It is available on the web,
+OtterBot is an open-source platform for running persistent AI teammates. It is available on the web,
 as an Electron desktop app, and through an Expo mobile app. Bring your own model and computer
 provider, or run the complete stack locally.
 
-Rakazo is in beta. Learn more at [rakazo.com](https://rakazo.com).
+OtterBot is in beta. Learn more at [rakazo.com](https://rakazo.com).
 
 ## Features
 
@@ -97,7 +97,7 @@ Details and tag choices: [self-hosting guide](./docs/self-host.md#published-imag
 
 ## Desktop and mobile
 
-The Electron and Expo apps are clients of the same Rakazo API used by the web app.
+The Electron and Expo apps are clients of the same OtterBot API used by the web app.
 
 With the development stack running, launch Electron with:
 
@@ -105,12 +105,12 @@ With the development stack running, launch Electron with:
 pnpm --filter @rakazo/desktop dev
 ```
 
-On first run the desktop app asks whether to use the Rakazo stack on this computer
+On first run the desktop app asks whether to use the OtterBot stack on this computer
 (`http://127.0.0.1:5173`) or connect to an existing server. Public servers must use HTTPS; HTTP is
-accepted only for loopback and private LAN addresses (not link-local). The app verifies Rakazo's
+accepted only for loopback and private LAN addresses (not link-local). The app verifies OtterBot's
 health endpoint before saving, and later launches go straight to that instance.
 
-Use **Change Rakazo Server…** in the application menu to reconnect. Closing that window without
+Use **Change OtterBot Server…** in the application menu to reconnect. Closing that window without
 saving returns to the previous instance. For development automation, set `RAKAZO_WEB_URL` to point
 the shell somewhere else without changing the saved instance, or `RAKAZO_FORCE_SETUP=1` to run
 setup again.
@@ -125,7 +125,7 @@ footer language links (`/`, `/de/`, `/ko/`); other marketing pages stay English.
 
 ## Development
 
-Rakazo is a TypeScript monorepo built with React, Electron, Expo, Hono, Postgres, Prisma, Graphile
+OtterBot is a TypeScript monorepo built with React, Electron, Expo, Hono, Postgres, Prisma, Graphile
 Worker, and Pi.
 
 ```text
@@ -176,6 +176,6 @@ Contributions are welcome. Please read [CONTRIBUTING.md](./CONTRIBUTING.md) befo
 request. For security vulnerabilities, follow [SECURITY.md](./SECURITY.md) instead of filing a public
 issue.
 
-Rakazo is licensed under the [Apache License 2.0](./LICENSE).
+OtterBot is licensed under the [Apache License 2.0](./LICENSE).
 
-Questions and ideas are welcome in the [Rakazo Discord community](https://discord.gg/RWwKa2Sn7h).
+Questions and ideas are welcome in the [OtterBot Discord community](https://discord.gg/RWwKa2Sn7h).

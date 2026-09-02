@@ -197,10 +197,10 @@ const KO_ROSTER: RosterBot[] = [
 
 const HOME_COPY: Record<Locale, HomeCopy> = {
   en: {
-    title: "Rakazo | Open source Grok Bot alternative",
+    title: "OtterBot | Open source Grok Bot alternative",
     description: SITE_DESCRIPTION,
     ogImageAlt:
-      "Rakazo — AI teammates you actually own. Your keys, your model, your machine.",
+      "OtterBot — AI teammates you actually own. Your keys, your model, your machine.",
     availableLanguage: "English",
     skipToContent: "Skip to content",
     starFallback: "Star",
@@ -218,7 +218,7 @@ const HOME_COPY: Record<Locale, HomeCopy> = {
       badge: "Apache-2.0",
       pill: "Self-hosted",
       heading: "AI teammates you actually own",
-      lead: "Rakazo is an open source Grok Bot alternative. Give a bot real work. It signs in to your tools, uses them the way you do, and comes back when it needs you.",
+      lead: "OtterBot is an open source Grok Bot alternative. Give a bot real work. It signs in to your tools, uses them the way you do, and comes back when it needs you.",
       getStarted: "Get started",
       viewOnGithub: "View on GitHub",
       setupWithAgent: "Set up with your agent",
@@ -253,7 +253,7 @@ const HOME_COPY: Record<Locale, HomeCopy> = {
     openSource: {
       eyebrow: "Open source",
       heading: "No pricing page. Just the repo.",
-      copy: "Rakazo is Apache-2.0 licensed and runs on your own machine with your own model keys. Nothing is gated, nothing phones home.",
+      copy: "OtterBot is Apache-2.0 licensed and runs on your own machine with your own model keys. Nothing is gated, nothing phones home.",
       selfHostTitle: "Self-host",
       selfHostMeta: "Available today",
       selfHostItems: [
@@ -277,7 +277,7 @@ const HOME_COPY: Record<Locale, HomeCopy> = {
     },
     cta: {
       heading: "Meet your first bot",
-      copy: "Give Rakazo something you have been putting off and let it handle the follow-through.",
+      copy: "Give OtterBot something you have been putting off and let it handle the follow-through.",
       getStarted: "Get started",
       viewOnGithub: "View on GitHub",
       openSourceValue: "Open source",
@@ -291,12 +291,12 @@ const HOME_COPY: Record<Locale, HomeCopy> = {
     },
     getStartedDialog: {
       closeLabel: "Close get started dialog",
-      eyebrow: "Rakazo Cloud",
-      title: "Get started with Rakazo",
+      eyebrow: "OtterBot Cloud",
+      title: "Get started with OtterBot",
       copy: "Leave your email and we’ll let you know when your hosted workspace is ready.",
       successTitle: "You’re in.",
       successCopy:
-        "We’ll email you when hosted Rakazo is ready. Want to start today? Rakazo is already available on GitHub.",
+        "We’ll email you when hosted OtterBot is ready. Want to start today? OtterBot is already available on GitHub.",
       done: "Done",
       viewOnGithub: "View on GitHub",
     },
@@ -315,11 +315,11 @@ const HOME_COPY: Record<Locale, HomeCopy> = {
     },
   },
   de: {
-    title: "Rakazo | Open-Source-Alternative zu Grok Bot",
+    title: "OtterBot | Open-Source-Alternative zu Grok Bot",
     description:
-      "Rakazo ist eine Open-Source-Alternative zu Grok Bot für persistente KI-Teamkollegen, die echte Arbeit erledigen. Deine Keys, dein Modell, deine Maschine.",
+      "OtterBot ist eine Open-Source-Alternative zu Grok Bot für persistente KI-Teamkollegen, die echte Arbeit erledigen. Deine Keys, dein Modell, deine Maschine.",
     ogImageAlt:
-      "Rakazo — KI-Teamkollegen, die dir wirklich gehören. Deine Keys, dein Modell, deine Maschine.",
+      "OtterBot — KI-Teamkollegen, die dir wirklich gehören. Deine Keys, dein Modell, deine Maschine.",
     availableLanguage: "German",
     skipToContent: "Zum Inhalt springen",
     starFallback: "Star",
@@ -337,7 +337,7 @@ const HOME_COPY: Record<Locale, HomeCopy> = {
       badge: "Apache-2.0",
       pill: "Self-hosted",
       heading: "KI-Teamkollegen, die dir wirklich gehören",
-      lead: "Rakazo ist eine Open-Source-Alternative zu Grok Bot. Gib einem Bot echte Arbeit. Er meldet sich in deinen Tools an, nutzt sie wie du — und kommt zurück, wenn er dich braucht.",
+      lead: "OtterBot ist eine Open-Source-Alternative zu Grok Bot. Gib einem Bot echte Arbeit. Er meldet sich in deinen Tools an, nutzt sie wie du — und kommt zurück, wenn er dich braucht.",
       getStarted: "Loslegen",
       viewOnGithub: "Auf GitHub ansehen",
       setupWithAgent: "Mit deinem Agenten einrichten",
@@ -372,7 +372,7 @@ const HOME_COPY: Record<Locale, HomeCopy> = {
     openSource: {
       eyebrow: "Open Source",
       heading: "Keine Preisseite. Nur das Repo.",
-      copy: "Rakazo ist Apache-2.0-lizenziert und läuft auf deiner Maschine mit deinen Model-Keys. Nichts ist freigeschaltet, nichts telefoniert nach Hause.",
+      copy: "OtterBot ist Apache-2.0-lizenziert und läuft auf deiner Maschine mit deinen Model-Keys. Nichts ist freigeschaltet, nichts telefoniert nach Hause.",
       selfHostTitle: "Self-host",
       selfHostMeta: "Heute verfügbar",
       selfHostItems: [
@@ -396,7 +396,7 @@ const HOME_COPY: Record<Locale, HomeCopy> = {
     },
     cta: {
       heading: "Triff deinen ersten Bot",
-      copy: "Gib Rakazo etwas, das du aufgeschoben hast — und lass es den Follow-through übernehmen.",
+      copy: "Gib OtterBot etwas, das du aufgeschoben hast — und lass es den Follow-through übernehmen.",
       getStarted: "Loslegen",
       viewOnGithub: "Auf GitHub ansehen",
       openSourceValue: "Open Source",
@@ -410,12 +410,12 @@ const HOME_COPY: Record<Locale, HomeCopy> = {
     },
     getStartedDialog: {
       closeLabel: "Loslegen-Dialog schließen",
-      eyebrow: "Rakazo Cloud",
-      title: "Mit Rakazo loslegen",
+      eyebrow: "OtterBot Cloud",
+      title: "Mit OtterBot loslegen",
       copy: "Hinterlasse deine E-Mail — wir melden uns, wenn dein gehosteter Workspace bereit ist.",
       successTitle: "Du bist dabei.",
       successCopy:
-        "Wir mailen dir, wenn gehostetes Rakazo bereit ist. Heute starten? Rakazo ist schon auf GitHub verfügbar.",
+        "Wir mailen dir, wenn gehostetes OtterBot bereit ist. Heute starten? OtterBot ist schon auf GitHub verfügbar.",
       done: "Fertig",
       viewOnGithub: "Auf GitHub ansehen",
     },
@@ -434,10 +434,10 @@ const HOME_COPY: Record<Locale, HomeCopy> = {
     },
   },
   ko: {
-    title: "Rakazo | 오픈소스 Grok Bot 대안",
+    title: "OtterBot | 오픈소스 Grok Bot 대안",
     description:
-      "Rakazo는 실제 업무를 수행하는 지속형 AI 팀원을 위한 오픈소스 Grok Bot 대안입니다. 키, 모델, 머신 — 모두 당신 것.",
-    ogImageAlt: "Rakazo — 진짜로 내 것인 AI 팀원. 키, 모델, 머신 — 모두 당신 것.",
+      "OtterBot는 실제 업무를 수행하는 지속형 AI 팀원을 위한 오픈소스 Grok Bot 대안입니다. 키, 모델, 머신 — 모두 당신 것.",
+    ogImageAlt: "OtterBot — 진짜로 내 것인 AI 팀원. 키, 모델, 머신 — 모두 당신 것.",
     availableLanguage: "Korean",
     skipToContent: "본문으로 건너뛰기",
     starFallback: "Star",
@@ -455,7 +455,7 @@ const HOME_COPY: Record<Locale, HomeCopy> = {
       badge: "Apache-2.0",
       pill: "셀프 호스트",
       heading: "진짜로 내 것인 AI 팀원",
-      lead: "Rakazo는 오픈소스 Grok Bot 대안입니다. 봇에게 실제 업무를 맡기세요. 봇이 도구에 로그인하고, 당신처럼 사용하며, 필요할 때 돌아와 묻습니다.",
+      lead: "OtterBot는 오픈소스 Grok Bot 대안입니다. 봇에게 실제 업무를 맡기세요. 봇이 도구에 로그인하고, 당신처럼 사용하며, 필요할 때 돌아와 묻습니다.",
       getStarted: "시작하기",
       viewOnGithub: "GitHub에서 보기",
       setupWithAgent: "에이전트로 설정하기",
@@ -490,7 +490,7 @@ const HOME_COPY: Record<Locale, HomeCopy> = {
     openSource: {
       eyebrow: "오픈소스",
       heading: "가격 페이지 없음. 리포만.",
-      copy: "Rakazo는 Apache-2.0 라이선스이며, 당신 머신에서 당신 모델 키로 실행됩니다. 잠긴 기능도, 외부로 연락하는 것도 없습니다.",
+      copy: "OtterBot는 Apache-2.0 라이선스이며, 당신 머신에서 당신 모델 키로 실행됩니다. 잠긴 기능도, 외부로 연락하는 것도 없습니다.",
       selfHostTitle: "셀프 호스트",
       selfHostMeta: "지금 사용 가능",
       selfHostItems: [
@@ -514,7 +514,7 @@ const HOME_COPY: Record<Locale, HomeCopy> = {
     },
     cta: {
       heading: "첫 봇을 만나보세요",
-      copy: "미뤄 두었던 일을 Rakazo에 맡기고, 후속까지 맡기세요.",
+      copy: "미뤄 두었던 일을 OtterBot에 맡기고, 후속까지 맡기세요.",
       getStarted: "시작하기",
       viewOnGithub: "GitHub에서 보기",
       openSourceValue: "오픈소스",
@@ -528,12 +528,12 @@ const HOME_COPY: Record<Locale, HomeCopy> = {
     },
     getStartedDialog: {
       closeLabel: "시작하기 대화상자 닫기",
-      eyebrow: "Rakazo Cloud",
-      title: "Rakazo 시작하기",
+      eyebrow: "OtterBot Cloud",
+      title: "OtterBot 시작하기",
       copy: "이메일을 남겨 주세요. 호스팅 워크스페이스가 준비되면 알려 드립니다.",
       successTitle: "등록되었습니다.",
       successCopy:
-        "호스팅 Rakazo가 준비되면 메일로 알려 드립니다. 오늘 시작하려면? Rakazo는 이미 GitHub에서 사용할 수 있습니다.",
+        "호스팅 OtterBot가 준비되면 메일로 알려 드립니다. 오늘 시작하려면? OtterBot는 이미 GitHub에서 사용할 수 있습니다.",
       done: "완료",
       viewOnGithub: "GitHub에서 보기",
     },

@@ -69,7 +69,7 @@ export async function probeApiBase(
       error?: { message?: string };
     };
     if (!res.ok || body.error || body.json?.ok !== true) {
-      return { ok: false, error: "That URL did not look like a Rakazo server" };
+      return { ok: false, error: "That URL did not look like an OtterBot server" };
     }
     return parsed;
   } catch {

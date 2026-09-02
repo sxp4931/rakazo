@@ -522,8 +522,8 @@ msgid "Choose a model to get started."
 msgstr "शुरू करने के लिए एक मॉडल चुनें।"
 
 #: src/pages/ModelSettingsOverlay.tsx:310
-msgid "Choose which connected model Rakazo uses."
-msgstr "चुनें कि Rakazo किस कनेक्टेड मॉडल का उपयोग करे।"
+msgid "Choose which connected model OtterBot uses."
+msgstr "चुनें कि OtterBot किस कनेक्टेड मॉडल का उपयोग करे।"
 
 #: src/pages/Shell.tsx:4948
 msgid "Clear"
@@ -989,8 +989,8 @@ msgid "Create your first bot"
 msgstr "अपना पहला बॉट बनाएं"
 
 #: src/pages/Auth.tsx:15
-msgid "Create your Rakazo"
-msgstr "अपना Rakazo बनाएं"
+msgid "Create your OtterBot"
+msgstr "अपना OtterBot बनाएं"
 
 #: src/pages/GroupPanel.tsx:134
 #: src/pages/Shell.tsx:4436
@@ -1863,8 +1863,8 @@ msgstr "बदलने के लिए नई कुंजी पेस्ट 
 
 #: src/pages/ModelSettingsOverlay.tsx:416
 #: src/pages/Onboarding.tsx:280
-msgid "Paste the OpenAI-compatible address from your server. Rakazo adds /v1 if needed."
-msgstr "अपने सर्वर से OpenAI-संगत पता पेस्ट करें। ज़रूरत होने पर Rakazo /v1 जोड़ देता है।"
+msgid "Paste the OpenAI-compatible address from your server. OtterBot adds /v1 if needed."
+msgstr "अपने सर्वर से OpenAI-संगत पता पेस्ट करें। ज़रूरत होने पर OtterBot /v1 जोड़ देता है।"
 
 #: src/pages/VoiceSettingsOverlay.tsx:242
 msgid "Paste your API key"
@@ -1910,8 +1910,8 @@ msgid "Queued"
 msgstr "कतार में"
 
 #: src/pages/PluginsOverlay.tsx:511
-msgid "Rakazo verifies the source before saving it. Credentials are encrypted and are never returned to clients or exposed to the model."
-msgstr "Rakazo सहेजने से पहले स्रोत की पुष्टि करता है। क्रेडेंशियल एन्क्रिप्टेड होते हैं और कभी क्लाइंट को नहीं लौटाए जाते, न ही मॉडल को दिखाए जाते हैं।"
+msgid "OtterBot verifies the source before saving it. Credentials are encrypted and are never returned to clients or exposed to the model."
+msgstr "OtterBot सहेजने से पहले स्रोत की पुष्टि करता है। क्रेडेंशियल एन्क्रिप्टेड होते हैं और कभी क्लाइंट को नहीं लौटाए जाते, न ही मॉडल को दिखाए जाते हैं।"
 
 #: src/pages/Shell.tsx:4684
 msgid "Read replies aloud"
@@ -2044,8 +2044,8 @@ msgid "Retry now"
 msgstr "अभी पुनः प्रयास करें"
 
 #: src/pages/McpOAuthCallback.tsx:65
-msgid "Return to Rakazo"
-msgstr "Rakazo पर लौटें"
+msgid "Return to OtterBot"
+msgstr "OtterBot पर लौटें"
 
 #: src/pages/AccountSettingsOverlay.tsx:157
 msgid "Robot"
@@ -2228,8 +2228,8 @@ msgid "Sign in  →"
 msgstr "साइन इन करें  →"
 
 #: src/pages/Auth.tsx:15
-msgid "Sign in to Rakazo"
-msgstr "Rakazo में साइन इन करें"
+msgid "Sign in to OtterBot"
+msgstr "OtterBot में साइन इन करें"
 
 #: src/pages/Auth.tsx:107
 msgid "Sign up"
@@ -2441,8 +2441,8 @@ msgid "This server uses browser sign-in. Authorize it to let your agents use its
 msgstr "यह सर्वर ब्राउज़र साइन-इन का उपयोग करता है। अपने एजेंट को इसके टूल उपयोग करने देने के लिए इसे ऑथराइज़ करें — एक पॉपअप खुलेगा।"
 
 #: src/pages/ModelSettingsOverlay.tsx:687
-msgid "This subscription sign-in is not available in Rakazo yet. Use a deployment credential or choose another provider."
-msgstr "यह सब्सक्रिप्शन साइन-इन अभी Rakazo में उपलब्ध नहीं है। किसी डिप्लॉयमेंट क्रेडेंशियल का उपयोग करें या दूसरा प्रोवाइडर चुनें।"
+msgid "This subscription sign-in is not available in OtterBot yet. Use a deployment credential or choose another provider."
+msgstr "यह सब्सक्रिप्शन साइन-इन अभी OtterBot में उपलब्ध नहीं है। किसी डिप्लॉयमेंट क्रेडेंशियल का उपयोग करें या दूसरा प्रोवाइडर चुनें।"
 
 #: src/pages/RoutineSchedule.tsx:206
 msgid "Time of day"

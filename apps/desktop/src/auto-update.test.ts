@@ -121,7 +121,7 @@ describe("reduceUpdateState", () => {
       availableVersion: "0.2.0",
       percent: 100,
     });
-    expect(state.message).toContain("Restart Rakazo");
+    expect(state.message).toContain("Restart OtterBot");
   });
 
   it("clamps progress to a percentage while downloading", () => {

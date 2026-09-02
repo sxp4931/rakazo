@@ -15,7 +15,7 @@ export function WelcomePage() {
             <span className="h-6 w-[11px] rounded-full bg-[#101012]" />
             <span className="h-6 w-[11px] rounded-full bg-[#101012]" />
           </div>
-          <div className="text-[76px] leading-none tracking-[-0.03em] text-white">Rakazo</div>
+          <div className="text-[76px] leading-none tracking-[-0.03em] text-white">OtterBot</div>
         </div>
         <p className="max-w-[600px] text-center text-[27px] leading-[1.4] text-[#E4E4E6]">
           <Trans>

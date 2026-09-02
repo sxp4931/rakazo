@@ -277,7 +277,7 @@ export function OnboardingPage() {
                       <Trans>Setup help</Trans>
                     </summary>
                     <p className="mt-1">
-                      {t`Paste the OpenAI-compatible address from your server. Rakazo adds /v1 if needed.`}
+                      {t`Paste the OpenAI-compatible address from your server. OtterBot adds /v1 if needed.`}
                     </p>
                   </details>
                   <div className="mt-3">

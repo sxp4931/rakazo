@@ -522,8 +522,8 @@ msgid "Choose a model to get started."
 msgstr "Wähle zunächst ein Modell aus."
 
 #: src/pages/ModelSettingsOverlay.tsx:310
-msgid "Choose which connected model Rakazo uses."
-msgstr "Wähle das verbundene Modell aus, das Rakazo verwendet."
+msgid "Choose which connected model OtterBot uses."
+msgstr "Wähle das verbundene Modell aus, das OtterBot verwendet."
 
 #: src/pages/Shell.tsx:4948
 msgid "Clear"
@@ -989,8 +989,8 @@ msgid "Create your first bot"
 msgstr "Ersten Bot erstellen"
 
 #: src/pages/Auth.tsx:15
-msgid "Create your Rakazo"
-msgstr "Dein Rakazo erstellen"
+msgid "Create your OtterBot"
+msgstr "Dein OtterBot erstellen"
 
 #: src/pages/GroupPanel.tsx:134
 #: src/pages/Shell.tsx:4436
@@ -1863,8 +1863,8 @@ msgstr "Ersatzschlüssel einfügen"
 
 #: src/pages/ModelSettingsOverlay.tsx:416
 #: src/pages/Onboarding.tsx:280
-msgid "Paste the OpenAI-compatible address from your server. Rakazo adds /v1 if needed."
-msgstr "Füge die OpenAI-kompatible Adresse deines Servers ein. Rakazo ergänzt /v1 bei Bedarf."
+msgid "Paste the OpenAI-compatible address from your server. OtterBot adds /v1 if needed."
+msgstr "Füge die OpenAI-kompatible Adresse deines Servers ein. OtterBot ergänzt /v1 bei Bedarf."
 
 #: src/pages/VoiceSettingsOverlay.tsx:242
 msgid "Paste your API key"
@@ -1910,8 +1910,8 @@ msgid "Queued"
 msgstr "In Warteschlange"
 
 #: src/pages/PluginsOverlay.tsx:511
-msgid "Rakazo verifies the source before saving it. Credentials are encrypted and are never returned to clients or exposed to the model."
-msgstr "Rakazo prüft die Quelle vor dem Speichern. Zugangsdaten werden verschlüsselt und weder an Clients zurückgegeben noch dem Modell zugänglich gemacht."
+msgid "OtterBot verifies the source before saving it. Credentials are encrypted and are never returned to clients or exposed to the model."
+msgstr "OtterBot prüft die Quelle vor dem Speichern. Zugangsdaten werden verschlüsselt und weder an Clients zurückgegeben noch dem Modell zugänglich gemacht."
 
 #: src/pages/Shell.tsx:4684
 msgid "Read replies aloud"
@@ -2044,8 +2044,8 @@ msgid "Retry now"
 msgstr "Jetzt erneut versuchen"
 
 #: src/pages/McpOAuthCallback.tsx:65
-msgid "Return to Rakazo"
-msgstr "Zurück zu Rakazo"
+msgid "Return to OtterBot"
+msgstr "Zurück zu OtterBot"
 
 #: src/pages/AccountSettingsOverlay.tsx:157
 msgid "Robot"
@@ -2228,8 +2228,8 @@ msgid "Sign in  →"
 msgstr "Anmelden  →"
 
 #: src/pages/Auth.tsx:15
-msgid "Sign in to Rakazo"
-msgstr "Bei Rakazo anmelden"
+msgid "Sign in to OtterBot"
+msgstr "Bei OtterBot anmelden"
 
 #: src/pages/Auth.tsx:107
 msgid "Sign up"
@@ -2441,8 +2441,8 @@ msgid "This server uses browser sign-in. Authorize it to let your agents use its
 msgstr "Dieser Server verwendet die Browseranmeldung. Autorisiere ihn, damit deine Agents seine Tools verwenden können – ein Pop-up wird geöffnet."
 
 #: src/pages/ModelSettingsOverlay.tsx:687
-msgid "This subscription sign-in is not available in Rakazo yet. Use a deployment credential or choose another provider."
-msgstr "Diese Abonnementanmeldung ist in Rakazo noch nicht verfügbar. Verwende Zugangsdaten der Bereitstellung oder wähle einen anderen Anbieter."
+msgid "This subscription sign-in is not available in OtterBot yet. Use a deployment credential or choose another provider."
+msgstr "Diese Abonnementanmeldung ist in OtterBot noch nicht verfügbar. Verwende Zugangsdaten der Bereitstellung oder wähle einen anderen Anbieter."
 
 #: src/pages/RoutineSchedule.tsx:206
 msgid "Time of day"

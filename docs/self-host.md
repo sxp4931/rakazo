@@ -1,4 +1,4 @@
-# Self-hosting Rakazo
+# Self-hosting OtterBot
 
 The signed-in product is a long-running API, a Graphile Worker, Postgres, and a computer provider (Docker supervisor, E2B, Daytona, or Box). It is not a static site. The marketing site in `apps/www` can be hosted separately.
 
@@ -87,15 +87,15 @@ RAKAZO_LOCAL_CONTEXT_WINDOW=32768
 RAKAZO_LOCAL_MAX_TOKENS=4096
 ```
 
-The loopback default is suitable when running Rakazo from a source checkout. In Docker Compose,
+The loopback default is suitable when running OtterBot from a source checkout. In Docker Compose,
 use the model server's Compose service name or another address reachable from the containers.
 Only configure an endpoint you control: prompts, attachments, and tool results sent to that model
-leave Rakazo through this URL. Leave `RAKAZO_LOCAL_MODELS` blank to disable the provider.
+leave OtterBot through this URL. Leave `RAKAZO_LOCAL_MODELS` blank to disable the provider.
 
 Each user can also connect their own OpenAI-compatible endpoint from **Connect a model** /
 **Settings → Models** on web and mobile. Choose **OpenAI-compatible**, enter the server base URL
 (for example `http://127.0.0.1:8000/v1` for Rapid-MLX, Ollama, LM Studio, llama.cpp, or vLLM),
-the exact model id from that server, and an optional API key. By default Rakazo only allows
+the exact model id from that server, and an optional API key. By default OtterBot only allows
 loopback, RFC1918, and `host.docker.internal` targets. To permit public hostnames, set
 `RAKAZO_OPENAI_COMPAT_ALLOW_PUBLIC=1` in the deployment environment. Public hostnames must resolve
 only to public addresses; redirects and DNS answers that reach private or link-local networks are
@@ -108,9 +108,9 @@ Do not commit `.env`. Never put `COMPOSIO_API_KEY`, OpenRouter keys, or provider
 The Electron desktop app is a client of the same API. Docker and E2B still apply. On first launch, Electron asks the deployment owner whether bots should keep using Docker or run on this Mac as you. `SANDBOX_PROVIDER=desktop` is a separate, explicit provider that always runs commands on the service host.
 
 - **Docker** is the default for local use and the quickest self-hosted setup. Workspace bots share a persistent Team Computer by default; Private computers are optional. Keep the supervisor private, as the included Compose file does.
-- **E2B** runs bot computers away from the Rakazo host and is the recommended choice for public or multi-user production deployments. Rakazo checkpoints the portable workspace and browser-profile directory to `DATA_DIR`; the E2B disk is a runtime cache, not the durable source of truth.
+- **E2B** runs bot computers away from the OtterBot host and is the recommended choice for public or multi-user production deployments. OtterBot checkpoints the portable workspace and browser-profile directory to `DATA_DIR`; the E2B disk is a runtime cache, not the durable source of truth.
 - **Daytona** provides the same remote-computer contract through Daytona sandboxes. Configure `DAYTONA_API_KEY` and optionally `DAYTONA_API_URL` / `DAYTONA_TARGET`.
-- **Box by ASCII** provides a managed Linux desktop through `BOX_API_KEY` and optionally `BOX_API_URL`. Rakazo always creates or resumes boxes with `noEnv: true`, keeps the portable workspace under `/home/user/rakazo-home`, and refreshes a two-hour TTL. A Box currently exposes one shared desktop, so concurrent Team bots can still use shell and files but only one can use graphical tools at a time.
+- **Box by ASCII** provides a managed Linux desktop through `BOX_API_KEY` and optionally `BOX_API_URL`. OtterBot always creates or resumes boxes with `noEnv: true`, keeps the portable workspace under `/home/user/rakazo-home`, and refreshes a two-hour TTL. A Box currently exposes one shared desktop, so concurrent Team bots can still use shell and files but only one can use graphical tools at a time.
 - **Desktop provider** / **This Mac** runs commands on the API/worker host. Docker stays the default. The Electron app asks once; if you choose This Mac, bots can use working directories under your home folder. Do not enable it on a public or shared service. macOS does not show its own permission dialog for this.
 - **Fake** is only an emulator for verification.
 
@@ -400,7 +400,7 @@ least 32 characters in production). It must differ from `BETTER_AUTH_SECRET`,
 `SANDBOX_SUPERVISOR_TOKEN`, and `SCREEN_PROXY_SECRET`. Leave the profile disabled if you would
 rather not grant the capability.
 
-## What “Rakazo Cloud” still needs
+## What “OtterBot Cloud” still needs
 
 The product cannot be “pushed live” as a Vercel serverless app. Graphile Worker, Postgres `LISTEN`, Pi runs, and Docker computers need durable processes and a sandbox host.
 
@@ -409,13 +409,13 @@ To run a hosted product (same codebase):
 1. Push `main` (this checkout may be ahead of GitHub).
 2. Provision managed Postgres 16 and run `pnpm db:migrate`.
 3. Run **API** and **worker** as always-on Node 22 services (Fly machines, a VM, ECS, k8s). Not lambda-style request handlers.
-4. Persist and back up `DATA_DIR` (bot homes, browser profiles, artifacts). Today the concrete store is a local filesystem (`LocalAgentHomeStore`), so attach a Rakazo-owned durable volume shared by API and worker processes. The storage contract is separate from the computer-provider contract, but an object-storage implementation is not wired yet.
-5. Choose computers: **`SANDBOX_PROVIDER=e2b`**, `daytona`, or `box` with the matching provider key for a public or multi-user production service. Each Team or Private Computer reconnects to its sandbox id (`providerRef`), while workspace state is checkpointed outside the provider at run completion, explicit stop, and idle suspension. If that sandbox is gone—or the deployment changes providers—the replacement is hydrated from Rakazo's copy. Idle computers pause after `SANDBOX_IDLE_MS` (default 10 minutes) and resume on the next message or Take control. Docker remains the local and trusted single-machine default.
+4. Persist and back up `DATA_DIR` (bot homes, browser profiles, artifacts). Today the concrete store is a local filesystem (`LocalAgentHomeStore`), so attach an OtterBot-owned durable volume shared by API and worker processes. The storage contract is separate from the computer-provider contract, but an object-storage implementation is not wired yet.
+5. Choose computers: **`SANDBOX_PROVIDER=e2b`**, `daytona`, or `box` with the matching provider key for a public or multi-user production service. Each Team or Private Computer reconnects to its sandbox id (`providerRef`), while workspace state is checkpointed outside the provider at run completion, explicit stop, and idle suspension. If that sandbox is gone—or the deployment changes providers—the replacement is hydrated from OtterBot's copy. Idle computers pause after `SANDBOX_IDLE_MS` (default 10 minutes) and resume on the next message or Take control. Docker remains the local and trusted single-machine default.
 6. A Hetzner CX22 (2 vCPU / 4 GB) is enough for API + worker + Postgres when E2B owns the desktops. 2 GB works for a quiet box; 8 GB is only needed if you also run Docker computers on that same machine.
 7. Set public HTTPS `WEB_ORIGIN` / `BETTER_AUTH_URL` / `API_URL`, secrets, and an OpenRouter (or other Pi) deployment key if you want to skip per-user model keys.
 8. Put the web app behind the same origin as `/api` and `/rpc` (Vite preview proxy, or a reverse proxy). Docker noVNC connections use short-lived signed `/novnc/*` capabilities; do not replace that route with an unrestricted port proxy.
 9. Deploy `apps/www` to your public website and point `app.example.com` (or similar) at the product origin.
-10. Turn on `SIGNUP_ALLOWLIST` until you want open registration. There is no Rakazo-managed model billing in version 1 — users bring keys.
+10. Turn on `SIGNUP_ALLOWLIST` until you want open registration. There is no OtterBot-managed model billing in version 1 — users bring keys.
 
 Expo / desktop installers are clients of that origin (`EXPO_PUBLIC_API_URL`, `RAKAZO_WEB_URL`). They are not a Cloud control plane.
 

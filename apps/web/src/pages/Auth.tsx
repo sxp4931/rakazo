@@ -14,7 +14,7 @@ export function AuthPage({ mode }: { mode: "in" | "up" }) {
   const [pending, setPending] = useState(false);
   const passwordFieldId = mode === "in" ? "current-password" : "new-password";
   const title =
-    mode === "in" ? <Trans>Sign in to Rakazo</Trans> : <Trans>Create your Rakazo</Trans>;
+    mode === "in" ? <Trans>Sign in to OtterBot</Trans> : <Trans>Create your OtterBot</Trans>;
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();

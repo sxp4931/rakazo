@@ -307,7 +307,7 @@ export function ModelSettingsOverlay({ onClose }: { onClose: () => void }) {
               {loading ? (
                 <Trans>Loading model catalog…</Trans>
               ) : (
-                <Trans>Choose which connected model Rakazo uses.</Trans>
+                <Trans>Choose which connected model OtterBot uses.</Trans>
               )}
             </p>
           </div>
@@ -413,7 +413,7 @@ export function ModelSettingsOverlay({ onClose }: { onClose: () => void }) {
                           <Trans>Setup help</Trans>
                         </summary>
                         <p className="mt-1">
-                          {t`Paste the OpenAI-compatible address from your server. Rakazo adds /v1 if needed.`}
+                          {t`Paste the OpenAI-compatible address from your server. OtterBot adds /v1 if needed.`}
                         </p>
                       </details>
                       <div className="mt-3 flex items-center gap-2">
@@ -685,7 +685,7 @@ export function ModelSettingsOverlay({ onClose }: { onClose: () => void }) {
                 {selected.auth === "oauth" && !subscriptionSignIn ? (
                   <p className="mt-5 text-sm leading-[1.5] text-[#85858A]">
                     <Trans>
-                      This subscription sign-in is not available in Rakazo yet. Use a deployment
+                      This subscription sign-in is not available in OtterBot yet. Use a deployment
                       credential or choose another provider.
                     </Trans>
                   </p>

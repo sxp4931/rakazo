@@ -9,7 +9,11 @@ const fakeAgentState = vi.hoisted(() => ({
     contextWindow?: number;
     maxTokens?: number;
   }>,
+  sessionIds: [] as Array<string | undefined>,
+  subagentArgs: { name: "helper", task: "help" } as Record<string, unknown>,
+  lastSubagentResult: undefined as unknown,
   failPrompt: false,
+  abortCalls: 0,
 }));
 
 type FakeAgentTool = {
@@ -23,6 +27,7 @@ vi.mock("@earendil-works/pi-agent-core", () => ({
     private readonly tools: FakeAgentTool[];
 
     constructor(options: {
+      sessionId?: string;
       initialState: {
         thinkingLevel: string;
         tools: FakeAgentTool[];
@@ -30,6 +35,7 @@ vi.mock("@earendil-works/pi-agent-core", () => ({
       };
     }) {
       this.tools = options.initialState.tools;
+      fakeAgentState.sessionIds.push(options.sessionId);
       fakeAgentState.thinkingLevels.push(options.initialState.thinkingLevel);
       fakeAgentState.models.push(options.initialState.model);
     }
@@ -38,10 +44,15 @@ vi.mock("@earendil-works/pi-agent-core", () => ({
     async prompt() {
       if (fakeAgentState.failPrompt) throw new Error("prompt failed");
       const runSubagent = this.tools.find((tool) => tool.name === "run_subagent");
-      await runSubagent?.execute("subagent-call", { name: "helper", task: "help" });
+      fakeAgentState.lastSubagentResult = await runSubagent?.execute(
+        "subagent-call",
+        fakeAgentState.subagentArgs,
+      );
     }
     async waitForIdle() {}
-    abort() {}
+    abort() {
+      fakeAgentState.abortCalls += 1;
+    }
   },
 }));
 
@@ -91,6 +102,15 @@ async function runWithModel(
   provider = "test",
   signal = new AbortController().signal,
   thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | null,
+  resolveModel?: (
+    provider: string,
+    modelId: string,
+  ) => Promise<{
+    provider: string;
+    id: string;
+    apiKey?: string;
+    thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | null;
+  }>,
 ) {
   const runtime = new PiAgentRuntime();
   for await (const _event of runtime.run(
@@ -104,11 +124,12 @@ async function runWithModel(
       tools: [],
       model: { provider, id: modelId, thinkingLevel },
       executeTool: vi.fn(async () => ({ ok: true })),
+      resolveModel,
     },
     {
       operationId: "1",
       traceId: "1",
-      workspaceId: "w",
+      spaceId: "w",
       userId: "u",
       signal,
     },
@@ -122,6 +143,9 @@ describe("Pi agent thinking level", () => {
   beforeEach(() => {
     fakeAgentState.thinkingLevels = [];
     fakeAgentState.models = [];
+    fakeAgentState.sessionIds = [];
+    fakeAgentState.subagentArgs = { name: "helper", task: "help" };
+    fakeAgentState.lastSubagentResult = undefined;
     fakeAgentState.failPrompt = false;
     vi.unstubAllEnvs();
   });
@@ -134,9 +158,81 @@ describe("Pi agent thinking level", () => {
     expect(levels.every((level) => level !== "off")).toBe(true);
   });
 
+  it("uses a stable provider session for each bot thread", async () => {
+    await runWithModel("plain-model");
+
+    expect(fakeAgentState.sessionIds[0]).toBe("t:b");
+  });
+
   it("honors a per-bot thinking level on reasoning models", async () => {
     const levels = await runWithModel("grok-4.6", "xai", new AbortController().signal, "high");
     expect(levels).toEqual(["high", "high"]);
+  });
+
+  it("resolves and runs an explicitly selected subagent model", async () => {
+    fakeAgentState.subagentArgs = {
+      name: "helper",
+      task: "help",
+      model_provider: "xai",
+      model_id: "grok-4.6",
+    };
+    const resolveModel = vi.fn(async (provider: string, modelId: string) => ({
+      provider,
+      id: modelId,
+      apiKey: "subagent-key",
+      thinkingLevel: "high" as const,
+    }));
+
+    const levels = await runWithModel(
+      "plain-model",
+      "test",
+      new AbortController().signal,
+      null,
+      resolveModel,
+    );
+
+    expect(resolveModel).toHaveBeenCalledWith("xai", "grok-4.6");
+    expect(fakeAgentState.models.map((model) => `${model.provider}/${model.id}`)).toEqual([
+      "test/plain-model",
+      "xai/grok-4.6",
+    ]);
+    expect(levels).toEqual(["off", "high"]);
+  });
+
+  it("rejects an incomplete per-call subagent model pair", async () => {
+    fakeAgentState.subagentArgs = {
+      name: "helper",
+      task: "help",
+      model_provider: "xai",
+    };
+    const resolveModel = vi.fn();
+
+    await runWithModel("plain-model", "test", new AbortController().signal, null, resolveModel);
+
+    expect(resolveModel).not.toHaveBeenCalled();
+    expect(fakeAgentState.lastSubagentResult).toMatchObject({
+      details: { result: "Subagent failed: model_provider and model_id must both be set" },
+    });
+  });
+
+  it("surfaces a scoped model-resolution failure without starting the helper", async () => {
+    fakeAgentState.subagentArgs = {
+      name: "helper",
+      task: "help",
+      model_provider: "anthropic",
+      model_id: "claude-opus-4-6",
+    };
+    const resolveModel = vi.fn(async () => {
+      throw new Error("Connect that model provider first");
+    });
+
+    await runWithModel("plain-model", "test", new AbortController().signal, null, resolveModel);
+
+    expect(resolveModel).toHaveBeenCalledWith("anthropic", "claude-opus-4-6");
+    expect(fakeAgentState.models).toHaveLength(1);
+    expect(fakeAgentState.lastSubagentResult).toMatchObject({
+      details: { result: "Subagent failed: Connect that model provider first" },
+    });
   });
 
   it("keeps reasoning off for the main agent and subagent", async () => {
@@ -172,13 +268,14 @@ describe("Pi agent thinking level", () => {
 
   it("removes the abort listener when prompting fails", async () => {
     const controller = new AbortController();
-    const removeEventListener = vi.spyOn(controller.signal, "removeEventListener");
+    fakeAgentState.abortCalls = 0;
     fakeAgentState.failPrompt = true;
 
     await expect(runWithModel("plain-model", "test", controller.signal)).rejects.toThrow(
       "prompt failed",
     );
 
-    expect(removeEventListener).toHaveBeenCalledWith("abort", expect.any(Function));
+    controller.abort();
+    expect(fakeAgentState.abortCalls).toBe(0);
   });
 });

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   commitConsumedRunSecret,
+  normalizeSecretAskPurpose,
   reconcileManagedConnection,
   resolveCompletedSecretLeftover,
   resolveMissingRunSecretAction,
@@ -12,6 +13,16 @@ import {
 describe("runSecretKind", () => {
   it("scopes secrets to a single run", () => {
     expect(runSecretKind("run-1")).toBe("run-secret:run-1");
+  });
+});
+
+describe("normalizeSecretAskPurpose", () => {
+  it("keeps known purposes and defaults unknown ones to otp", () => {
+    expect(normalizeSecretAskPurpose("api_key")).toBe("api_key");
+    expect(normalizeSecretAskPurpose("password")).toBe("password");
+    expect(normalizeSecretAskPurpose("other")).toBe("otp");
+    expect(normalizeSecretAskPurpose("otp")).toBe("otp");
+    expect(normalizeSecretAskPurpose(undefined)).toBe("otp");
   });
 });
 
@@ -112,7 +123,7 @@ describe("reconcileManagedConnection", () => {
   const context = {
     operationId: "run-1",
     traceId: "run-1",
-    workspaceId: "workspace-1",
+    spaceId: "workspace-1",
     userId: "user-1",
     signal: new AbortController().signal,
   };
@@ -138,7 +149,7 @@ describe("reconcileManagedConnection", () => {
       reconcileManagedConnection(
         prisma as never,
         connectors as never,
-        { workspaceId: "workspace-1", userId: "user-1" },
+        { spaceId: "workspace-1", userId: "user-1" },
         context,
         "conn-1",
       ),
@@ -156,7 +167,7 @@ describe("tryCompleteConnectionWithCode", () => {
   const context = {
     operationId: "run-1",
     traceId: "run-1",
-    workspaceId: "workspace-1",
+    spaceId: "workspace-1",
     userId: "user-1",
     signal: new AbortController().signal,
   };
@@ -184,7 +195,7 @@ describe("tryCompleteConnectionWithCode", () => {
       tryCompleteConnectionWithCode(
         prisma as never,
         connectors as never,
-        { workspaceId: "workspace-1", userId: "user-1" },
+        { spaceId: "workspace-1", userId: "user-1" },
         context,
         "conn-1",
         "123456",
@@ -194,7 +205,7 @@ describe("tryCompleteConnectionWithCode", () => {
     expect(prisma.connection.findFirst).toHaveBeenCalledWith({
       where: {
         id: "conn-1",
-        workspaceId: "workspace-1",
+        spaceId: "workspace-1",
         userId: "user-1",
         status: { in: ["pending", "connected"] },
       },
@@ -228,7 +239,7 @@ describe("tryCompleteConnectionWithCode", () => {
       tryCompleteConnectionWithCode(
         prisma as never,
         connectors as never,
-        { workspaceId: "workspace-1", userId: "user-1" },
+        { spaceId: "workspace-1", userId: "user-1" },
         context,
         "conn-1",
         "123456",
@@ -261,7 +272,7 @@ describe("tryCompleteConnectionWithCode", () => {
       tryCompleteConnectionWithCode(
         prisma as never,
         connectors as never,
-        { workspaceId: "workspace-1", userId: "user-1" },
+        { spaceId: "workspace-1", userId: "user-1" },
         context,
         "conn-1",
         "bad",

@@ -1,5 +1,11 @@
 import { expect, test } from "@playwright/test";
-import { captureScreenshot, completeOnboarding, openNewBot, signup } from "./helpers";
+import {
+  captureScreenshot,
+  completeOnboarding,
+  createBotFromPicker,
+  openNewBot,
+  signup,
+} from "./helpers";
 
 test("bot creation, editing, and deletion persist", async ({ page }, testInfo) => {
   const stamp = Date.now();
@@ -11,25 +17,32 @@ test("bot creation, editing, and deletion persist", async ({ page }, testInfo) =
   const botList = page.locator("aside").first();
   await expect(botList.getByRole("button", { name: /^Chief/ })).toBeVisible();
 
+  let createFailed = false;
+  let resolveCreateAborted!: () => void;
+  const createAborted = new Promise<void>((resolve) => {
+    resolveCreateAborted = resolve;
+  });
+  await page.route("**/rpc/bots/create", async (route) => {
+    createFailed = true;
+    await route.abort("failed");
+    resolveCreateAborted();
+  });
   await openNewBot(page);
-  await expect(page.getByText("New bot", { exact: true })).toBeVisible();
-  await page.locator("label:has-text('Name') input").fill("Researcher");
-  const longTitle = `Market researcher ${"and source verifier ".repeat(9)}`;
-  const normalizedLongTitle = longTitle.trim();
-  expect(longTitle.length).toBeGreaterThan(160);
-  await page.locator("label:has-text('Title') input").fill(longTitle);
-  await page
-    .locator("label:has-text('Description') textarea")
-    .fill("Finds reliable sources and turns them into concise briefs.");
-  await captureScreenshot(page, testInfo, "26-new-bot-form");
-  await page.route("**/rpc/bots/create", async (route) => route.abort("failed"));
-  await page.getByRole("button", { name: "Create", exact: true }).click();
-  await expect(page.getByTestId("create-bot-error")).toHaveText("Failed to fetch");
-  await expect(page.getByRole("button", { name: "Create", exact: true })).toBeEnabled();
-  await captureScreenshot(page, testInfo, "26a-new-bot-error");
+  const form = page.getByTestId("create-bot-form");
+  await form.locator("label:has-text('Name') input").fill("New Bot");
+  await form.getByRole("button", { name: "Create", exact: true }).click();
+  await createAborted;
+  // Failed create keeps the form open on the current bot chat.
+  await expect(page.getByPlaceholder("Message Chief")).toBeVisible();
+  await expect(page.getByTestId("side-panel")).toHaveAttribute("data-panel", "create");
+  await expect(page.getByTestId("create-bot-error")).toBeVisible();
+  expect(createFailed).toBe(true);
   await page.unroute("**/rpc/bots/create");
+  await page.getByRole("button", { name: "Cancel new bot" }).click();
+  await expect(page.getByTestId("side-panel")).toHaveAttribute("data-panel", "closed");
+
   let failedPostCreateRefresh = false;
-  await page.route("**/rpc/botSections/list", async (route) => {
+  await page.route("**/rpc/spaces/list", async (route) => {
     if (failedPostCreateRefresh) {
       await route.fallback();
       return;
@@ -37,12 +50,11 @@ test("bot creation, editing, and deletion persist", async ({ page }, testInfo) =
     failedPostCreateRefresh = true;
     await route.abort("failed");
   });
-  await page.getByRole("button", { name: "Create", exact: true }).click();
-
-  await expect(botList.getByRole("button", { name: /^Researcher/ })).toBeVisible();
-  expect(failedPostCreateRefresh).toBe(true);
-  await page.unroute("**/rpc/botSections/list");
-  await expect(page.getByPlaceholder("Message Researcher")).toBeVisible();
+  await createBotFromPicker(page);
+  await expect(page.getByPlaceholder("Message New Bot")).toBeVisible();
+  await expect.poll(() => failedPostCreateRefresh).toBe(true);
+  await page.unroute("**/rpc/spaces/list");
+  await expect(botList.getByRole("button", { name: /^New Bot/ })).toBeVisible();
   await page.waitForURL(/\/app\/[^/]+$/);
   const deletedBotPath = new URL(page.url()).pathname;
   await page.evaluate(() => window.dispatchEvent(new Event("focus")));
@@ -50,17 +62,30 @@ test("bot creation, editing, and deletion persist", async ({ page }, testInfo) =
   expect(new URL(page.url()).pathname).toBe(deletedBotPath);
   await captureScreenshot(page, testInfo, "27-created-bot");
 
-  await page.locator("main").getByRole("button", { name: "Researcher", exact: true }).click();
+  await page.locator("main").getByRole("button", { name: "New Bot", exact: true }).click();
   await expect(page.getByText("Settings", { exact: true })).toBeVisible();
   const nameInput = page.locator("label:has-text('Name') input");
   const titleInput = page.locator("label:has-text('Title') input");
   const descriptionInput = page.locator("label:has-text('Description') textarea");
+  const longTitle = `Market researcher ${"and source verifier ".repeat(9)}`;
+  const normalizedLongTitle = longTitle.trim();
+  expect(longTitle.length).toBeGreaterThan(160);
+  await nameInput.fill("Researcher");
+  await titleInput.fill(longTitle);
+  await descriptionInput.fill("Finds reliable sources and turns them into concise briefs.");
+  await page.getByRole("radio", { name: "Color 7" }).click();
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(botList.getByRole("button", { name: /^Researcher/ })).toBeVisible();
+  await expect(page.getByPlaceholder("Message Researcher")).toBeVisible();
+
+  await page.locator("main").getByRole("button", { name: "Researcher", exact: true }).click();
   await expect(nameInput).toHaveValue("Researcher");
   await expect(titleInput).toHaveValue(normalizedLongTitle);
   await expect(descriptionInput).toHaveValue(
     "Finds reliable sources and turns them into concise briefs.",
   );
   const settings = page.getByTestId("bot-settings");
+  await expect(settings.getByRole("radio", { name: "Color 7" })).toBeChecked();
   const modelSelect = settings.locator("label:has-text('Model') select");
   const teamComputer = settings.getByRole("button", { name: "Team" });
   const openWork = settings.getByTestId("bot-scratchpad");
@@ -68,12 +93,15 @@ test("bot creation, editing, and deletion persist", async ({ page }, testInfo) =
   await expect(modelSelect).toBeHidden();
   await expect(openWork).toBeHidden();
   await expect(settings.getByRole("button", { name: "Save", exact: true })).toBeVisible();
+  await expect(settings.getByRole("button", { name: "Recover computer" })).toHaveCount(0);
+  await expect(settings.getByRole("button", { name: "Reset computer" })).toHaveCount(0);
+  await expect(settings.getByRole("button", { name: "Update computer" })).toHaveCount(0);
   await captureScreenshot(page, testInfo, "27a-settings-panel");
   await settings.getByText("Advanced", { exact: true }).click();
   await expect(teamComputer).toBeVisible();
   await expect(openWork).toBeVisible();
   await expect(modelSelect).toBeVisible();
-  await expect(modelSelect).toContainText("Workspace default");
+  await expect(modelSelect).toContainText("Space default");
   await captureScreenshot(page, testInfo, "27a-bot-settings-model");
   await page.getByRole("button", { name: "Show computer" }).click();
   const sidePanel = page.getByTestId("side-panel");
@@ -82,8 +110,15 @@ test("bot creation, editing, and deletion persist", async ({ page }, testInfo) =
   // Overlay may flash during boot or never appear (already ready/asleep/stopped). Assert panel
   // chrome, then wait until any overlay has cleared — avoid Locator.or() strict-mode multi-hits.
   const bootOverlay = page.getByText(/Booting up .* computer/);
-  await expect(sidePanel.getByRole("button", { name: "Take control" })).toBeVisible();
+  await expect(sidePanel.getByTestId("computer-preview")).toBeVisible();
   await expect(bootOverlay).toBeHidden();
+  await expect(sidePanel.getByText("Teach a task")).toHaveCount(0);
+  await expect(sidePanel.getByTestId("teach-start-button")).toHaveCount(0);
+  await expect(sidePanel.getByRole("button", { name: "Recover computer" })).toHaveCount(0);
+  await expect(sidePanel.getByRole("button", { name: "Reset computer" })).toHaveCount(0);
+  await expect(sidePanel.getByRole("button", { name: "Update computer" })).toHaveCount(0);
+  await expect(sidePanel.getByRole("button", { name: "Take control" })).toHaveCount(0);
+  await expect(sidePanel.getByTestId("computer-more-button")).toHaveCount(0);
   await captureScreenshot(page, testInfo, "27b-computer-panel");
   await page.getByRole("button", { name: "Show settings" }).click();
 
@@ -104,20 +139,33 @@ test("bot creation, editing, and deletion persist", async ({ page }, testInfo) =
   await expect(descriptionInput).toHaveValue("Builds durable, source-backed research briefs.");
   await captureScreenshot(page, testInfo, "29-reloaded-bot-profile");
 
-  const atlas = botList.getByRole("button", { name: /^Atlas/ });
-  await atlas.click({ button: "right" });
-  await page.getByRole("menuitem", { name: "Delete" }).click();
-  await expect(page.getByRole("alertdialog", { name: "Delete Atlas?" })).toBeVisible();
-  await captureScreenshot(page, testInfo, "30-delete-bot-confirmation");
-  await page.getByRole("button", { name: "Delete", exact: true }).click();
+  // Wrap in the narrow dialog without pushing Delete below the Playwright viewport.
+  const longUnbrokenName = "A".repeat(48);
+  expect(longUnbrokenName.length).toBe(48);
+  await nameInput.fill(longUnbrokenName);
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  const longNameBot = botList.getByRole("button", {
+    name: new RegExp(`^${longUnbrokenName}`),
+  });
+  await expect(longNameBot).toBeVisible();
+  await expect(page.getByPlaceholder(`Message ${longUnbrokenName}`)).toBeVisible();
 
-  await expect(botList.getByText("Atlas", { exact: true })).toHaveCount(0);
+  await longNameBot.click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Delete" }).click();
+  const deleteDialog = page.getByRole("alertdialog", {
+    name: `Delete ${longUnbrokenName}?`,
+  });
+  await expect(deleteDialog).toBeVisible();
+  await captureScreenshot(page, testInfo, "30-delete-bot-confirmation");
+  await deleteDialog.getByRole("button", { name: "Delete", exact: true }).click();
+
+  await expect(botList.getByText(longUnbrokenName, { exact: true })).toHaveCount(0);
   await expect(botList.getByRole("button", { name: /^Chief/ })).toBeVisible();
   await page.waitForURL((url) => url.pathname !== deletedBotPath);
 
   await page.goto(deletedBotPath);
   await page.waitForURL((url) => url.pathname !== deletedBotPath);
-  await expect(botList.getByText("Atlas", { exact: true })).toHaveCount(0);
+  await expect(botList.getByText(longUnbrokenName, { exact: true })).toHaveCount(0);
   await expect(botList.getByRole("button", { name: /^Chief/ })).toBeVisible();
   await expect(page.getByPlaceholder("Message Chief")).toBeVisible();
   await captureScreenshot(page, testInfo, "31-deleted-bot-fallback");

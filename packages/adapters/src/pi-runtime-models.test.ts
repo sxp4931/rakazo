@@ -1,5 +1,10 @@
+import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import type { AgentRunRequest } from "@rakazo/adapter-kit";
 import { describe, expect, it } from "vitest";
+import { buildModelConnectPlaintext, modelCredentialDto } from "./model-connect.js";
+import { modelAcceptsImageInput } from "./model-vision.js";
+import { listPiCatalog } from "./pi-models.js";
+import { resolveModelAuth } from "./pi-oauth.js";
 import { OPENAI_COMPATIBLE_PROVIDER_ID } from "./pi-openai-compatible-provider.js";
 import { modelsForRequest } from "./pi-runtime.js";
 
@@ -8,6 +13,21 @@ function requestModel(id: string, baseUrl: string): Pick<AgentRunRequest, "model
 }
 
 describe("request model catalogs", () => {
+  it.each([
+    ["openrouter", "openai/gpt-5.6-luna"],
+    ["openai-codex", "gpt-6-astra"],
+    ["anthropic", "claude-fable-5-1"],
+  ])("offers and resolves %s/%s with vision", (provider, id) => {
+    const entry = listPiCatalog().find((model) => model.provider === provider && model.id === id);
+    expect(entry).toBeDefined();
+    const model = modelsForRequest({ model: { provider, id } }, provider).getModel(provider, id);
+    expect(model).toBeDefined();
+    expect(model?.input).toContain("image");
+    expect(modelAcceptsImageInput(provider, id)).toBe(true);
+    expect(entry?.thinkingLevels).toEqual(getSupportedThinkingLevels(model!));
+    if (provider === "openai-codex") expect(entry?.signIn).toBe("device-code");
+  });
+
   it("isolates concurrent OpenAI-compatible endpoint registrations", () => {
     const first = modelsForRequest(
       requestModel("first-model", "http://127.0.0.1:8001/v1"),
@@ -28,3 +48,42 @@ describe("request model catalogs", () => {
     );
   });
 });
+
+it.each([true, false, undefined])(
+  "keeps saved capability %s consistent between metadata and runtime",
+  async (reasoning) => {
+    const plaintext = buildModelConnectPlaintext({
+      provider: OPENAI_COMPATIBLE_PROVIDER_ID,
+      modelId: "same-model",
+      baseUrl: "http://localhost:8000/v1",
+      reasoning,
+    });
+    const auth = await resolveModelAuth(plaintext, OPENAI_COMPATIBLE_PROVIDER_ID);
+    expect(auth.secret.kind).toBe("openai_compatible");
+    if (auth.secret.kind !== "openai_compatible") throw new Error("Wrong credential type");
+    const models = modelsForRequest(
+      {
+        model: {
+          provider: OPENAI_COMPATIBLE_PROVIDER_ID,
+          id: "same-model",
+          baseUrl: auth.secret.baseUrl,
+          reasoning: auth.secret.reasoning,
+        },
+      },
+      OPENAI_COMPATIBLE_PROVIDER_ID,
+    );
+    const model = models.getModel(OPENAI_COMPATIBLE_PROVIDER_ID, "same-model")!;
+    const credential = modelCredentialDto(
+      {
+        id: "cred",
+        provider: OPENAI_COMPATIBLE_PROVIDER_ID,
+        label: "Server",
+        isDefault: true,
+        defaultModel: "same-model",
+      },
+      plaintext,
+    );
+    expect(model.reasoning).toBe(reasoning ?? false);
+    expect(credential.thinkingLevels).toEqual(getSupportedThinkingLevels(model));
+  },
+);

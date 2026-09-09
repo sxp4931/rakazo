@@ -1,6 +1,9 @@
 import { RPCHandler } from "@orpc/server/fetch";
+import { COMPUTER_SCREEN_UNAVAILABLE, ComputerScreenUnavailableError } from "@rakazo/adapters";
 import type { Actor } from "@rakazo/contracts";
+import { openScreenCapability } from "@rakazo/core/node/screen-capability";
 import type { PrismaClient } from "@rakazo/db";
+import { createLogger, createTestSink, installLogger } from "@rakazo/logging";
 import { describe, expect, it, vi } from "vitest";
 import { createRouter, type RouterDeps } from "./router.js";
 
@@ -16,7 +19,7 @@ describe("account preferences", () => {
           avatarStyle,
         }),
       },
-      userModelCredential: { findFirst: vi.fn().mockResolvedValue(null) },
+      spaceModelPreference: { findFirst: vi.fn().mockResolvedValue(null) },
       deploymentSettings: { findUnique: vi.fn().mockResolvedValue(null) },
     } as unknown as PrismaClient;
     const deps = {
@@ -31,13 +34,38 @@ describe("account preferences", () => {
       dataDir: "/tmp/rakazo-router-test",
     } as unknown as RouterDeps;
     const actor = {
-      workspaceId: "workspace-1",
+      spaceId: "workspace-1",
       userId: "user-1",
       email: "user@rakazo.test",
       isDeploymentOwner: true,
     } satisfies Actor;
     return { update, deps, actor, handler: new RPCHandler(createRouter(deps)) };
   }
+
+  it("keeps an unconfigured catalog offline unless explicitly requested", async () => {
+    const { actor, deps } = preferencesDeps("robot");
+    const fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ results: [] }), {
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    deps.remoteConnectors = { fetch } as RouterDeps["remoteConnectors"];
+    const handler = new RPCHandler(createRouter(deps));
+    const request = async (usePublicCatalog?: boolean) =>
+      handler.handle(
+        new Request("http://127.0.0.1/rpc/capabilities/catalogSearch", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ json: { query: "notion", usePublicCatalog } }),
+        }),
+        { prefix: "/rpc", context: { actor } },
+      );
+    const { response } = await request();
+    await expect(response.json()).resolves.toEqual({ json: { enabled: false, results: [] } });
+    expect(fetch).not.toHaveBeenCalled();
+    await request(true);
+    expect(fetch).toHaveBeenCalled();
+  });
 
   it("persists and returns the selected avatar style", async () => {
     const { update, actor, handler } = preferencesDeps("organic");
@@ -96,11 +124,128 @@ describe("account preferences", () => {
   });
 });
 
+describe("model setup gate", () => {
+  function modelGateDeps(options: {
+    agentRuntime: string;
+    deploymentModelKey?: string;
+    deploymentModelCredentialCipher?: string;
+  }) {
+    const prisma = {
+      user: {
+        findUniqueOrThrow: vi.fn().mockResolvedValue({
+          email: "user@rakazo.test",
+          name: "Test User",
+          avatarStyle: "robot",
+        }),
+      },
+      spaceModelPreference: { findFirst: vi.fn().mockResolvedValue(null) },
+      deploymentSettings: {
+        findUnique: vi
+          .fn()
+          .mockResolvedValue(
+            options.deploymentModelCredentialCipher
+              ? { deploymentModelCredentialCipher: options.deploymentModelCredentialCipher }
+              : null,
+          ),
+      },
+    } as unknown as PrismaClient;
+    const deps = {
+      prisma,
+      env: {
+        agentRuntime: options.agentRuntime,
+        defaultProvider: "openrouter",
+        defaultModel: "test-model",
+        deploymentModelKey: options.deploymentModelKey,
+        webOrigin: "http://127.0.0.1:5173",
+        screenProxySecret: "fake-test-secret",
+        sandboxProvider: "fake",
+      },
+      dataDir: "/tmp/rakazo-router-test",
+    } as unknown as RouterDeps;
+    const actor = {
+      spaceId: "workspace-1",
+      userId: "user-1",
+      email: "user@rakazo.test",
+      isDeploymentOwner: true,
+    } satisfies Actor;
+    return { actor, handler: new RPCHandler(createRouter(deps)) };
+  }
+
+  async function call(handler: RPCHandler<never>, actor: Actor, path: string, body: unknown) {
+    const { response } = await handler.handle(
+      new Request(`http://127.0.0.1/rpc/${path}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ json: body }),
+      }),
+      { prefix: "/rpc", context: { actor } },
+    );
+    return response;
+  }
+
+  it("refuses to start a run when no model is configured", async () => {
+    const { actor, handler } = modelGateDeps({ agentRuntime: "pi" });
+
+    const response = await call(handler, actor, "threads/send", {
+      botId: "bot-1",
+      text: "hello",
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      json: expect.objectContaining({
+        code: "BAD_REQUEST",
+        message: "Connect a model to start a run.",
+      }),
+    });
+  });
+
+  it("does not require a model credential for the scripted test runtime", async () => {
+    const { actor, handler } = modelGateDeps({ agentRuntime: "scripted" });
+
+    const response = await call(handler, actor, "me", null);
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      json: expect.objectContaining({ needsModel: false }),
+    });
+  });
+
+  it("accepts a deployment model key as model configuration", async () => {
+    const { actor, handler } = modelGateDeps({
+      agentRuntime: "pi",
+      deploymentModelKey: "fake-deployment-key",
+    });
+
+    const response = await call(handler, actor, "me", null);
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      json: expect.objectContaining({ needsModel: false }),
+    });
+  });
+
+  it("does not accept a stored deployment cipher the executor cannot use", async () => {
+    const { actor, handler } = modelGateDeps({
+      agentRuntime: "pi",
+      deploymentModelCredentialCipher: "legacy-ciphertext",
+    });
+
+    const response = await call(handler, actor, "me", null);
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      json: expect.objectContaining({ needsModel: true }),
+    });
+  });
+});
+
 describe("thread answer delivery", () => {
   it("accepts a durable answer when the immediate worker wake fails", async () => {
     const answerRunInput = vi.fn().mockResolvedValue(true);
     const enqueue = vi.fn().mockRejectedValue(new Error("job broker unavailable"));
-    const logError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const sink = createTestSink();
+    installLogger(createLogger({ service: "rakazo-api", sinks: [sink] }));
     const prisma = {
       bot: {
         findFirst: vi.fn().mockResolvedValue({
@@ -124,7 +269,7 @@ describe("thread answer delivery", () => {
       dataDir: "/tmp/rakazo-router-test",
     } as unknown as RouterDeps;
     const actor = {
-      workspaceId: "workspace-1",
+      spaceId: "workspace-1",
       userId: "user-1",
       email: "user@rakazo.test",
       isDeploymentOwner: true,
@@ -152,14 +297,14 @@ describe("thread answer delivery", () => {
     await expect(response.json()).resolves.toEqual({ json: { ok: true } });
     expect(answerRunInput).toHaveBeenCalledWith(
       expect.objectContaining({
-        workspaceId: "workspace-1",
+        spaceId: "workspace-1",
         threadId: "thread-1",
         runId: "run-1",
       }),
     );
     expect(enqueue).toHaveBeenCalledOnce();
-    expect(logError).toHaveBeenCalledWith("thread answer enqueue", expect.any(Error));
-    logError.mockRestore();
+    expect(sink.events.some((event) => event.message === "thread answer enqueue")).toBe(true);
+    installLogger(createLogger({ service: "rakazo-api", level: "off", sinks: [] }));
   });
 });
 
@@ -187,7 +332,7 @@ describe("MCP server deletion", () => {
       dataDir: "/tmp/rakazo-router-test",
     } as unknown as RouterDeps;
     const actor = {
-      workspaceId: "workspace-1",
+      spaceId: "workspace-1",
       userId: "user-1",
       email: "user@rakazo.test",
       isDeploymentOwner: true,
@@ -210,7 +355,7 @@ describe("MCP server deletion", () => {
     expect(deleteSecrets).toHaveBeenCalledWith({
       where: {
         id: "old-secret",
-        workspaceId: "workspace-1",
+        spaceId: "workspace-1",
         userId: "user-1",
       },
     });
@@ -240,8 +385,34 @@ describe("connections.complete", () => {
           status: "pending",
           createdAt: new Date("2026-08-26T00:00:00.000Z"),
         }),
+        findMany: vi.fn().mockResolvedValue([]),
         update,
       },
+      $transaction: vi.fn(async (fn: (tx: unknown) => Promise<unknown>) => {
+        const row = {
+          id: "conn-1",
+          connectorId: "composio",
+          provider: "gmail",
+          displayName: "Gmail",
+          providerRef: "gmail-state",
+          status: "pending",
+          createdAt: new Date("2026-08-26T00:00:00.000Z"),
+        };
+        const tx = {
+          $executeRaw: vi.fn().mockResolvedValue(undefined),
+          connection: {
+            findFirst: vi.fn().mockResolvedValueOnce(row).mockResolvedValueOnce(null),
+            findMany: vi.fn().mockResolvedValue([]),
+            update: vi
+              .fn()
+              .mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({
+                ...row,
+                ...data,
+              })),
+          },
+        };
+        return fn(tx);
+      }),
     } as unknown as PrismaClient;
     const deps = {
       prisma,
@@ -258,7 +429,7 @@ describe("connections.complete", () => {
       dataDir: "/tmp/rakazo-router-test",
     } as unknown as RouterDeps;
     const actor = {
-      workspaceId: "workspace-1",
+      spaceId: "workspace-1",
       userId: "user-1",
       email: "user@rakazo.test",
       isDeploymentOwner: true,
@@ -283,7 +454,7 @@ describe("connections.complete", () => {
     expect(response.status).toBe(200);
     expect(complete).toHaveBeenCalledWith(
       { state: "gmail-state", code: "123456" },
-      expect.objectContaining({ workspaceId: "workspace-1", userId: "user-1" }),
+      expect.objectContaining({ spaceId: "workspace-1", userId: "user-1" }),
     );
     expect(connectionReady).toHaveBeenCalled();
   });
@@ -299,7 +470,7 @@ describe("updater owner gate", () => {
           avatarStyle: "robot",
         }),
       },
-      userModelCredential: { findFirst: vi.fn().mockResolvedValue(null) },
+      spaceModelPreference: { findFirst: vi.fn().mockResolvedValue(null) },
       deploymentSettings: { findUnique: vi.fn().mockResolvedValue(null) },
     } as unknown as PrismaClient;
     const deps = {
@@ -322,7 +493,7 @@ describe("updater owner gate", () => {
   it("forbids non-owners from updater status", async () => {
     const { handler } = updaterDeps();
     const actor = {
-      workspaceId: "workspace-1",
+      spaceId: "workspace-1",
       userId: "user-2",
       email: "member@rakazo.test",
       isDeploymentOwner: false,
@@ -343,7 +514,7 @@ describe("updater owner gate", () => {
   it("lets the deployment owner read status without applying git", async () => {
     const { handler } = updaterDeps();
     const actor = {
-      workspaceId: "workspace-1",
+      spaceId: "workspace-1",
       userId: "user-1",
       email: "owner@rakazo.test",
       isDeploymentOwner: true,
@@ -368,7 +539,7 @@ describe("updater owner gate", () => {
   it("refuses apply when the sidecar is not configured", async () => {
     const { handler } = updaterDeps();
     const actor = {
-      workspaceId: "workspace-1",
+      spaceId: "workspace-1",
       userId: "user-1",
       email: "owner@rakazo.test",
       isDeploymentOwner: true,
@@ -388,5 +559,284 @@ describe("updater owner gate", () => {
     const message = JSON.stringify(body);
     expect(message).toMatch(/sidecar/i);
     expect(message).not.toMatch(/git (fetch|merge|pull)/i);
+  });
+});
+
+describe("computer screen url", () => {
+  const actor = {
+    spaceId: "workspace-1",
+    userId: "user-1",
+    email: "user@rakazo.test",
+    isDeploymentOwner: true,
+  } satisfies Actor;
+  const computerRow = {
+    id: "computer-1",
+    screenGeneration: 3,
+    kind: "e2b",
+    scope: "team",
+    state: "running",
+    providerRef: "sandbox-ref-1",
+    homeKey: "home-1",
+    controlHolder: "none",
+    controlLeaseId: null,
+    controlLeaseExpiresAt: null,
+    controlBotId: null,
+    controlRunId: null,
+  };
+
+  const callScreenUrl = async (connectScreen: () => Promise<unknown>, updateMany = vi.fn()) => {
+    const prisma = {
+      bot: {
+        findFirst: vi.fn().mockResolvedValue({
+          id: "bot-1",
+          screenGeneration: 2,
+          thread: { id: "thread-1" },
+          computer: computerRow,
+        }),
+      },
+      computer: { updateMany },
+      computerExecutionLease: { findUnique: vi.fn().mockResolvedValue(null) },
+    } as unknown as PrismaClient;
+    const deps = {
+      prisma,
+      sandbox: { connectScreen },
+      jobs: { enqueue: vi.fn().mockResolvedValue(undefined) },
+      env: {
+        defaultProvider: "fake",
+        defaultModel: "fake-model",
+        webOrigin: "http://127.0.0.1:5173",
+        screenProxySecret: "fake-test-secret",
+        sandboxProvider: "e2b",
+      },
+      dataDir: "/tmp/rakazo-router-test",
+    } as unknown as RouterDeps;
+    const handler = new RPCHandler(createRouter(deps));
+    const { response } = await handler.handle(
+      new Request("http://127.0.0.1/rpc/computer/screenUrl", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ json: { botId: "bot-1" } }),
+      }),
+      { prefix: "/rpc", context: { actor } },
+    );
+    return { response, updateMany };
+  };
+
+  it("issues lifecycle-bound capabilities for managed-provider screens too", async () => {
+    const { response } = await callScreenUrl(async () => ({
+      url: "https://screen.example/vnc.html?token=fake-token",
+    }));
+    expect(response.status).toBe(200);
+    const { json } = await response.json();
+    const url = new URL(json.url);
+    expect(url.origin).toBe("http://127.0.0.1:5173");
+    expect(openScreenCapability(url.pathname, "fake-test-secret")).toMatchObject({
+      scope: {
+        botId: "bot-1",
+        computerId: "computer-1",
+        botGeneration: 2,
+        computerGeneration: 3,
+        controlLeaseId: null,
+      },
+      target: { hostname: "screen.example", interactive: false },
+    });
+  });
+
+  it("returns desktop provider screen URLs without sealing them", async () => {
+    const { response } = await callScreenUrl(async () => ({
+      url: "desktop://screen/computer-1",
+    }));
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      json: { url: "desktop://screen/computer-1?view_only=true" },
+    });
+  });
+
+  it("clears the row instead of 500ing when the provider says the sandbox is gone", async () => {
+    const { response, updateMany } = await callScreenUrl(() =>
+      Promise.reject(
+        Object.assign(new Error("Sandbox is probably not running anymore"), {
+          name: "SandboxNotFoundError",
+        }),
+      ),
+    );
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ json: { url: null } });
+    expect(updateMany).toHaveBeenCalledWith({
+      where: { id: "computer-1", providerRef: "sandbox-ref-1" },
+      data: { state: "stopped", providerRef: null },
+    });
+  });
+
+  it("keeps a transport blip an error and leaves the row alone", async () => {
+    const { response, updateMany } = await callScreenUrl(() =>
+      Promise.reject(Object.assign(new Error("fetch failed"), { code: "ECONNRESET" })),
+    );
+    expect(response.status).toBe(500);
+    expect(updateMany).not.toHaveBeenCalled();
+  });
+
+  it("returns a recoverable conflict when the screen is temporarily busy", async () => {
+    const { response, updateMany } = await callScreenUrl(() =>
+      Promise.reject(new ComputerScreenUnavailableError()),
+    );
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      json: expect.objectContaining({
+        code: "CONFLICT",
+        message: COMPUTER_SCREEN_UNAVAILABLE,
+      }),
+    });
+    expect(updateMany).not.toHaveBeenCalled();
+  });
+});
+
+describe("integration setup authorization", () => {
+  it.each([
+    { owner: false, configured: false, needsSetup: false },
+    { owner: true, configured: false, needsSetup: true },
+    { owner: true, configured: true, needsSetup: false },
+  ])(
+    "offers server setup only to an owner without configured providers: %j",
+    async ({ owner, configured, needsSetup }) => {
+      const lookup = vi.fn(async () => configured);
+      const deps = {
+        prisma: {},
+        env: { webOrigin: "https://example.test" },
+        integrationSettings: { configured: lookup },
+      } as unknown as RouterDeps;
+      const handler = new RPCHandler(createRouter(deps));
+      const { response } = await handler.handle(
+        new Request("https://example.test/rpc/integrationSetup/get", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ json: null }),
+        }),
+        {
+          prefix: "/rpc",
+          context: {
+            actor: {
+              userId: "user",
+              spaceId: "space",
+              email: "user@rakazo.test",
+              isDeploymentOwner: owner,
+            },
+          },
+        },
+      );
+      const result = (await response.json()).json;
+      expect(result).toMatchObject({ canConfigure: owner, needsSetup });
+      if (!owner) {
+        expect(result.providers).toEqual([]);
+        expect(lookup).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it("rejects provider credentials from a non-owner before verification or persistence", async () => {
+    const save = vi.fn();
+    const deps = {
+      prisma: {},
+      env: { webOrigin: "https://example.test" },
+      integrationSettings: { save },
+    } as unknown as RouterDeps;
+    const handler = new RPCHandler(createRouter(deps));
+    const { response } = await handler.handle(
+      new Request("https://example.test/rpc/integrationSetup/save", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ json: { provider: "composio", apiKey: "fake-key" } }),
+      }),
+      {
+        prefix: "/rpc",
+        context: {
+          actor: {
+            userId: "member",
+            spaceId: "space",
+            email: "member@rakazo.test",
+            isDeploymentOwner: false,
+          },
+        },
+      },
+    );
+    expect(response.status).toBe(403);
+    expect(save).not.toHaveBeenCalled();
+  });
+});
+
+describe("interrupted computer reservation release", () => {
+  function fixture() {
+    const order: string[] = [];
+    const computerUpdate = {
+      findFirst: vi.fn(async () => ({ id: "update-1", computerId: "computer-1" })),
+      updateMany: vi.fn(async () => {
+        order.push("operation");
+        return { count: 1 };
+      }),
+    };
+    const computer = {
+      updateMany: vi.fn(async () => {
+        order.push("computer");
+        return { count: 1 };
+      }),
+    };
+    const prisma = { computer, computerUpdate, $transaction: vi.fn(async (fn) => fn(prisma)) };
+    const handler = new RPCHandler(
+      createRouter({ prisma, env: { sandboxProvider: "fake" } } as unknown as RouterDeps),
+    );
+    const call = async (owner: boolean, workersStopped?: boolean) =>
+      handler.handle(
+        new Request("http://127.0.0.1/rpc/computer/releaseInterrupted", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ json: { id: "update-1", workersStopped } }),
+        }),
+        {
+          prefix: "/rpc",
+          context: {
+            actor: {
+              spaceId: "space-1",
+              userId: "user-1",
+              email: "user@rakazo.test",
+              isDeploymentOwner: owner,
+            },
+          },
+        },
+      );
+    return { prisma, computer, computerUpdate, order, call };
+  }
+  it.each([
+    { owner: false, stopped: true, status: 403 },
+    { owner: true, stopped: false, status: 400 },
+    { owner: true, stopped: undefined, status: 400 },
+  ])(
+    "requires owner authorization and an explicit stopped-workers assertion: %j",
+    async ({ owner, stopped, status }) => {
+      const { call, prisma } = fixture();
+      const { response } = await call(owner, stopped);
+      expect(response.status).toBe(status);
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    },
+  );
+  it("atomically releases only an interrupted reservation in the owner's workspace", async () => {
+    const { call, computer, computerUpdate, order } = fixture();
+    const { response } = await call(true, true);
+    expect(response.status).toBe(200);
+    expect(computerUpdate.findFirst).toHaveBeenCalledWith({
+      where: {
+        id: "update-1",
+        status: "interrupted",
+        computer: { spaceId: "space-1", bots: { some: { userId: "user-1", archivedAt: null } } },
+      },
+    });
+    expect(computerUpdate.updateMany).toHaveBeenCalledWith({
+      where: { id: "update-1", status: "interrupted" },
+      data: { status: "failed" },
+    });
+    expect(computer.updateMany).toHaveBeenCalledWith({
+      where: { id: "computer-1", maintenanceId: "update-1" },
+      data: { maintenanceId: null, state: "error" },
+    });
+    expect(order).toEqual(["operation", "computer"]);
   });
 });

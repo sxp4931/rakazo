@@ -13,13 +13,17 @@ export function mergeCatalogWithConnected(
   directory: ToolkitDirectoryEntry[],
   connectedSlugs: Iterable<string>,
 ): ToolkitCatalogEntry[] {
-  const connected = new Set(connectedSlugs);
+  const connected = new Set([...connectedSlugs].map((slug) => slug.trim().toLowerCase()));
   return directory.map((item) => ({
     ...item,
-    connected: connected.has(item.slug),
+    connected: connected.has(item.slug.trim().toLowerCase()),
   }));
 }
 
+/**
+ * Coalesces directory loads and serves stale entries during refreshes. Failed
+ * refreshes preserve stale entries for later retries; cold-load errors propagate.
+ */
 export function createToolkitDirectoryCache(opts?: { ttlMs?: number; now?: () => number }) {
   const ttlMs = opts?.ttlMs ?? COMPOSIO_DIRECTORY_TTL_MS;
   const now = opts?.now ?? Date.now;
@@ -45,7 +49,10 @@ export function createToolkitDirectoryCache(opts?: { ttlMs?: number; now?: () =>
     async get(loader: () => Promise<ToolkitDirectoryEntry[]>): Promise<ToolkitDirectoryEntry[]> {
       if (!entry) return load(loader);
       if (now() - entry.fetchedAt < ttlMs) return entry.items;
-      if (!inflight) void load(loader);
+      if (!inflight) {
+        // Keep stale items on failure; load clears inflight so a later read can retry.
+        void load(loader).catch(() => undefined);
+      }
       return entry.items;
     },
     invalidate() {

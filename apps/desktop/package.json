@@ -1,6 +1,7 @@
 {
   "name": "@rakazo/desktop",
-  "version": "0.1.0",
+  "productName": "OtterBot",
+  "version": "0.1.6",
   "license": "Apache-2.0",
   "type": "module",
   "main": "dist/main.js",
@@ -16,18 +17,18 @@
   },
   "dependencies": {
     "@rakazo/contracts": "workspace:*",
-    "electron-updater": "^6.8.9"
+    "electron-updater": "6.8.9"
   },
   "devDependencies": {
-    "@playwright/test": "^1.55.0",
-    "electron": "^43.4.0",
-    "electron-builder": "^26.0.12",
-    "typescript": "^5.9.2",
-    "vitest": "^4.1.10"
+    "@playwright/test": "1.63.0",
+    "@rakazo/ui-tokens": "workspace:*",
+    "electron": "44.2.0",
+    "electron-builder": "26.15.3",
+    "typescript": "7.0.2",
+    "vitest": "4.1.11"
   },
   "build": {
     "appId": "dev.rakazo.desktop",
-    "productName": "OtterBot",
     "directories": {
       "output": "out",
       "buildResources": "assets"
@@ -40,13 +41,21 @@
       {
         "from": "../web/dist",
         "to": "web"
+      },
+      {
+        "from": "../../infra/compose/docker-compose.images.yml",
+        "to": "stack/docker-compose.images.yml"
+      },
+      {
+        "from": "../../infra/compose/.env.images.example",
+        "to": "stack/.env.images.example"
       }
     ],
     "extraMetadata": {
       "main": "dist/main.js"
     },
     "mac": {
-      "icon": "assets/icon.icns",
+      "icon": "../../packages/ui-tokens/assets/OtterBot.icon",
       "category": "public.app-category.productivity",
       "target": [
         "dmg",
@@ -62,6 +71,7 @@
       "verifyUpdateCodeSignature": true
     },
     "linux": {
+      "executableName": "rakazo",
       "icon": "assets/icon.png",
       "target": [
         "AppImage"

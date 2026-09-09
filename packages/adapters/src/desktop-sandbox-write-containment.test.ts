@@ -1,3 +1,5 @@
+import type * as NodeFs from "node:fs";
+import type * as NodeFsPromises from "node:fs/promises";
 import {
   link,
   mkdir,
@@ -19,7 +21,7 @@ const lstatRace = vi.hoisted(() => ({
 }));
 
 vi.mock("node:fs", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("node:fs")>();
+  const actual = await importOriginal<typeof NodeFs>();
   return {
     ...actual,
     constants: { ...actual.constants, O_NOFOLLOW: 0 },
@@ -27,7 +29,7 @@ vi.mock("node:fs", async (importOriginal) => {
 });
 
 vi.mock("node:fs/promises", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  const actual = await importOriginal<typeof NodeFsPromises>();
   return {
     ...actual,
     lstat: async (target: string, options?: { bigint?: boolean }) => {
@@ -48,7 +50,7 @@ const { DesktopSandboxProvider } = await import("./desktop-sandbox.js");
 const ctx = {
   operationId: "operation",
   traceId: "trace",
-  workspaceId: "workspace",
+  spaceId: "workspace",
   userId: "user",
   signal: new AbortController().signal,
 };
@@ -93,7 +95,7 @@ describe("desktop sandbox write containment without O_NOFOLLOW", () => {
     expect(await readFile(outside, "utf8")).toBe("before");
   });
 
-  it("keeps writes on the opened inode when the final name is replaced after lstat", async () => {
+  it("keeps writes contained when the final name is replaced after lstat", async () => {
     const { root, desktop, computer } = await fixture("swap-link");
     const target = path.join(computer.providerRef, "result.txt");
     const displaced = path.join(computer.providerRef, "result-original.txt");
@@ -108,13 +110,19 @@ describe("desktop sandbox write containment without O_NOFOLLOW", () => {
       await symlink(outside, target);
     };
 
-    await desktop.writeFile(computer, {
-      path: "result.txt",
-      content: new TextEncoder().encode("after"),
-    });
+    let rejected = false;
+    try {
+      await desktop.writeFile(computer, {
+        path: "result.txt",
+        content: new TextEncoder().encode("after"),
+      });
+    } catch (error) {
+      expect(error).toHaveProperty("message", "Path escapes the computer workspace");
+      rejected = true;
+    }
     expect(swapped).toBe(true);
     expect(await readFile(outside, "utf8")).toBe("outside-before");
-    expect(await readFile(displaced, "utf8")).toBe("after");
+    expect(await readFile(displaced, "utf8")).toBe(rejected ? "inside-before" : "after");
   });
 
   it("rejects a parent symlink that resolves outside the workspace", async () => {

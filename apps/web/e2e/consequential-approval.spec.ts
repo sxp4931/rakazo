@@ -1,5 +1,12 @@
 import { expect, type Page, test } from "@playwright/test";
-import { activeBotId, captureScreenshot, completeOnboarding, rpc, signup } from "./helpers";
+import {
+  activeBotId,
+  captureScreenshot,
+  completeOnboarding,
+  openUserSettings,
+  rpc,
+  signup,
+} from "./helpers";
 
 test("actions run by default while optional confirmations live in advanced user settings", async ({
   page,
@@ -19,8 +26,7 @@ test("actions run by default while optional confirmations live in advanced user 
   await expect(page.getByTestId("bot-settings").getByText("Action confirmations")).toHaveCount(0);
   await page.getByRole("button", { name: "Close panel" }).click();
 
-  await openUserSettings(page);
-  const settings = page.getByTestId("user-settings");
+  const settings = await openUserSettings(page);
   await expect(settings).toHaveAttribute("role", "dialog");
   await expect(settings).toBeFocused();
   await expect(settings.getByText("Optional controls most people never need")).toBeVisible();
@@ -30,6 +36,9 @@ test("actions run by default while optional confirmations live in advanced user 
   await settings.getByText("Advanced", { exact: true }).click();
   await expect(settings.getByRole("heading", { name: "Action confirmations" })).toBeVisible();
   await expect(settings.getByText("No exceptions. Actions run automatically.")).toBeVisible();
+  await expect(settings.getByTestId("auto-review-toggle")).toBeVisible();
+  await expect(settings.getByTestId("auto-review-toggle")).not.toBeChecked();
+  await expect(settings.getByText("Flag unexpected actions")).toBeVisible();
   await settings.getByRole("button", { name: "Ask before sending external email" }).click();
   await expect(settings.getByText("Ask before email actions", { exact: true })).toBeVisible();
   await captureScreenshot(page, testInfo, "52-advanced-action-confirmations");
@@ -42,10 +51,24 @@ test("actions run by default while optional confirmations live in advanced user 
   });
 
   await requestDestinationWrite(page, "write this to the destination crm as a note again");
-  await expect(
-    page.getByRole("button", { name: "Always allow this tool", exact: true }),
-  ).toBeVisible();
-  await expect(page.getByRole("button", { name: "Deny", exact: true })).toBeVisible();
+  const allowOnce = page.getByRole("button", { name: "Allow once", exact: true });
+  const alwaysAllow = page.getByRole("button", { name: "Always allow this tool", exact: true });
+  const deny = page.getByRole("button", { name: "Deny", exact: true });
+  await expect(alwaysAllow).toBeVisible();
+  await expect(deny).toBeVisible();
+  const allowBox = await allowOnce.boundingBox();
+  const alwaysBox = await alwaysAllow.boundingBox();
+  const denyBox = await deny.boundingBox();
+  expect(allowBox).toBeTruthy();
+  expect(alwaysBox).toBeTruthy();
+  expect(denyBox).toBeTruthy();
+  expect(alwaysBox!.y).toBeGreaterThan(allowBox!.y + allowBox!.height - 2);
+  expect(denyBox!.y).toBeGreaterThan(alwaysBox!.y + alwaysBox!.height - 2);
+  expect(Math.abs(allowBox!.x - alwaysBox!.x)).toBeLessThan(2);
+  const optionList = allowOnce.locator("xpath=ancestor::div[contains(@class,'space-y-1.5')][1]");
+  const listBox = await optionList.boundingBox();
+  expect(listBox).toBeTruthy();
+  expect(Math.abs(allowBox!.width - listBox!.width)).toBeLessThan(2);
   await captureScreenshot(page, testInfo, "53-action-confirmation-pending");
 
   await page.getByRole("button", { name: "Deny", exact: true }).click();
@@ -73,12 +96,6 @@ test("actions run by default while optional confirmations live in advanced user 
   await expectComposerReady(page);
   await expect(page.getByRole("button", { name: "Allow once", exact: true })).toHaveCount(0);
 });
-
-async function openUserSettings(page: Page) {
-  await page.getByTestId("user-menu-trigger").click();
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
-  await expect(page.getByTestId("user-settings")).toBeVisible();
-}
 
 async function sendDestinationWrite(page: Page, prompt: string) {
   await expectComposerReady(page);

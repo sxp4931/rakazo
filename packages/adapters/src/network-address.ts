@@ -3,14 +3,22 @@ import { isIP, type LookupFunction } from "node:net";
 export type ResolvedAddress = { address: string; family: number };
 export type ResolveHostname = (hostname: string) => Promise<ResolvedAddress[]>;
 
+const CLOUD_METADATA_IPV4 = new Set([
+  ipv4ToNumber("169.254.169.254"),
+  ipv4ToNumber("100.100.100.200"),
+]);
+const AWS_IMDS_IPV6 = 0xfd000ec2000000000000000000000254n;
+/** fd7a:115c:a1e0::/48 — the Tailscale IPv6 range. */
+const TAILSCALE_ULA_PREFIX = 0xfd7a115ca1e0n;
+
 export function createAddressCheckedLookup(
   resolve: ResolveHostname,
-  validate: (addresses: ResolvedAddress[]) => void,
+  validate: (addresses: ResolvedAddress[], hostname: string) => void,
 ): LookupFunction {
   return (hostname, options, callback) => {
     void resolve(hostname)
       .then((addresses) => {
-        validate(addresses);
+        validate(addresses, hostname);
         if (options.all) {
           callback(null, addresses);
           return;
@@ -38,10 +46,12 @@ export function isPrivateAddress(address: string): boolean {
     if (ipv6 === 0n || ipv6 === 1n) return true;
     if (ipv6 >> 120n === 0xffn) return true;
     const topTenBits = ipv6 >> 118n;
+    // fe80::/10 link-local (and the adjacent fea0::/10 bit pattern 0x3fb)
     if (topTenBits === 0x3fan || topTenBits === 0x3fbn) return true;
+    // fc00::/7 unique local (ULA), including fd00::/8
     if (((ipv6 >> 120n) & 0xfen) === 0xfcn) return true;
-    if (ipv6 >> 32n === 0xffffn) return isPrivateIpv4Number(Number(ipv6 & 0xffffffffn));
-    if (ipv6 >> 32n === 0n) return true;
+    const embeddedIpv4 = getEmbeddedIpv4Number(ipv6);
+    if (embeddedIpv4 !== undefined) return isPrivateIpv4Number(embeddedIpv4);
     return false;
   }
   const octets = ipv4.split(".").map(Number);
@@ -57,6 +67,35 @@ export function isPrivateAddress(address: string): boolean {
     (a === 198 && (b === 18 || b === 19)) ||
     (a != null && a >= 224)
   );
+}
+
+export function isCloudMetadataAddress(address: string): boolean {
+  const value = address.toLowerCase().replace(/^\[|\]$/g, "");
+  const mapped = value.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/)?.[1];
+  const ipv4 = mapped ?? (isIP(value) === 4 ? value : undefined);
+  if (ipv4) return isCloudMetadataIpv4Number(ipv4ToNumber(ipv4));
+
+  const ipv6 = parseIpv6(value);
+  if (ipv6 === undefined) return false;
+  if (ipv6 === AWS_IMDS_IPV6) return true;
+  const embeddedIpv4 = getEmbeddedIpv4Number(ipv6);
+  return embeddedIpv4 !== undefined && isCloudMetadataIpv4Number(embeddedIpv4);
+}
+
+/** Tailscale gives every node a CGNAT 100.64.0.0/10 address and an
+ * fd7a:115c:a1e0::/48 ULA, and MagicDNS answers with both. Callers that accept
+ * a tailnet host have to accept the IPv6 half too, or the name resolves to one
+ * allowed and one blocked address and the whole host is rejected. */
+export function isTailscaleAddress(address: string): boolean {
+  const value = address.toLowerCase().replace(/^\[|\]$/g, "");
+  const mapped = value.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/)?.[1];
+  const ipv4 = mapped ?? (isIP(value) === 4 ? value : undefined);
+  if (ipv4) {
+    const [a, b] = ipv4.split(".").map(Number);
+    return a === 100 && b != null && b >= 64 && b <= 127;
+  }
+  const ipv6 = parseIpv6(value);
+  return ipv6 !== undefined && ipv6 >> 80n === TAILSCALE_ULA_PREFIX;
 }
 
 export function isLinkLocalAddress(address: string): boolean {
@@ -104,6 +143,25 @@ function replaceIpv4Tail(value: string, tail: string): string | undefined {
   const first = ((a << 8) | b).toString(16);
   const second = ((c << 8) | d).toString(16);
   return `${value.slice(0, value.lastIndexOf(":") + 1)}${first}:${second}`;
+}
+
+function ipv4ToNumber(value: string): number {
+  return value.split(".").reduce((result, octet) => (result << 8) | Number(octet), 0) >>> 0;
+}
+
+function getEmbeddedIpv4Number(ipv6: bigint): number | undefined {
+  const ipv4Prefix = ipv6 >> 32n;
+  // ::ffff:0:0/96 IPv4-mapped and ::/96 IPv4-compatible (deprecated).
+  if (ipv4Prefix === 0xffffn || ipv4Prefix === 0n) return Number(ipv6 & 0xffffffffn);
+  // 64:ff9b::/96 NAT64 well-known prefix.
+  if (ipv4Prefix === 0x64ff9bn << 64n) return Number(ipv6 & 0xffffffffn);
+  // 2002::/16 6to4 — IPv4 lives in the next 32 bits after the prefix.
+  if (ipv6 >> 112n === 0x2002n) return Number((ipv6 >> 80n) & 0xffffffffn);
+  return undefined;
+}
+
+function isCloudMetadataIpv4Number(value: number): boolean {
+  return CLOUD_METADATA_IPV4.has(value);
 }
 
 function isPrivateIpv4Number(value: number): boolean {

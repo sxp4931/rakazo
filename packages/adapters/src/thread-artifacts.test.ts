@@ -30,7 +30,7 @@ describe("current-turn thread files", () => {
           } as unknown as ArtifactStore,
         },
         {
-          workspaceId: "workspace-1",
+          spaceId: "workspace-1",
           userId: "user-1",
           botId: "bot-1",
           runId: "run-1",
@@ -42,7 +42,7 @@ describe("current-turn thread files", () => {
     ).rejects.toBe(failure);
     expect(remove).toHaveBeenCalledWith(
       "stored-1",
-      expect.objectContaining({ workspaceId: "workspace-1", botId: "bot-1" }),
+      expect.objectContaining({ spaceId: "workspace-1", botId: "bot-1" }),
     );
   });
 
@@ -50,7 +50,7 @@ describe("current-turn thread files", () => {
     const findMany = vi.fn().mockResolvedValue([
       {
         id: "artifact-1",
-        workspaceId: "workspace-1",
+        spaceId: "workspace-1",
         botId: "bot-1",
         name: "../quarterly report.pdf",
         mimeType: "application/pdf",
@@ -60,10 +60,11 @@ describe("current-turn thread files", () => {
     ]);
     const get = vi.fn().mockResolvedValue(new Uint8Array([1, 2, 3, 4]));
     const writeFile = vi.fn().mockResolvedValue(undefined);
+    const markWorkspaceDirty = vi.fn();
     const context: AdapterContext & { botId: string } = {
       operationId: "run-1",
       traceId: "run-1",
-      workspaceId: "workspace-1",
+      spaceId: "workspace-1",
       userId: "user-1",
       botId: "bot-1",
       runId: "run-1",
@@ -92,7 +93,7 @@ describe("current-turn thread files", () => {
         sandbox: { writeFile } as unknown as SandboxProvider,
       },
       blocks,
-      { context, computer, computerMode: "team" },
+      { context, computer, computerMode: "team", markWorkspaceDirty },
     );
 
     expect(get).toHaveBeenCalledWith("stored-1", context);
@@ -103,6 +104,10 @@ describe("current-turn thread files", () => {
         content: new Uint8Array([1, 2, 3, 4]),
       },
       context,
+    );
+    expect(markWorkspaceDirty).toHaveBeenCalledOnce();
+    expect(markWorkspaceDirty.mock.invocationCallOrder[0]).toBeLessThan(
+      writeFile.mock.invocationCallOrder[0]!,
     );
     expect(files).toEqual([
       {
@@ -135,7 +140,7 @@ describe("current-turn thread files", () => {
         context: {
           operationId: "run-1",
           traceId: "run-1",
-          workspaceId: "workspace-1",
+          spaceId: "workspace-1",
           userId: "user-1",
           botId: "bot-1",
           signal: new AbortController().signal,

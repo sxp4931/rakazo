@@ -16,7 +16,7 @@ test("composer / picker lists skills above actions", async ({ page }, testInfo) 
   });
 
   // aria-label stays available when skill/mention chips hide the placeholder.
-  const composer = page.getByRole("textbox", { name: /^Message/ });
+  const composer = page.getByRole("combobox", { name: /^Message/ });
   await expect(composer).toBeVisible();
   await composer.fill("/");
 
@@ -36,6 +36,9 @@ test("composer / picker lists skills above actions", async ({ page }, testInfo) 
   expect(skillBox!.y).toBeLessThan(actionBox!.y);
 
   await expect(skillButton).toContainText("Prepare a concise standup");
+  const interrogate = picker.getByRole("button", { name: "Skill Interrogate", exact: true });
+  await expect(interrogate).toBeVisible();
+  await expect(interrogate).toContainText("Review only; never applies fixes.");
   await captureScreenshot(page, testInfo, "slash-skills-picker");
 
   await skillButton.click();
@@ -52,6 +55,14 @@ test("composer / picker lists skills above actions", async ({ page }, testInfo) 
 
   await page.getByRole("button", { name: "Remove skill Daily standup" }).click();
   await expect(page.getByTestId("skill-chip")).toHaveCount(0);
+
+  await composer.fill("/Inter");
+  await expect(interrogate).toBeVisible();
+  await captureScreenshot(page, testInfo, "interrogate-skill-picker");
+  await interrogate.click();
+  await expect(skillChip).toContainText("Interrogate");
+  await expect(composer).toHaveValue("");
+  await page.getByRole("button", { name: "Remove skill Interrogate" }).click();
 
   await composer.fill("@");
   await expect(page.getByTestId("slash-picker")).toHaveCount(0);

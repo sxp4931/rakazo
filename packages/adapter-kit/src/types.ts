@@ -3,12 +3,14 @@ import type { ConnectionCatalogItem, SandboxKind } from "@rakazo/contracts";
 export interface AdapterContext {
   operationId: string;
   traceId: string;
-  workspaceId: string;
+  spaceId: string;
   userId: string;
   botId?: string;
   runId?: string;
   /** Opaque fence for releasing a graphical screen without tearing down its replacement. */
   screenLeaseId?: string;
+  /** When releasing a screen after cancel, also stop orphaned browser work on that screen. */
+  cancelRunWork?: boolean;
   signal: AbortSignal;
   /** Connected external accounts available to this run, including their owning connector. */
   connectedConnections?: ConnectedConnector[];
@@ -145,6 +147,16 @@ export interface AgentToolExecutionResult {
   details: unknown;
 }
 
+/** Ephemeral completion data for audit hooks; result contents must be redacted before persistence. */
+export interface AgentToolCompletion {
+  name: string;
+  executionId: string;
+  durationMs: number;
+  result?: unknown;
+  error?: unknown;
+  paused?: boolean;
+}
+
 export interface ControlLeaseRef {
   leaseId: string;
   holder: "user" | "bot";
@@ -179,6 +191,9 @@ export interface ConnectorRoute {
   connectorId: string;
   toolName: string;
   resourceId?: string;
+  resourceRevision?: string | number;
+  /** Source label for lazy catalog name indexes. Never exposed as a model schema field. */
+  catalogGroup?: string;
 }
 
 export interface ConnectorCall {
@@ -297,32 +312,50 @@ export interface SemanticMemoryPurgeHistoryRequest {
   generations: number[];
 }
 
+export interface AgentInputImage {
+  name: string;
+  mimeType: "image/jpeg" | "image/png" | "image/webp" | "image/gif";
+  data: Uint8Array;
+}
+
+export interface AgentSteeringMessage {
+  id: string;
+  messageId: string;
+  text: string;
+  /** Persisted history text before attachment paths are appended. */
+  historyText?: string;
+  images?: AgentInputImage[];
+}
+
+export interface AgentRunModel {
+  provider: string;
+  id: string;
+  apiKey?: string;
+  baseUrl?: string;
+  /** Whether this custom connection accepts standard reasoning_effort. */
+  reasoning?: boolean;
+  /** Preferred thinking effort for reasoning models; clamped to the model’s supported set. */
+  thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | null;
+  /** In-process OAuth credential from the encrypted store for this run. */
+  oauth?: {
+    credential: AgentModelOAuthCredential;
+    persist?: (credential: AgentModelOAuthCredential) => Promise<void>;
+  };
+}
+
 export interface AgentRunRequest {
   botId: string;
   threadId: string;
   runId: string;
+  sourceMessageId?: string | null;
   prompt: string;
   instructions: string;
-  history: Array<{ role: "user" | "assistant" | "system"; content: string }>;
-  currentTurnImages?: Array<{
-    name: string;
-    mimeType: "image/jpeg" | "image/png" | "image/webp" | "image/gif";
-    data: Uint8Array;
-  }>;
+  history: Array<{ id?: string; role: "user" | "assistant" | "system"; content: string }>;
+  currentTurnImages?: AgentInputImage[];
   tools: ConnectorTool[];
-  model: {
-    provider: string;
-    id: string;
-    apiKey?: string;
-    baseUrl?: string;
-    /** Preferred thinking effort for reasoning models; clamped to the model’s supported set. */
-    thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | null;
-    /** In-process OAuth credential from the encrypted store for this run. */
-    oauth?: {
-      credential: AgentModelOAuthCredential;
-      persist?: (credential: AgentModelOAuthCredential) => Promise<void>;
-    };
-  };
+  model: AgentRunModel;
+  /** Resolve an explicitly requested helper model within the active user and space scope. */
+  resolveModel?: (provider: string, modelId: string) => Promise<AgentRunModel>;
   resumeFromCheckpoint?: string;
   script?: ScriptedTurn[];
   /**
@@ -330,18 +363,24 @@ export interface AgentRunRequest {
    * When set, skip synthetic empty-turn fallbacks.
    */
   allowSilentEmpty?: boolean;
+  /** Contextual fallback when a non-silent run produces no written response. */
+  emptyResponseText?: string;
   executeTool?: (
     name: string,
     args: Record<string, unknown>,
     executionId: string,
     route?: ConnectorRoute,
   ) => Promise<unknown>;
+  /** Called after a tool returns; implementations must not persist raw result contents. */
+  onToolCompleted?: (completion: AgentToolCompletion) => Promise<void> | void;
+  /** Atomically claim durable user steering at the runtime's next safe turn boundary. */
+  claimSteering?: (seenIds: string[]) => Promise<AgentSteeringMessage[]>;
 }
 
 export interface ScriptedTurn {
   assistant?: string;
   toolCalls?: Array<{ name: string; args: Record<string, unknown> }>;
-  ask?: { text: string; detail?: string };
+  ask?: { text: string; detail?: string; actions?: Array<{ id: string; label: string }> };
   takeover?: { reason: string };
   files?: Array<{ path: string; content: string }>;
   memory?: Array<{ scope: "bot" | "user"; path: string; content: string }>;
@@ -350,9 +389,19 @@ export interface ScriptedTurn {
 
 export type AgentRuntimeEvent =
   | { type: "text"; text: string }
-  | { type: "progress"; text: string }
+  | {
+      type: "progress";
+      text: string;
+      /** Provider-generated tool status rather than assistant-authored narration. */
+      activity?: true;
+    }
   | { type: "tool"; name: string; args: Record<string, unknown>; executionId: string }
-  | { type: "ask"; text: string; detail?: string }
+  | {
+      type: "ask";
+      text: string;
+      detail?: string;
+      actions?: Array<{ id: string; label: string }>;
+    }
   | { type: "takeover"; reason: string }
   | { type: "usage"; inputTokens: number; outputTokens: number; provider: string; model: string }
   | { type: "checkpoint"; blob: string }
@@ -414,9 +463,13 @@ export interface BackgroundJobPayloads {
   "run.continue": { runId: string };
   "routine.wakeup": { routineId: string; scheduledFor: string };
   "computer.sleep": { computerId: string };
+  "computer.update": { updateId: string };
   "computer.control-expire": { computerId: string; leaseId: string };
   "skill.teaching-expire": { skillId: string };
   "history.compact": { threadId: string };
+  "messaging.deliver": { runId?: string };
+  /** Reconcile durable remote-agent intent; scope is loaded from the database. */
+  "cloud_agent.poll": { agentId: string };
 }
 
 export type BackgroundJobName = keyof BackgroundJobPayloads;
@@ -451,4 +504,278 @@ export interface NotificationMessage {
   body: string;
   botId: string;
   threadId: string;
+}
+
+/** A product-authored transactional email, independent of its delivery vendor. */
+export interface TransactionalEmail {
+  to: string;
+  subject: string;
+  text: string;
+  html?: string;
+}
+
+export interface MessagingCapabilities {
+  direct: boolean;
+  groups: boolean;
+  typing: boolean;
+}
+
+/** One messaging platform behind the chat surface (sendblue, slack, …). */
+export interface MessagingPlatformDescriptor {
+  provider: string;
+  capabilities: MessagingCapabilities;
+}
+
+/** Send into an existing conversation, addressed by its opaque thread id. */
+export interface MessagingSendRequest {
+  threadId: string;
+  body: string;
+  /** Stable key so retries of the same logical send can be deduped upstream. */
+  idempotencyKey?: string;
+}
+
+export interface MessagingSendResult {
+  handle: string;
+}
+
+/** Provider-neutral inbound message after platform webhook parsing. */
+export type TeamChatMessageKind = "direct" | "mention" | "ambient";
+
+export interface MessagingInboundMessage {
+  type: "message";
+  provider: string;
+  /** Per-message transport when one provider spans multiple networks (for example SMS vs RCS). */
+  transport?: string;
+  /** Provider message id; drives replay-safe client nonces downstream. */
+  handle: string;
+  /** Opaque conversation id — pass back to sendToThread to reply. */
+  threadId: string;
+  /** True for a 1:1 conversation with the deployment's line/bot. */
+  isDirect: boolean;
+  /** Sender address within the provider (E.164, Slack user id, …). */
+  from: string;
+  /** Sender display name when the platform provides one. */
+  fromLabel: string | null;
+  /** Group/channel display name; null for DMs or when unknown. */
+  channelName: string | null;
+  /** Group roster addresses when the platform reports them; often empty. */
+  participants: string[];
+  content: string;
+  mediaUrl: string | null;
+  /** Team-room workspace/team id when the platform reports one (Slack team_id, …). */
+  workspaceId?: string;
+  /** Stable conversation key within the workspace (channel id, DM key, …). */
+  conversationKey?: string;
+  /** How this message should engage the team-chat bot. */
+  kind?: TeamChatMessageKind;
+  /** Provider thread id for in-channel replies (Slack thread_ts); null for channel root. */
+  replyThreadId?: string | null;
+  /** True when the sender is another bot/app. */
+  senderIsBot?: boolean;
+  /** Display names for room participants when the platform reports them. */
+  participantNames?: string[];
+}
+
+/** Provider-neutral inbound team/external room message for TeamChatBridge. */
+export interface TeamChatInboundMessage {
+  eventId: string;
+  workspaceId: string;
+  kind: TeamChatMessageKind;
+  conversationType?: "im" | "channel" | "group" | "mpim";
+  conversationKey: string;
+  /** Messaging threadId used with sendToThread. */
+  conversationId: string;
+  conversationName?: string;
+  participantNames?: string[];
+  replyThreadId: string | null;
+  senderId: string;
+  senderName: string;
+  senderIsBot?: boolean;
+  content: string;
+}
+
+export interface TeamChatSendRequest {
+  conversationId: string;
+  replyThreadId: string | null;
+  content: string;
+  idempotencyKey?: string;
+}
+
+export interface TeamChatSendResult {
+  handle: string;
+}
+
+/** Provider-neutral outbound delivery status after platform webhook parsing. */
+export interface MessagingOutboundStatus {
+  type: "status";
+  provider: string;
+  handle: string;
+  status: string;
+}
+
+export type MessagingInboundEvent = MessagingInboundMessage | MessagingOutboundStatus;
+
+export interface WebSearchCapabilities {
+  search: boolean;
+  /** True when results come from the active model’s native search, not a third-party API. */
+  native?: boolean;
+  /** True when search works without a hosted search vendor or API key. */
+  keyless?: boolean;
+}
+
+export interface WebFetchCapabilities {
+  fetch: boolean;
+  /** True when readable extraction runs without executing page JavaScript. */
+  readability: boolean;
+}
+
+export interface WebSearchRequest {
+  query: string;
+  maxResults?: number;
+  signal?: AbortSignal;
+}
+
+export interface WebSearchHit {
+  title: string;
+  url: string;
+  snippet: string;
+}
+
+export interface WebFetchRequest {
+  url: string;
+  maxChars?: number;
+  signal?: AbortSignal;
+}
+
+export interface WebFetchResult {
+  url: string;
+  title: string;
+  text: string;
+  truncated: boolean;
+}
+
+/** Page-level browser on the bot computer (DOM refs), not a hosted browser vendor. */
+export interface BrowserCapabilities {
+  page: boolean;
+  /** True when element refs from snapshot can be clicked or filled. */
+  refs: boolean;
+  /** True when the adapter runs without a hosted browser vendor or API key. */
+  keyless?: boolean;
+}
+
+export interface BrowserNavigateRequest {
+  url: string;
+  signal?: AbortSignal;
+}
+
+export interface BrowserNavigateResult {
+  url: string;
+  title: string;
+  /** When set, the page tool could not operate; use computer_act instead. */
+  fallback?: "computer_act";
+  error?: string;
+}
+
+export interface BrowserSnapshotRequest {
+  signal?: AbortSignal;
+}
+
+export interface BrowserSnapshotNode {
+  /** Stable element ref for browser_act (e.g. e12). */
+  ref: string;
+  role: string;
+  name: string;
+  value?: string;
+  tag?: string;
+}
+
+export interface BrowserSnapshotResult {
+  url: string;
+  title: string;
+  /** Compact accessibility-style tree for the model. */
+  tree: string;
+  elements: BrowserSnapshotNode[];
+  fallback?: "computer_act";
+  error?: string;
+}
+
+export type BrowserActKind = "click" | "fill" | "type";
+
+export type BrowserActStep =
+  | { kind: "click"; ref: string }
+  | { kind: "fill" | "type"; ref: string; text: string };
+
+export interface BrowserActRequest {
+  actions: BrowserActStep[];
+  signal?: AbortSignal;
+}
+
+export interface BrowserActResult {
+  ok: boolean;
+  completed: number;
+  /** An action may have taken effect before its response was lost. Observe before continuing. */
+  uncertain?: boolean;
+  url: string;
+  title: string;
+  /** Snapshot after the actions when available. */
+  tree?: string;
+  elements?: BrowserSnapshotNode[];
+  fallback?: "computer_act";
+  error?: string;
+}
+
+/** A sandbox must route these commands through its owned screen, never generic host execution. */
+export type PageBrowserCommand =
+  | { command: "navigate"; url: string }
+  | { command: "snapshot" }
+  | { command: "act"; actions: BrowserActStep[] };
+
+export type PageBrowserResult = Partial<BrowserSnapshotResult & BrowserActResult> & { ok: boolean };
+
+/** Vendor-neutral status for a remote cloud coding agent. */
+export type CloudAgentStatus = "running" | "finished" | "failed" | "cancelled";
+
+export interface CloudAgentCapabilities {
+  launch: boolean;
+  reply: boolean;
+  cancel: boolean;
+  /** True when the adapter never leaves the process (tests / Playwright). */
+  offline?: boolean;
+}
+
+export type CloudAgentImage = { data: string; mimeType: string } | { url: string };
+
+export interface CloudAgentLaunchRequest {
+  /** Repeated launches with this key must resolve to the same remote agent. */
+  idempotencyKey: string;
+  prompt: string;
+  repository?: string;
+  images?: CloudAgentImage[];
+  openPr?: boolean;
+  signal?: AbortSignal;
+}
+
+export interface CloudAgentHandle {
+  id: string;
+  url: string;
+  title: string;
+  status: CloudAgentStatus;
+  /** Latest remote run id when the vendor exposes one (needed for cancel). */
+  latestRunId?: string;
+}
+
+export interface CloudAgentSnapshot {
+  id: string;
+  url: string;
+  title: string;
+  status: CloudAgentStatus;
+  branch?: string;
+  prUrl?: string;
+  latestRunId?: string;
+}
+
+export interface CloudAgentReplyRequest {
+  prompt: string;
+  images?: CloudAgentImage[];
+  signal?: AbortSignal;
 }

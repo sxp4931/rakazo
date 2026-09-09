@@ -12,6 +12,7 @@ const payloadSchemas = {
     routineId: z.string().min(1),
     scheduledFor: z.string().datetime({ offset: true }),
   }),
+  "computer.update": z.object({ updateId: z.string().min(1) }),
   "computer.sleep": z.object({ computerId: z.string().min(1) }),
   "computer.control-expire": z.object({
     computerId: z.string().min(1),
@@ -19,6 +20,8 @@ const payloadSchemas = {
   }),
   "skill.teaching-expire": z.object({ skillId: z.string().min(1) }),
   "history.compact": z.object({ threadId: z.string().min(1) }),
+  "messaging.deliver": z.object({ runId: z.string().min(1).optional() }),
+  "cloud_agent.poll": z.object({ agentId: z.string().min(1) }),
 } satisfies { [Name in BackgroundJobName]: z.ZodType<BackgroundJobPayloads[Name]> };
 
 export function parseBackgroundJob(name: string, payload: unknown): BackgroundJob {
@@ -112,10 +115,35 @@ export function historyCompactJobKey(threadId: string): string {
   return `history.compact:${threadId}`;
 }
 
+export function messagingDeliverJob(runId?: string, availableAt?: Date): BackgroundJob {
+  return {
+    name: "messaging.deliver",
+    payload: runId ? { runId } : {},
+    replaceKey: `messaging.deliver:${runId ?? "drain"}`,
+    ...(availableAt ? { availableAt } : {}),
+  };
+}
+
 export function historyCompactJob(threadId: string): BackgroundJob {
   return {
     name: "history.compact",
     payload: { threadId },
     replaceKey: historyCompactJobKey(threadId),
+  };
+}
+
+export function cloudAgentPollJobKey(agentId: string): string {
+  return `cloud_agent.poll:${agentId}`;
+}
+
+export function cloudAgentPollJob(
+  payload: BackgroundJobPayloads["cloud_agent.poll"],
+  availableAt?: Date,
+): BackgroundJob {
+  return {
+    name: "cloud_agent.poll",
+    payload,
+    replaceKey: cloudAgentPollJobKey(payload.agentId),
+    ...(availableAt ? { availableAt } : {}),
   };
 }

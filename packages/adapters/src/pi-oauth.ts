@@ -41,8 +41,8 @@ export const SUBSCRIPTION_SIGN_IN_PROVIDERS: Record<
     mode: "auth-url",
     loginLabel: "Sign in with Claude Pro/Max",
     hint: "Claude Pro/Max / key",
-    billing:
-      "Sign in with Claude Pro or Max, or paste an Anthropic API key. Uses your Anthropic subscription. OtterBot does not pay.",
+    // Button + "Or paste an API key" already explain the choices; no extra paragraph.
+    billing: "",
   },
 };
 
@@ -52,7 +52,7 @@ const SIGN_IN_START_WAIT_MS = 30_000;
 export type StoredModelSecret =
   | { kind: "api_key"; key: string }
   | { kind: "oauth"; credential: OAuthCredential }
-  | { kind: "openai_compatible"; baseUrl: string; apiKey?: string };
+  | { kind: "openai_compatible"; baseUrl: string; apiKey?: string; reasoning?: boolean };
 
 export type PiOAuthConnected = {
   status: "connected";
@@ -90,7 +90,7 @@ type Session = {
   id: string;
   scope: string;
   userId: string;
-  workspaceId: string;
+  spaceId: string;
   provider: string;
   modelId?: string;
   label?: string;
@@ -124,6 +124,7 @@ export function parseModelSecret(plaintext: string): StoredModelSecret {
           kind: "openai_compatible",
           baseUrl: parsed.baseUrl.trim(),
           ...(apiKey ? { apiKey } : {}),
+          ...(typeof parsed.reasoning === "boolean" ? { reasoning: parsed.reasoning } : {}),
         };
       }
       if (
@@ -148,6 +149,7 @@ export function serializeModelSecret(secret: StoredModelSecret): string {
       kind: "openai_compatible",
       baseUrl: secret.baseUrl,
       ...(secret.apiKey ? { apiKey: secret.apiKey } : {}),
+      ...(secret.reasoning !== undefined ? { reasoning: secret.reasoning } : {}),
     });
   }
   return secret.key;
@@ -222,7 +224,7 @@ export class PiOAuthLogins {
 
   async begin(input: {
     userId: string;
-    workspaceId: string;
+    spaceId: string;
     provider: string;
     modelId?: string;
     label?: string;
@@ -237,7 +239,7 @@ export class PiOAuthLogins {
       throw input.signal.reason ?? new Error("Sign-in cancelled.");
     }
 
-    const scope = oauthScopeKey(input.userId, input.workspaceId, input.provider);
+    const scope = oauthScopeKey(input.userId, input.spaceId, input.provider);
     const prepared = await this.withReplacementLock(scope, input.signal, async () => {
       await this.retireActiveSession(scope, input.signal);
       throwIfAborted(input.signal);
@@ -249,7 +251,7 @@ export class PiOAuthLogins {
         id: loginId,
         scope,
         userId: input.userId,
-        workspaceId: input.workspaceId,
+        spaceId: input.spaceId,
         provider: input.provider,
         modelId: input.modelId,
         label: input.label,
@@ -373,13 +375,9 @@ export class PiOAuthLogins {
     }
   }
 
-  submit(
-    loginId: string,
-    actor: { userId: string; workspaceId: string },
-    code: string,
-  ): { ok: true } {
+  submit(loginId: string, actor: { userId: string; spaceId: string }, code: string): { ok: true } {
     const session = this.pending.get(loginId);
-    if (!session || session.userId !== actor.userId || session.workspaceId !== actor.workspaceId) {
+    if (!session || session.userId !== actor.userId || session.spaceId !== actor.spaceId) {
       throw new Error("Sign-in session not found. Start sign-in again.");
     }
     if (session.error) throw new Error(session.error);
@@ -395,9 +393,9 @@ export class PiOAuthLogins {
     return { ok: true };
   }
 
-  complete(loginId: string, actor: { userId: string; workspaceId: string }): PiOAuthComplete {
+  complete(loginId: string, actor: { userId: string; spaceId: string }): PiOAuthComplete {
     const session = this.pending.get(loginId);
-    if (!session || session.userId !== actor.userId || session.workspaceId !== actor.workspaceId) {
+    if (!session || session.userId !== actor.userId || session.spaceId !== actor.spaceId) {
       return { status: "error", error: "Sign-in session not found. Start sign-in again." };
     }
     if (session.error) {
@@ -420,11 +418,11 @@ export class PiOAuthLogins {
 
   async finish<T>(
     loginId: string,
-    actor: { userId: string; workspaceId: string },
+    actor: { userId: string; spaceId: string },
     persist: (result: PiOAuthConnected) => Promise<T>,
   ): Promise<PiOAuthFinish<T>> {
     const session = this.pending.get(loginId);
-    if (!session || session.userId !== actor.userId || session.workspaceId !== actor.workspaceId) {
+    if (!session || session.userId !== actor.userId || session.spaceId !== actor.spaceId) {
       return { status: "error", error: "Sign-in session not found. Start sign-in again." };
     }
     if (session.state === "finalizing") return { status: "pending" };
@@ -451,14 +449,10 @@ export class PiOAuthLogins {
     }
   }
 
-  async cancel(loginId: string, actor: { userId: string; workspaceId: string }): Promise<void> {
+  async cancel(loginId: string, actor: { userId: string; spaceId: string }): Promise<void> {
     while (true) {
       const session = this.pending.get(loginId);
-      if (
-        !session ||
-        session.userId !== actor.userId ||
-        session.workspaceId !== actor.workspaceId
-      ) {
+      if (!session || session.userId !== actor.userId || session.spaceId !== actor.spaceId) {
         return;
       }
       if (session.state === "finalizing") {
@@ -557,8 +551,8 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function oauthScopeKey(userId: string, workspaceId: string, provider: string): string {
-  return JSON.stringify([userId, workspaceId, provider]);
+function oauthScopeKey(userId: string, spaceId: string, provider: string): string {
+  return JSON.stringify([userId, spaceId, provider]);
 }
 
 function httpsAuthorizationUrl(input: string): string {

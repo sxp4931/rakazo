@@ -3,18 +3,22 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   ComposioEmulator,
+  createScheduleFromTool,
   DesktopSandboxProvider,
   FakeSandboxProvider,
   handoffToGroupBot,
   ManagedSandboxEmulator,
+  toComputerRef,
 } from "@rakazo/adapters";
+import { ACTIVE_RUN_STATUSES, ONCE_ROUTINE_CRON } from "@rakazo/core";
 import {
   appendEvent,
   createThreadEvents,
   createThreadMessage,
   RunHistoryWriteError,
 } from "@rakazo/db";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import type { createApp } from "../../../apps/api/src/app.ts";
 import { sessionCookieHeader } from "./index.js";
 
 type App = { request: (input: string, init?: RequestInit) => Promise<Response> };
@@ -28,19 +32,11 @@ const describeJourneys = hasDb ? describe : describe.skip;
 describeJourneys("required product journeys", () => {
   let app: App;
   let stop: () => Promise<void>;
-  let prisma: Awaited<
-    ReturnType<typeof import("../../../apps/api/src/app.ts").createApp>
-  >["prisma"];
-  let connector: Awaited<
-    ReturnType<typeof import("../../../apps/api/src/app.ts").createApp>
-  >["connector"];
-  let executor: Awaited<
-    ReturnType<typeof import("../../../apps/api/src/app.ts").createApp>
-  >["executor"];
-  let jobs: Awaited<ReturnType<typeof import("../../../apps/api/src/app.ts").createApp>>["jobs"];
-  let sandbox: Awaited<
-    ReturnType<typeof import("../../../apps/api/src/app.ts").createApp>
-  >["sandbox"];
+  let prisma: Awaited<ReturnType<typeof createApp>>["prisma"];
+  let connector: Awaited<ReturnType<typeof createApp>>["connector"];
+  let executor: Awaited<ReturnType<typeof createApp>>["executor"];
+  let jobs: Awaited<ReturnType<typeof createApp>>["jobs"];
+  let sandbox: Awaited<ReturnType<typeof createApp>>["sandbox"];
   const stamp = Date.now();
   const dataDir = mkdtempSync(path.join(tmpdir(), "rakazo-journey-"));
 
@@ -134,13 +130,110 @@ describeJourneys("required product journeys", () => {
     await stop?.();
   });
 
+  it("computer updates preserve the workspace and reserve the shared computer until completion", async () => {
+    const cookie = await signup(app, `maintenance-${stamp}@rakazo.test`, "Maintenance");
+    const outsider = await signup(app, `maintenance-other-${stamp}@rakazo.test`, "Other workspace");
+    const bot = await rpc<Bot>(app, cookie, "bots/create", {
+      name: "Writer",
+      title: "Writer",
+      description: "Writes files",
+      instructions: "Write files.",
+    });
+    await waitForDatabase(
+      async () =>
+        (await prisma.run.count({
+          where: { botId: bot.id, status: { in: [...ACTIVE_RUN_STATUSES] } },
+        })) === 0,
+    );
+    await rpc(app, cookie, "computer/boot", { botId: bot.id });
+    const original = await prisma.bot.findUniqueOrThrow({
+      where: { id: bot.id },
+      include: { computer: true },
+    });
+    const ctx = {
+      operationId: "fixture",
+      traceId: "fixture",
+      spaceId: original.spaceId,
+      userId: original.userId,
+      botId: bot.id,
+      signal: new AbortController().signal,
+    };
+    await sandbox.writeFile(
+      toComputerRef(original.computer!),
+      { path: "notes.txt", content: new TextEncoder().encode("durable work") },
+      ctx,
+    );
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const destroyed = vi.spyOn(sandbox, "destroy");
+    const exportWorkspace = sandbox.exportWorkspace.bind(sandbox);
+    const spy = vi
+      .spyOn(sandbox, "exportWorkspace")
+      .mockImplementation(async function* (ref, context) {
+        await gate;
+        yield* exportWorkspace(ref, context);
+      });
+    try {
+      const update = await rpc<{ id: string }>(app, cookie, "computer/update", { botId: bot.id });
+      await waitForDatabase(
+        async () =>
+          (await prisma.computerUpdate.findUniqueOrThrow({ where: { id: update.id } })).stage ===
+          "saving",
+      );
+      expect(await rpc(app, outsider, "computer/updates")).toEqual([]);
+      const duplicate = await app.request("/rpc/computer/update", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify({ json: { botId: bot.id } }),
+      });
+      expect(duplicate.status).toBe(409);
+      const stopped = await app.request("/rpc/computer/stop", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify({ json: { botId: bot.id } }),
+      });
+      expect(stopped.status).toBe(409);
+      const switched = await app.request("/rpc/bots/setComputer", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify({ json: { botId: bot.id, mode: "dedicated" } }),
+      });
+      expect(switched.status).toBe(409);
+      release();
+      await waitForDatabase(
+        async () =>
+          (await prisma.computerUpdate.findUniqueOrThrow({ where: { id: update.id } })).status ===
+          "completed",
+      );
+      const replacement = await prisma.computer.findUniqueOrThrow({
+        where: { id: original.computerId! },
+      });
+      expect(replacement.maintenanceId).toBeNull();
+      expect(destroyed).toHaveBeenCalledWith(
+        expect.objectContaining({ providerRef: original.computer!.providerRef }),
+        expect.anything(),
+      );
+      expect(
+        new TextDecoder().decode(
+          await sandbox.readFile(toComputerRef(replacement), "notes.txt", ctx),
+        ),
+      ).toBe("durable work");
+    } finally {
+      release();
+      spy.mockRestore();
+      destroyed.mockRestore();
+    }
+  });
+
   it("1+2: users are isolated and workspace bots share the Team Computer", async () => {
     const ada = await signup(app, `ada-j-${stamp}@rakazo.test`, "Ada Journey");
     const bob = await signup(app, `bob-j-${stamp}@rakazo.test`, "Bob Journey");
 
     const adaMe = await rpc<Me>(app, ada, "me");
     const bobMe = await rpc<Me>(app, bob, "me");
-    expect(adaMe.workspaceId).not.toBe(bobMe.workspaceId);
+    expect(adaMe.spaceId).not.toBe(bobMe.spaceId);
 
     const chief = await rpc<Bot>(app, ada, "bots/create", {
       name: "Chief",
@@ -311,7 +404,7 @@ describeJourneys("required product journeys", () => {
     const thread = await prisma.thread.findUniqueOrThrow({ where: { botId: bot.id } });
     const task = await prisma.task.create({
       data: {
-        workspaceId: thread.workspaceId,
+        spaceId: thread.spaceId,
         userId: thread.userId,
         botId: bot.id,
         threadId: thread.id,
@@ -321,7 +414,7 @@ describeJourneys("required product journeys", () => {
     });
     const run = await prisma.run.create({
       data: {
-        workspaceId: thread.workspaceId,
+        spaceId: thread.spaceId,
         userId: thread.userId,
         botId: bot.id,
         threadId: thread.id,
@@ -380,7 +473,7 @@ describeJourneys("required product journeys", () => {
 
     await expect(
       appendEvent(prisma, {
-        workspaceId: thread.workspaceId,
+        spaceId: thread.spaceId,
         threadId: thread.id,
         botId: bot.id,
         type: "thread.progress",
@@ -835,6 +928,81 @@ describeJourneys("required product journeys", () => {
     ).toBe(releaseEventsBefore + 1);
   });
 
+  it("4e: concurrent Team takeovers never return another bot's lease", async () => {
+    const cookie = await signup(
+      app,
+      `takeover-owner-race-j-${stamp}@rakazo.test`,
+      "Takeover Owner Race",
+    );
+    const writer = await rpc<Bot>(app, cookie, "bots/create", {
+      name: "Writer",
+      title: "",
+      description: "",
+      instructions: "",
+      notifyOnFinish: true,
+    });
+    const researcher = await rpc<Bot>(app, cookie, "bots/create", {
+      name: "Researcher",
+      title: "",
+      description: "",
+      instructions: "",
+      notifyOnFinish: true,
+    });
+    const analyst = await rpc<Bot>(app, cookie, "bots/create", {
+      name: "Analyst",
+      title: "",
+      description: "",
+      instructions: "",
+      notifyOnFinish: true,
+    });
+
+    await rpc(app, cookie, "computer/boot", { botId: writer.id });
+    const writerLease = await rpc<{ leaseId: string }>(app, cookie, "computer/takeover", {
+      botId: writer.id,
+    });
+
+    const originalSetScreenControl = sandbox.setScreenControl;
+    let revocations = 0;
+    let releaseRevocations!: () => void;
+    const bothRevocationsReached = new Promise<void>((resolve) => {
+      releaseRevocations = resolve;
+    });
+    const barrierTimeout = setTimeout(releaseRevocations, 1_000);
+    sandbox.setScreenControl = async (_computer, interactive, _context, controlToken) => {
+      expect(interactive).toBe(false);
+      expect(controlToken).toBe(writerLease.leaseId);
+      revocations += 1;
+      if (revocations === 2) releaseRevocations();
+      await bothRevocationsReached;
+    };
+
+    let responses: Response[] = [];
+    try {
+      responses = await Promise.all([
+        raw(app, cookie, "computer/takeover", { botId: researcher.id }),
+        raw(app, cookie, "computer/takeover", { botId: analyst.id }),
+      ]);
+    } finally {
+      clearTimeout(barrierTimeout);
+      releaseRevocations();
+      sandbox.setScreenControl = originalSetScreenControl;
+    }
+
+    expect(revocations).toBe(2);
+    expect(responses.map((response) => response.status).sort()).toEqual([200, 409]);
+    const computer = await prisma.computer.findFirstOrThrow({
+      where: { bots: { some: { id: writer.id } } },
+      select: { controlBotId: true, controlLeaseId: true },
+    });
+    const winner = computer.controlBotId === researcher.id ? researcher : analyst;
+    const successfulResponse = responses.find((response) => response.status === 200)!;
+    await expect(successfulResponse.clone().json()).resolves.toMatchObject({
+      json: { leaseId: computer.controlLeaseId },
+    });
+
+    await rpc(app, cookie, "computer/release", { botId: winner.id });
+  });
+
   it("5: a routine wakes the bot and posts into the existing thread", async () => {
     const cookie = await signup(app, `routine-j-${stamp}@rakazo.test`, "Routine");
     const bot = await rpc<Bot>(app, cookie, "bots/create", {
@@ -893,7 +1061,7 @@ describeJourneys("required product journeys", () => {
     const legacyDueAt = new Date(Date.now() - 1_000);
     const legacy = await prisma.routine.create({
       data: {
-        workspaceId: advanced.workspaceId,
+        spaceId: advanced.spaceId,
         userId: advanced.userId,
         botId: bot.id,
         name: "Legacy schedule",
@@ -918,6 +1086,128 @@ describeJourneys("required product journeys", () => {
     );
   });
 
+  it("5b: tool-created schedules wake in the creating group or 1:1 thread", async () => {
+    const cookie = await signup(app, `schedule-dest-j-${stamp}@rakazo.test`, "Schedule Dest");
+    const me = await rpc<Me>(app, cookie, "me");
+    const bot = await rpc<Bot>(app, cookie, "bots/create", {
+      name: "Scheduler",
+      title: "",
+      description: "",
+      instructions: "",
+      notifyOnFinish: true,
+    });
+    const peer = await rpc<Bot>(app, cookie, "bots/create", {
+      name: "Peer",
+      title: "",
+      description: "",
+      instructions: "",
+      notifyOnFinish: false,
+    });
+    const dmThread = await prisma.thread.findUniqueOrThrow({ where: { botId: bot.id } });
+    const group = await rpc<{ id: string; threadId: string }>(app, cookie, "groups/create", {
+      name: "Schedule room",
+      botIds: [bot.id, peer.id],
+    });
+    const events = createThreadEvents(prisma);
+    const scheduleDeps = { prisma, events, jobs };
+
+    const groupCreated = await createScheduleFromTool(scheduleDeps, {
+      spaceId: me.spaceId,
+      botId: bot.id,
+      userId: me.userId,
+      threadId: group.threadId,
+      name: "Group ping",
+      prompt: "say group-reminder-ok",
+      schedule: { delaySeconds: 30 },
+    });
+    expect(groupCreated).toMatchObject({ ok: true });
+    if (!("ok" in groupCreated) || !groupCreated.ok)
+      throw new Error("group schedule create failed");
+    const groupRoutine = await prisma.routine.findUniqueOrThrow({
+      where: { id: groupCreated.routineId },
+    });
+    expect(groupRoutine.threadId).toBe(group.threadId);
+    expect(groupRoutine.crons).toEqual([ONCE_ROUTINE_CRON]);
+
+    const groupDueAt = new Date(Date.now() - 1_000);
+    await prisma.routine.update({
+      where: { id: groupRoutine.id },
+      data: { nextRunAt: groupDueAt },
+    });
+    await executor.wakeRoutine(groupRoutine.id, groupDueAt.toISOString());
+    await waitForDatabase(async () => {
+      const run = await prisma.run.findFirst({
+        where: { routineId: groupRoutine.id, trigger: "routine" },
+      });
+      return run?.threadId === group.threadId;
+    });
+    const groupRun = await prisma.run.findFirstOrThrow({
+      where: { routineId: groupRoutine.id, trigger: "routine" },
+    });
+    expect(groupRun.threadId).toBe(group.threadId);
+    expect(groupRun.threadId).not.toBe(dmThread.id);
+    expect(
+      await prisma.event.count({
+        where: {
+          threadId: group.threadId,
+          type: "routine.fired",
+          runId: groupRun.id,
+        },
+      }),
+    ).toBe(1);
+    expect(
+      await prisma.event.count({
+        where: {
+          threadId: dmThread.id,
+          type: "routine.fired",
+          runId: groupRun.id,
+        },
+      }),
+    ).toBe(0);
+
+    const dmCreated = await createScheduleFromTool(scheduleDeps, {
+      spaceId: me.spaceId,
+      botId: bot.id,
+      userId: me.userId,
+      threadId: dmThread.id,
+      name: "DM ping",
+      prompt: "say dm-reminder-ok",
+      schedule: { delaySeconds: 30 },
+    });
+    expect(dmCreated).toMatchObject({ ok: true });
+    if (!("ok" in dmCreated) || !dmCreated.ok) throw new Error("dm schedule create failed");
+    const dmRoutine = await prisma.routine.findUniqueOrThrow({
+      where: { id: dmCreated.routineId },
+    });
+    expect(dmRoutine.threadId).toBe(dmThread.id);
+
+    const dmDueAt = new Date(Date.now() - 1_000);
+    await prisma.routine.update({
+      where: { id: dmRoutine.id },
+      data: { nextRunAt: dmDueAt },
+    });
+    await executor.wakeRoutine(dmRoutine.id, dmDueAt.toISOString());
+    await waitForDatabase(async () => {
+      const run = await prisma.run.findFirst({
+        where: { routineId: dmRoutine.id, trigger: "routine" },
+      });
+      return run?.threadId === dmThread.id;
+    });
+    const dmRun = await prisma.run.findFirstOrThrow({
+      where: { routineId: dmRoutine.id, trigger: "routine" },
+    });
+    expect(dmRun.threadId).toBe(dmThread.id);
+    expect(
+      await prisma.event.count({
+        where: {
+          threadId: dmThread.id,
+          type: "routine.fired",
+          runId: dmRun.id,
+        },
+      }),
+    ).toBe(1);
+  });
+
   it("allocates event and message cursors atomically under concurrent writes", async () => {
     const cookie = await signup(app, `sequence-j-${stamp}@rakazo.test`, "Sequence");
     const actor = await rpc<Me>(app, cookie, "me");
@@ -933,7 +1223,7 @@ describeJourneys("required product journeys", () => {
     await Promise.all(
       Array.from({ length: 40 }, (_, index) =>
         appendEvent(prisma, {
-          workspaceId: actor.workspaceId,
+          spaceId: actor.spaceId,
           threadId: thread.id,
           botId: bot.id,
           type: "thread.progress",
@@ -963,7 +1253,7 @@ describeJourneys("required product journeys", () => {
     const ctx = {
       operationId: "1",
       traceId: "1",
-      workspaceId: "w",
+      spaceId: "w",
       userId: "u",
       signal: new AbortController().signal,
     };
@@ -1122,6 +1412,23 @@ describeJourneys("required product journeys", () => {
     });
     const home = path.join(dataDir, "homes", gone.id);
     expect(existsSync(home)).toBe(true);
+    // Spend that really happened. The scripted runtime emits no usage event, so the row is
+    // written directly, the same way this file creates runs and tasks elsewhere.
+    const goneBotRow = await prisma.bot.findUniqueOrThrow({
+      where: { id: gone.id },
+      select: { spaceId: true, userId: true },
+    });
+    const goneSpend = await prisma.usageRecord.create({
+      data: {
+        spaceId: goneBotRow.spaceId,
+        botId: gone.id,
+        userId: goneBotRow.userId,
+        provider: "anthropic",
+        model: "claude-sonnet-4-5",
+        inputTokens: 1200,
+        outputTokens: 340,
+      },
+    });
 
     const stolen = await raw(app, bob, "bots/archive", { botId: gone.id });
     expect(stolen.status).toBeGreaterThanOrEqual(400);
@@ -1151,11 +1458,20 @@ describeJourneys("required product journeys", () => {
       scope: "user",
       content: "important retained context",
     });
+    // The name is the half that makes a detached usage row readable: bot_deletions is keyed by
+    // the bot id, so a per-bot spend report can still label spend that belongs to a bot that
+    // no longer exists.
     expect(await prisma.botDeletion.findUniqueOrThrow({ where: { id: gone.id } })).toMatchObject({
+      name: "Gone",
       memoriesPreserved: true,
     });
     expect(await prisma.artifact.findUnique({ where: { id: goneArtifact.id } })).toBeNull();
     expect(existsSync(home)).toBe(false);
+    // Deleting a bot must not erase what it cost, nor which bot cost it. botId has no foreign
+    // key, so it outlives the bot and stays joinable against bot_deletions for the name.
+    expect(
+      await prisma.usageRecord.findUniqueOrThrow({ where: { id: goneSpend.id } }),
+    ).toMatchObject({ botId: gone.id, inputTokens: 1200, outputTokens: 340 });
 
     await rpc(app, ada, "bots/remove", { botId: forget.id, deleteMemories: true });
     expect(await prisma.memoryDocument.findUnique({ where: { id: forgetMemory.id } })).toBeNull();
@@ -1185,7 +1501,7 @@ describeJourneys("required product journeys", () => {
 
     expect(deleted.status).toBe(200);
     expect(await prisma.user.findUnique({ where: { id: me.userId } })).toBeNull();
-    expect(await prisma.organization.findUnique({ where: { id: me.workspaceId } })).toBeNull();
+    expect(await prisma.organization.findUnique({ where: { id: me.spaceId } })).toBeNull();
     expect(await prisma.bot.findUnique({ where: { id: bot.id } })).toBeNull();
     expect((await raw(app, cookie, "me")).status).toBeGreaterThanOrEqual(400);
   });
@@ -1551,7 +1867,7 @@ describeJourneys("required product journeys", () => {
     );
     const concurrentTask = await prisma.task.create({
       data: {
-        workspaceId: botA.workspaceId,
+        spaceId: botA.spaceId,
         botId: botA.id,
         threadId: group.threadId,
         userId: adaMe.userId,
@@ -1561,7 +1877,7 @@ describeJourneys("required product journeys", () => {
     });
     const concurrentRun = await prisma.run.create({
       data: {
-        workspaceId: botA.workspaceId,
+        spaceId: botA.spaceId,
         botId: botA.id,
         threadId: group.threadId,
         taskId: concurrentTask.id,
@@ -1572,7 +1888,9 @@ describeJourneys("required product journeys", () => {
       },
     });
     const askSnapshot = await rpc<Snap>(app, ada, "threads/get", { groupId: group.id });
-    expect(askSnapshot.run?.id).toBe(concurrentRun.id);
+    // Waiting asks win the headline run even when a newer busy run exists.
+    expect(askSnapshot.run?.id).toBe(groupAsk.runId);
+    expect(askSnapshot.activeRuns?.some((run) => run.id === concurrentRun.id)).toBe(true);
     expect(askSnapshot.activeRuns?.some((run) => run.id === groupAsk.runId)).toBe(true);
     const askMessage = askSnapshot.messages.find(
       (message) =>
@@ -1609,7 +1927,7 @@ describeJourneys("required product journeys", () => {
 
     const staleTask = await prisma.task.create({
       data: {
-        workspaceId: botB.workspaceId,
+        spaceId: botB.spaceId,
         botId: botB.id,
         threadId: group.threadId,
         userId: adaMe.userId,
@@ -1619,7 +1937,7 @@ describeJourneys("required product journeys", () => {
     });
     const staleRun = await prisma.run.create({
       data: {
-        workspaceId: botB.workspaceId,
+        spaceId: botB.spaceId,
         botId: botB.id,
         threadId: group.threadId,
         taskId: staleTask.id,
@@ -1652,7 +1970,12 @@ describeJourneys("required product journeys", () => {
       where: { threadId_clientNonce: { threadId: group.threadId, clientNonce: replayNonce } },
       include: { sourceRuns: true },
     });
-    expect(replayMessage.sourceRuns).toHaveLength(2);
+    expect(replayMessage.sourceRuns).toHaveLength(1);
+    await expect(
+      prisma.steeringMessage.findUniqueOrThrow({
+        where: { messageId_botId: { messageId: replayMessage.id, botId: botB.id } },
+      }),
+    ).resolves.toMatchObject({ runId: staleRun.id, claimedAt: null });
     expect(
       await prisma.message.count({ where: { threadId: group.threadId, clientNonce: replayNonce } }),
     ).toBe(1);
@@ -1670,7 +1993,7 @@ describeJourneys("required product journeys", () => {
       { prisma, events: createThreadEvents(prisma), jobs },
       {
         id: staleRun.id,
-        workspaceId: botB.workspaceId,
+        spaceId: botB.spaceId,
         threadId: group.threadId,
         botId: botB.id,
         userId: staleTask.userId,
@@ -1809,7 +2132,7 @@ describeJourneys("required product journeys", () => {
     await rpc(app, ada, "bots/archive", { botId: archiveMember.id });
     const dissolvingTask = await prisma.task.create({
       data: {
-        workspaceId: archivePartner.workspaceId,
+        spaceId: archivePartner.spaceId,
         botId: archivePartner.id,
         threadId: archiveThread.id,
         userId: adaMe.userId,
@@ -1819,7 +2142,7 @@ describeJourneys("required product journeys", () => {
     });
     const dissolvingRun = await prisma.run.create({
       data: {
-        workspaceId: archivePartner.workspaceId,
+        spaceId: archivePartner.spaceId,
         botId: archivePartner.id,
         threadId: archiveThread.id,
         taskId: dissolvingTask.id,
@@ -2205,7 +2528,7 @@ describeJourneys("required product journeys", () => {
     });
     const routine = await prisma.routine.create({
       data: {
-        workspaceId: me.workspaceId,
+        spaceId: me.spaceId,
         userId: me.userId,
         botId: bot.id,
         name: "Remind once",
@@ -2249,9 +2572,74 @@ describeJourneys("required product journeys", () => {
     });
     expect(afterFire.status).toBeGreaterThanOrEqual(400);
   });
+
+  it("24: chat creates a space only after explicit approval", async () => {
+    const cookie = await signup(app, `space-chat-j-${stamp}@rakazo.test`, "Space Chat");
+    const me = await rpc<Me>(app, cookie, "me");
+    const bot = await rpc<Bot>(app, cookie, "bots/create", {
+      name: "Chief",
+      title: "",
+      description: "",
+      instructions: "",
+      notifyOnFinish: true,
+    });
+    const membershipsBefore = await prisma.spaceMember.count({ where: { userId: me.userId } });
+    const sent = await rpc<{ runId: string }>(app, cookie, "threads/send", {
+      botId: bot.id,
+      text: "create a space named Customer support",
+    });
+    const waiting = await waitFor(
+      app,
+      cookie,
+      bot.id,
+      (snap) => snap.run?.id === sent.runId && snap.run.status === "waiting_input",
+    );
+    const approval = JSON.stringify(waiting.messages);
+    expect(approval).toContain("Create space");
+    expect(approval).toContain("Customer support");
+    expect(approval).toContain("Cancel");
+    expect(approval).not.toContain("Always allow this tool");
+    expect(await prisma.spaceMember.count({ where: { userId: me.userId } })).toBe(
+      membershipsBefore,
+    );
+
+    await answerPendingApproval(app, cookie, bot.id, sent.runId, "allow", waiting);
+    await waitFor(
+      app,
+      cookie,
+      bot.id,
+      (snap) => !snap.run || ["completed", "failed", "cancelled"].includes(snap.run.status),
+    );
+    const navigation = await rpc<{ spaces: Array<{ name: string }> }>(app, cookie, "spaces/list");
+    expect(navigation.spaces.map((space) => space.name)).toContain("Customer support");
+    expect(await prisma.spaceMember.count({ where: { userId: me.userId } })).toBe(
+      membershipsBefore + 1,
+    );
+
+    const denied = await rpc<{ runId: string }>(app, cookie, "threads/send", {
+      botId: bot.id,
+      text: "create a space named Finance",
+    });
+    const deniedWaiting = await waitFor(
+      app,
+      cookie,
+      bot.id,
+      (snap) => snap.run?.id === denied.runId && snap.run.status === "waiting_input",
+    );
+    await answerPendingApproval(app, cookie, bot.id, denied.runId, "deny", deniedWaiting);
+    await waitFor(
+      app,
+      cookie,
+      bot.id,
+      (snap) => !snap.run || ["completed", "failed", "cancelled"].includes(snap.run.status),
+    );
+    expect(await prisma.spaceMember.count({ where: { userId: me.userId } })).toBe(
+      membershipsBefore + 1,
+    );
+  });
 });
 
-type Me = { workspaceId: string; userId: string; canChooseHostComputer: boolean };
+type Me = { spaceId: string; userId: string; canChooseHostComputer: boolean };
 type Bot = {
   id: string;
   name: string;

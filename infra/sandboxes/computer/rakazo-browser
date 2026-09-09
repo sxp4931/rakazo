@@ -1,23 +1,64 @@
 #!/bin/sh
 set -eu
 RAKAZO_HOME="${HOME:-/home/rakazo}"
-PROFILE="$RAKAZO_HOME/.browser-profiles/chromium"
+# Page-browser tools and desktop launchers share the assigned display profile.
+DISPLAY_NUM="${DISPLAY:-:1}"
+DISPLAY_NUM="${DISPLAY_NUM#:}"
+DISPLAY_NUM="${DISPLAY_NUM%%.*}"
+case "$DISPLAY_NUM" in
+  ''|*[!0-9]*) DISPLAY_NUM=1 ;;
+esac
+# POSIX shell arithmetic treats a leading zero as octal.
+while [ "${DISPLAY_NUM#0}" != "$DISPLAY_NUM" ]; do DISPLAY_NUM="${DISPLAY_NUM#0}"; done
+DISPLAY_NUM="${DISPLAY_NUM:-0}"
+DEBUG_PORT=$((9221 + DISPLAY_NUM))
+if [ -n "${RAKAZO_BROWSER_PROFILE:-}" ]; then
+  PROFILE="$RAKAZO_BROWSER_PROFILE"
+elif [ -s "/tmp/rakazo/browser-profile-$DISPLAY_NUM" ]; then
+  PROFILE="$(cat "/tmp/rakazo/browser-profile-$DISPLAY_NUM")"
+else
+  case "$DISPLAY_NUM" in
+    1) PROFILE="$RAKAZO_HOME/.browser-profiles/chromium" ;;
+    *) PROFILE="$RAKAZO_HOME/.browser-profiles/chromium-screen-$DISPLAY_NUM" ;;
+  esac
+fi
 mkdir -p "$PROFILE"
 BIN="$(command -v chromium || command -v chromium-browser || true)"
 if [ -z "$BIN" ]; then
   echo "chromium is not installed" >&2
   exit 1
 fi
-exec "$BIN" \
-  --test-type \
-  --no-sandbox \
-  --disable-dev-shm-usage \
-  --disable-gpu \
-  --disable-software-rasterizer \
-  --no-first-run \
-  --no-default-browser-check \
-  --disable-session-crashed-bubble \
-  --password-store=basic \
-  --user-data-dir="$PROFILE" \
-  --start-maximized \
-  "$@"
+USER_DATA_DIR_SET=0
+ACTUAL_PROFILE="$PROFILE"
+PREV_ARG_WAS_USER_DATA_DIR=0
+for arg in "$@"; do
+  if [ "$PREV_ARG_WAS_USER_DATA_DIR" -eq 1 ]; then
+    ACTUAL_PROFILE="$arg"
+    PREV_ARG_WAS_USER_DATA_DIR=0
+  fi
+  case "$arg" in
+    --user-data-dir=*) ACTUAL_PROFILE="${arg#*=}"; USER_DATA_DIR_SET=1 ;;
+    --user-data-dir) PREV_ARG_WAS_USER_DATA_DIR=1; USER_DATA_DIR_SET=1 ;;
+  esac
+done
+
+clear_crash_state() {
+  f="$1"
+  [ -f "$f" ] || return 0
+  sed -E \
+    's/"exit_type"[[:space:]]*:[[:space:]]*"Crashed"/"exit_type":"Normal"/g; s/"exited_cleanly"[[:space:]]*:[[:space:]]*false/"exited_cleanly":true/g' \
+    "$f" > "${f}.tmp" && mv "${f}.tmp" "$f"
+}
+
+if [ -d "$ACTUAL_PROFILE" ] && [ ! -e "$ACTUAL_PROFILE/SingletonLock" ] && [ ! -L "$ACTUAL_PROFILE/SingletonLock" ]; then
+  find "$ACTUAL_PROFILE" \( -name Preferences -o -name 'Local State' \) -type f 2>/dev/null |
+    while IFS= read -r f; do
+      clear_crash_state "$f" 2>/dev/null || rm -f "${f}.tmp"
+    done || true
+fi
+
+FLAGS="--test-type --no-sandbox --disable-dev-shm-usage --disable-gpu --disable-software-rasterizer --no-first-run --no-default-browser-check --disable-session-crashed-bubble --hide-crash-restore-bubble --password-store=basic --start-maximized --remote-debugging-address=127.0.0.1 --remote-debugging-port=$DEBUG_PORT"
+if [ "$USER_DATA_DIR_SET" -eq 0 ]; then
+  exec "$BIN" $FLAGS --user-data-dir="$PROFILE" "$@"
+fi
+exec "$BIN" $FLAGS "$@"

@@ -1,15 +1,22 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  API_PROBE_TIMEOUT_MS,
   apiBaseWarning,
   defaultApiBase,
   displayApiHost,
+  MAX_API_PROBE_RESPONSE_BYTES,
   normalizeApiBase,
   probeApiBase,
   usesCustomApiBase,
 } from "./endpoint.js";
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
 
 describe("normalizeApiBase", () => {
   it("trims, adds https, and keeps only the origin", () => {
@@ -24,6 +31,10 @@ describe("normalizeApiBase", () => {
     expect(normalizeApiBase("http://192.168.1.20:3100/")).toEqual({
       ok: true,
       url: "http://192.168.1.20:3100",
+    });
+    expect(normalizeApiBase("http://app.example.com")).toEqual({
+      ok: false,
+      error: "Public servers need https://",
     });
   });
 
@@ -44,6 +55,24 @@ describe("normalizeApiBase", () => {
 });
 
 describe("display and warnings", () => {
+  it("falls back to loopback when the compile-time endpoint is invalid", async () => {
+    vi.stubEnv("EXPO_PUBLIC_API_URL", "ftp://files.example.com");
+    vi.resetModules();
+    const endpoint = await import("./endpoint.js");
+
+    expect(endpoint.defaultApiBase()).toBe("http://127.0.0.1:3100");
+    vi.unstubAllEnvs();
+  });
+
+  it("falls back to loopback when the compile-time endpoint is public HTTP", async () => {
+    vi.stubEnv("EXPO_PUBLIC_API_URL", "http://app.example.com");
+    vi.resetModules();
+    const endpoint = await import("./endpoint.js");
+
+    expect(endpoint.defaultApiBase()).toBe("http://127.0.0.1:3100");
+    vi.unstubAllEnvs();
+  });
+
   it("shows host and non-default port", () => {
     expect(displayApiHost("https://rakazo.example.com")).toBe("rakazo.example.com");
     expect(displayApiHost("http://10.0.0.8:3100")).toBe("10.0.0.8:3100");
@@ -88,6 +117,51 @@ describe("probeApiBase", () => {
     await expect(probeApiBase("https://example.com", fetchImpl)).resolves.toMatchObject({
       ok: false,
     });
+  });
+
+  it("rejects an oversized health response", async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ json: { ok: true } }), {
+          headers: { "content-length": String(MAX_API_PROBE_RESPONSE_BYTES + 1) },
+        }),
+    ) as unknown as typeof fetch;
+
+    await expect(probeApiBase("https://app.example.com", fetchImpl)).resolves.toMatchObject({
+      ok: false,
+      error: "Could not reach that server",
+    });
+  });
+
+  it("returns a failure when an injected fetch ignores the probe signal", async () => {
+    vi.useFakeTimers();
+    const fetchImpl = vi.fn(
+      (_input: RequestInfo | URL, _init?: RequestInit) => new Promise<Response>(() => undefined),
+    );
+
+    const pending = probeApiBase("https://app.example.com", fetchImpl as typeof fetch);
+    await vi.advanceTimersByTimeAsync(API_PROBE_TIMEOUT_MS);
+
+    await expect(pending).resolves.toMatchObject({
+      ok: false,
+      error: "Could not reach that server",
+    });
+    expect(fetchImpl.mock.calls[0]?.[1]?.signal?.aborted).toBe(true);
+  });
+
+  it("returns a failure when a health response body never settles", async () => {
+    vi.useFakeTimers();
+    const cancel = vi.fn();
+    const fetchImpl = vi.fn(async () => new Response(new ReadableStream({ cancel })));
+
+    const pending = probeApiBase("https://app.example.com", fetchImpl as typeof fetch);
+    await vi.advanceTimersByTimeAsync(API_PROBE_TIMEOUT_MS);
+
+    await expect(pending).resolves.toMatchObject({
+      ok: false,
+      error: "Could not reach that server",
+    });
+    expect(cancel).toHaveBeenCalledOnce();
   });
 });
 

@@ -6,8 +6,9 @@ import {
   type CronPreset,
   type CronUnit,
   cronFromPreset,
-  defaultCronPreset,
 } from "@rakazo/core";
+import { Input, NativeSelect, NativeSelectOption } from "@rakazo/ui-web";
+import { Clock } from "lucide-react";
 
 const UNITS: CronUnit[] = ["minutes", "hours", "days"];
 const NUMBERS = [1, 2, 3, 5, 10, 15, 30, 45];
@@ -24,6 +25,7 @@ const TIMES = [
 
 const TIMED: CronFreq[] = ["Every day", "Weekdays", "Every week", "Every month"];
 
+/** Translate a cron frequency into the active UI locale. */
 function cronFreqLabel(freq: CronFreq): string {
   switch (freq) {
     case "Every hour":
@@ -45,6 +47,7 @@ function cronFreqLabel(freq: CronFreq): string {
   }
 }
 
+/** Translate a cron interval unit in its plural form. */
 function cronUnitLabel(unit: CronUnit): string {
   switch (unit) {
     case "minutes":
@@ -58,6 +61,7 @@ function cronUnitLabel(unit: CronUnit): string {
   }
 }
 
+/** Translate a cron interval unit in its singular form. */
 function cronUnitLabelSingular(unit: CronUnit): string {
   switch (unit) {
     case "minutes":
@@ -71,8 +75,69 @@ function cronUnitLabelSingular(unit: CronUnit): string {
   }
 }
 
-function describeCronPresetLocalized(preset: CronPreset): { lead: string; detail: string } {
+/** Select the Russian noun form for a numeric interval. */
+function russianPluralForm(value: number, one: string, few: string, many: string): string {
+  const absolute = Math.abs(value);
+  const mod10 = absolute % 10;
+  const mod100 = absolute % 100;
+  if (mod10 === 1 && mod100 !== 11) return one;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20)) return few;
+  return many;
+}
+
+/** Return the Russian interval unit with the case required after an amount. */
+function russianIntervalUnit(value: number, unit: CronUnit): string {
+  switch (unit) {
+    case "minutes":
+      return russianPluralForm(value, "минуту", "минуты", "минут");
+    case "hours":
+      return russianPluralForm(value, "час", "часа", "часов");
+    case "days":
+      return russianPluralForm(value, "день", "дня", "дней");
+    default:
+      return unit;
+  }
+}
+
+/** Return the Russian lead word for a recurring interval. */
+function russianIntervalLead(value: number, unit: CronUnit): string {
+  if (value !== 1) return "Каждые";
+  return unit === "minutes" ? "Каждую" : "Каждый";
+}
+
+/** Return the neutral lead used by the interval controls. */
+function russianIntervalControlLead(): string {
+  // The amount select stays visible for 1, so use a construction that keeps
+  // the number in the sentence grammatical: “Раз в 1 час”, “Раз в 2 часа”.
+  return "Раз в";
+}
+
+/** Build the Russian summary shown above the interval controls. */
+function describeRussianInterval(
+  value: number,
+  unit: CronUnit,
+): {
+  lead: string;
+  detail: string;
+} {
+  return {
+    lead: russianIntervalLead(value, unit),
+    detail:
+      value === 1
+        ? russianIntervalUnit(value, unit)
+        : `${value} ${russianIntervalUnit(value, unit)}`,
+  };
+}
+
+/** Build the localized summary for any routine schedule preset. */
+function describeCronPresetLocalized(
+  preset: CronPreset,
+  locale: string,
+): { lead: string; detail: string } {
   if (preset.freq === "Interval") {
+    if (locale === "ru") {
+      return describeRussianInterval(preset.n, preset.unit);
+    }
     const unitLabel =
       preset.n === 1 ? cronUnitLabelSingular(preset.unit) : cronUnitLabel(preset.unit);
     return {
@@ -98,61 +163,7 @@ function describeCronPresetLocalized(preset: CronPreset): { lead: string; detail
   return { lead: t`Every day`, detail: t`at ${preset.time}` };
 }
 
-export function RoutineSchedules({
-  value,
-  onChange,
-}: {
-  value: CronPreset[];
-  onChange: (next: CronPreset[]) => void;
-}) {
-  const { t } = useLingui();
-
-  return (
-    <div className="space-y-2">
-      {value.map((preset, index) => (
-        // Presets carry no stable id — index is the only key available, and
-        // rows never reorder (only append/remove at the end), so it's safe.
-        <div key={index} className="flex items-start gap-2">
-          <div className="flex-1">
-            <RoutineSchedule
-              value={preset}
-              onChange={(next) => onChange(value.map((p, i) => (i === index ? next : p)))}
-            />
-          </div>
-          {value.length > 1 ? (
-            <button
-              type="button"
-              aria-label={t`Remove this schedule`}
-              onClick={() => onChange(value.filter((_, i) => i !== index))}
-              className="mt-3 shrink-0 text-[#85858A] hover:text-[#ECECEE]"
-            >
-              <svg
-                width="15"
-                height="15"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.8"
-                strokeLinecap="round"
-                aria-hidden="true"
-              >
-                <path d="M18 6 6 18M6 6l12 12" />
-              </svg>
-            </button>
-          ) : null}
-        </div>
-      ))}
-      <button
-        type="button"
-        onClick={() => onChange([...value, defaultCronPreset()])}
-        className="text-[13.5px] text-[#9A9AA0] hover:text-[#ECECEE]"
-      >
-        <Trans>+ Add another schedule</Trans>
-      </button>
-    </div>
-  );
-}
-
+/** Render schedule selectors and the localized summary for a routine. */
 export function RoutineSchedule({
   value,
   onChange,
@@ -160,8 +171,8 @@ export function RoutineSchedule({
   value: CronPreset;
   onChange: (next: CronPreset) => void;
 }) {
-  const { t } = useLingui();
-  const { lead, detail } = describeCronPresetLocalized(value);
+  const { i18n, t } = useLingui();
+  const { lead, detail } = describeCronPresetLocalized(value, i18n.locale);
   const times = TIMES.includes(value.time) ? TIMES : [...TIMES, value.time];
   const numbers = NUMBERS.includes(value.n) ? NUMBERS : [...NUMBERS, value.n].sort((a, b) => a - b);
 
@@ -170,74 +181,62 @@ export function RoutineSchedule({
   }
 
   const intervalAmountSelect = (
-    <select
-      className="rk-schedule-select"
+    <NativeSelect
+      size="sm"
       value={String(value.n)}
       aria-label={t`Interval amount`}
       onChange={(event) => patch({ n: Number(event.target.value) })}
     >
       {numbers.map((n) => (
-        <option key={n} value={n}>
+        <NativeSelectOption key={n} value={n}>
           {n}
-        </option>
+        </NativeSelectOption>
       ))}
-    </select>
+    </NativeSelect>
   );
 
   const intervalUnitSelect = (
-    <select
-      className="rk-schedule-select"
+    <NativeSelect
+      size="sm"
       value={value.unit}
       aria-label={t`Interval unit`}
       onChange={(event) => patch({ unit: event.target.value as CronUnit })}
     >
       {UNITS.map((unit) => (
-        <option key={unit} value={unit}>
-          {cronUnitLabel(unit)}
-        </option>
+        <NativeSelectOption key={unit} value={unit}>
+          {i18n.locale === "ru" ? russianIntervalUnit(value.n, unit) : cronUnitLabel(unit)}
+        </NativeSelectOption>
       ))}
-    </select>
+    </NativeSelect>
   );
 
   const timeSelect = (
-    <select
-      className="rk-schedule-select"
+    <NativeSelect
+      size="sm"
       value={value.time}
       aria-label={t`Time of day`}
       onChange={(event) => patch({ time: event.target.value })}
     >
       {times.map((time) => (
-        <option key={time} value={time}>
+        <NativeSelectOption key={time} value={time}>
           {time}
-        </option>
+        </NativeSelectOption>
       ))}
-    </select>
+    </NativeSelect>
   );
 
   return (
-    <div className="mt-2 rounded-[13px] border border-[#26262A] p-3">
+    <div className="mt-2 rounded-xl border border-border p-3">
       <div className="flex items-center gap-2.5 px-0.5">
-        <svg
-          width="17"
-          height="17"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="#C9C9CE"
-          strokeWidth="1.6"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          aria-hidden="true"
-          className="shrink-0"
-        >
-          <circle cx="12" cy="12" r="9" />
-          <path d="M12 7v5l3 2" />
-        </svg>
-        <span className="text-[14.5px] text-[#ECECEE]">{lead}</span>
-        {detail ? <span className="flex-1 text-[14.5px] text-[#85858A]">{detail}</span> : null}
+        <Clock size={17} strokeWidth={1.6} className="shrink-0 text-muted-foreground" aria-hidden />
+        <span className="text-[14.5px] text-foreground">{lead}</span>
+        {detail ? (
+          <span className="flex-1 text-[14.5px] text-muted-foreground">{detail}</span>
+        ) : null}
       </div>
-      <div className="mt-2.5 flex flex-wrap items-center gap-2 rounded-[11px] bg-[#16161A] px-2.5 py-2.5 text-[14px] text-[#7A7A80]">
-        <select
-          className="rk-schedule-select"
+      <div className="mt-2.5 flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
+        <NativeSelect
+          size="sm"
           value={value.freq}
           aria-label={t`How often`}
           onChange={(event) => {
@@ -250,24 +249,30 @@ export function RoutineSchedule({
           }}
         >
           {CRON_FREQS.map((freq) => (
-            <option key={freq} value={freq}>
+            <NativeSelectOption key={freq} value={freq}>
               {cronFreqLabel(freq)}
-            </option>
+            </NativeSelectOption>
           ))}
-        </select>
+        </NativeSelect>
         {value.freq === "Interval" ? (
-          <Trans>
-            every {intervalAmountSelect} {intervalUnitSelect}
-          </Trans>
+          i18n.locale === "ru" ? (
+            <>
+              {russianIntervalControlLead()} {intervalAmountSelect} {intervalUnitSelect}
+            </>
+          ) : (
+            <Trans>
+              every {intervalAmountSelect} {intervalUnitSelect}
+            </Trans>
+          )
         ) : null}
         {TIMED.includes(value.freq) ? <Trans>at {timeSelect}</Trans> : null}
         {value.freq === "Advanced" ? (
-          <input
+          <Input
             value={value.cron}
             placeholder="*/3 * * * *"
             aria-label={t`Cron expression`}
             onChange={(event) => patch({ cron: event.target.value })}
-            className="min-w-[120px] flex-1 rounded-lg border-0 bg-[#24242A] px-2.5 py-1.5 font-mono text-[13.5px] text-[#ECECEE] outline-none"
+            className="h-7 min-w-[120px] flex-1 font-mono text-[13px] md:text-[13px]"
           />
         ) : null}
       </div>

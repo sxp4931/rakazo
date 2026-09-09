@@ -11,7 +11,7 @@ import { FakeSandboxProvider } from "./fake-sandbox.js";
 const writer = {
   operationId: "1",
   traceId: "1",
-  workspaceId: "w",
+  spaceId: "w",
   userId: "u",
   botId: "writer",
   signal: new AbortController().signal,
@@ -74,10 +74,10 @@ describe("Team Computer parallel screens", () => {
     claims.claim("computer-1", oldRun);
     claims.claim("computer-1", newRun);
 
-    claims.release("computer-1", oldRun);
+    expect(claims.release("computer-1", oldRun)).toBe(false);
     expect(() => claims.claim("computer-1", researcher)).toThrow(ComputerScreenUnavailableError);
 
-    claims.release("computer-1", newRun);
+    expect(claims.release("computer-1", newRun)).toBe(true);
     expect(() => claims.claim("computer-1", researcher)).not.toThrow();
   });
 
@@ -110,22 +110,22 @@ describe("Team Computer parallel screens", () => {
         claims.claim("computer-1", researcher);
         return "ok";
       }),
-    ).resolves.toEqual({ error: expect.stringMatching(/does not support multiple screens/) });
+    ).resolves.toEqual({ error: expect.stringMatching(/temporarily busy/) });
     expect(isComputerScreenUnavailable(new Error("cannot allocate another screen"))).toBe(true);
   });
 
-  it("lets a second Team bot use graphics after the first run releases the claim", async () => {
+  it("lets Team bots use independent emulator screens concurrently", async () => {
     const emulator = new ManagedSandboxEmulator();
-    expect(emulator.describe().capabilities.multiScreen).toBe(false);
+    expect(emulator.describe().capabilities.multiScreen).toBe(true);
     const computer = await emulator.provision({ botId: "team-home", homePath: "/tmp" }, writer);
     await emulator.observe(computer, writer);
     await emulator.connectScreen(computer, { view: "stream" }, researcher);
     await expect(emulator.observe(computer, writer)).resolves.toMatchObject({
       activeWindow: expect.anything(),
     });
-    await expect(emulator.observe(computer, researcher)).rejects.toThrow(
-      ComputerScreenUnavailableError,
-    );
+    await expect(emulator.observe(computer, researcher)).resolves.toMatchObject({
+      activeWindow: expect.anything(),
+    });
     await emulator.releaseScreen(computer, writer);
     await expect(emulator.observe(computer, researcher)).resolves.toMatchObject({
       activeWindow: expect.anything(),

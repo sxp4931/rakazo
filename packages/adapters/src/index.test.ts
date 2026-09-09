@@ -10,7 +10,7 @@ describe("secret store", () => {
     const record = await store.put("sk-or-v1-secretvalue", {
       operationId: "1",
       traceId: "1",
-      workspaceId: "w",
+      spaceId: "w",
       userId: "u",
       signal: new AbortController().signal,
     });
@@ -68,6 +68,17 @@ describe("scripted runtime", () => {
     expect(script?.some((t) => t.toolCalls?.some((c) => c.args.name === "Scout"))).toBe(true);
   });
 
+  it("proposes a named space", () => {
+    const script = inferScript("create a space named Customer support");
+    expect(
+      script?.some((turn) =>
+        turn.toolCalls?.some(
+          (call) => call.name === "create_space" && call.args.name === "Customer support",
+        ),
+      ),
+    ).toBe(true);
+  });
+
   it("runs an in-thread subagent", () => {
     const script = inferScript("run a subagent to summarize the notes");
     expect(script?.some((t) => t.toolCalls?.some((c) => c.name === "run_subagent"))).toBe(true);
@@ -83,7 +94,7 @@ describe("scripted runtime", () => {
     const ctx = {
       operationId: "1",
       traceId: "1",
-      workspaceId: "w",
+      spaceId: "w",
       userId: "u",
       signal: new AbortController().signal,
     };
@@ -160,14 +171,22 @@ describe("builtin tools", () => {
         "shell",
         "remember",
         "request_takeover",
+        "ask_user",
+        "message_user",
         "request_secret",
         "run_subagent",
+        "create_space",
         "spawn_bot",
         "archive_bot",
         "skill_read",
         "skill_create",
         "skill_update",
         "skill_delete",
+        "web_search",
+        "web_fetch",
+        "browser_navigate",
+        "browser_snapshot",
+        "browser_act",
       ]),
     );
   });
@@ -179,7 +198,7 @@ describe("fake sandbox", () => {
     const ctx = {
       operationId: "1",
       traceId: "1",
-      workspaceId: "w",
+      spaceId: "w",
       userId: "u",
       signal: new AbortController().signal,
     };

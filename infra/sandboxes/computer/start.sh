@@ -49,23 +49,21 @@ EOF
 chmod +x /tmp/fluxbox-home/.fluxbox/startup
 HOME=/tmp/fluxbox-home /tmp/fluxbox-home/.fluxbox/startup >/tmp/rakazo/fluxbox.log 2>&1 &
 
-HOME="$AGENT_HOME" rakazo-browser >/tmp/rakazo/browser.log 2>&1 &
-browser_up=0
-for _ in $(seq 1 40); do
-  if xdotool search --onlyvisible --class chromium >/dev/null 2>&1; then
-    browser_up=1
-    break
+register_browser_handler() {
+  local mime="$1"
+  if ! xdg-mime default rakazo-browser.desktop "$mime" >/dev/null 2>&1 \
+    || [[ "$(xdg-mime query default "$mime" 2>/dev/null || true)" != "rakazo-browser.desktop" ]]; then
+    echo "failed to register rakazo-browser for $mime" >&2
+    exit 1
   fi
-  if xdotool search --onlyvisible --class Chromium >/dev/null 2>&1; then
-    browser_up=1
-    break
-  fi
-  sleep 0.25
-done
-if [[ "$browser_up" -ne 1 ]]; then
-  echo "browser failed to start" >&2
-  cat /tmp/rakazo/browser.log >&2 || true
-  xterm -geometry 100x28+48+48 -bg "#111113" -fg "#E8E8EA" -cr "#E8E8EA" -title "Terminal" >/tmp/rakazo/xterm.log 2>&1 &
+}
+register_browser_handler x-scheme-handler/http
+register_browser_handler x-scheme-handler/https
+register_browser_handler text/html
+if ! xdg-settings set default-web-browser rakazo-browser.desktop >/dev/null 2>&1 \
+  || [[ "$(xdg-settings get default-web-browser 2>/dev/null || true)" != "rakazo-browser.desktop" ]]; then
+  echo "failed to set default web browser to rakazo-browser" >&2
+  exit 1
 fi
 
 x11vnc -display :1 -forever -shared -viewonly -nopw -listen 127.0.0.1 -rfbport 5900 -xkb -ncache 0 >/tmp/rakazo/x11vnc.log 2>&1 &
@@ -79,7 +77,11 @@ if [[ ! -f "$NOVNC_ROOT/embed.html" ]]; then
   echo "noVNC embed.html is missing from the computer image" >&2
   exit 1
 fi
-websockify --heartbeat=30 --web="$NOVNC_ROOT" 0.0.0.0:6080 127.0.0.1:5900 >/tmp/rakazo/novnc.log 2>&1 &
+if [[ ! -f "$NOVNC_ROOT/clipboard-bridge.js" ]]; then
+  echo "noVNC clipboard-bridge.js is missing from the computer image" >&2
+  exit 1
+fi
+websockify --heartbeat=30 --web="$NOVNC_ROOT" --token-plugin=TokenFile --token-source=/tmp/rakazo/view-target-1 0.0.0.0:6080 >/tmp/rakazo/novnc.log 2>&1 &
 
 while kill -0 "$XVFB_PID" 2>/dev/null; do
   sleep 2

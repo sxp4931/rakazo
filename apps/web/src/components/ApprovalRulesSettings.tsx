@@ -1,7 +1,8 @@
 import { t } from "@lingui/core/macro";
 import { Trans, useLingui } from "@lingui/react/macro";
-import type { ActionApprovalRule } from "@rakazo/contracts";
-import { useEffect, useState } from "react";
+import type { ActionApprovalRule, ActionAutoReviewSettings } from "@rakazo/contracts";
+import { Button, Label, Switch } from "@rakazo/ui-web";
+import { useEffect, useId, useState } from "react";
 import { rpc } from "../lib/rpc";
 
 function describeRule(rule: ActionApprovalRule): string {
@@ -25,16 +26,24 @@ function describeRule(rule: ActionApprovalRule): string {
 
 export function ApprovalRulesSettings() {
   const { t } = useLingui();
+  const autoReviewId = useId();
   const [rules, setRules] = useState<ActionApprovalRule[]>([]);
+  const [autoReview, setAutoReview] = useState<ActionAutoReviewSettings | null>(null);
   const [loading, setLoading] = useState(true);
   const [savingPreset, setSavingPreset] = useState<"email" | "purchase" | null>(null);
+  const [savingAutoReview, setSavingAutoReview] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function refresh() {
     setLoading(true);
     setError(null);
     try {
-      setRules(await rpc.approvalRules.list());
+      const [nextRules, nextAutoReview] = await Promise.all([
+        rpc.approvalRules.list(),
+        rpc.autoReview.get(),
+      ]);
+      setRules(nextRules);
+      setAutoReview(nextAutoReview);
     } catch (err) {
       setError(err instanceof Error ? err.message : t`Could not load approval rules`);
     } finally {
@@ -84,42 +93,73 @@ export function ApprovalRulesSettings() {
     }
   }
 
+  async function toggleAutoReview(enabled: boolean) {
+    if (loading || savingAutoReview) return;
+    setSavingAutoReview(true);
+    setError(null);
+    try {
+      setAutoReview(await rpc.autoReview.set({ enabled }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t`Could not save Auto Review`);
+    } finally {
+      setSavingAutoReview(false);
+    }
+  }
+
   return (
     <div data-testid="action-confirmation-settings" className="pt-5">
-      <h3 className="text-[15px] font-medium text-[#ECECEE]">
+      <h3 className="text-[15px] font-medium text-foreground">
         <Trans>Action confirmations</Trans>
       </h3>
-      <p className="mt-2 text-[13.5px] leading-[1.5] text-[#85858A]">
+      <p className="mt-2 text-[13.5px] leading-[1.5] text-muted-foreground">
         <Trans>
           Bots act without asking by default. Add an exception only when you want to review a type
-          of action first. These preferences apply across all your bots.
+          of action first.
         </Trans>
       </p>
       <div className="mt-4 flex flex-col items-start gap-2">
-        <button
-          type="button"
+        <Button
+          variant="outline"
           disabled={loading || savingPreset !== null}
           onClick={() => void setPreset("email")}
-          className="rounded-[11px] border border-[#26262A] px-[17px] py-2 text-[14px] text-[#C9C9CE] disabled:opacity-50"
         >
           <Trans>Ask before sending external email</Trans>
-        </button>
-        <button
-          type="button"
+        </Button>
+        <Button
+          variant="outline"
           disabled={loading || savingPreset !== null}
           onClick={() => void setPreset("purchase")}
-          className="rounded-[11px] border border-[#26262A] px-[17px] py-2 text-[14px] text-[#C9C9CE] disabled:opacity-50"
         >
           <Trans>Ask before purchases</Trans>
-        </button>
+        </Button>
       </div>
-      {error ? <p className="mt-3 text-[13px] text-[#E65707]">{error}</p> : null}
+      <div className="mt-5 flex items-start gap-3">
+        <Switch
+          id={autoReviewId}
+          data-testid="auto-review-toggle"
+          className="mt-0.5"
+          checked={autoReview?.enabled ?? false}
+          disabled={loading || savingAutoReview || !autoReview}
+          onCheckedChange={(checked) => void toggleAutoReview(checked)}
+        />
+        <div>
+          <Label htmlFor={autoReviewId} className="text-[14px] font-normal text-foreground/75">
+            <Trans>Flag unexpected actions</Trans>
+          </Label>
+          {autoReview?.enabled && !autoReview.checkerAvailable ? (
+            <p className="mt-1 text-[13px] text-muted-foreground">
+              <Trans>Add a model in Settings to use this.</Trans>
+            </p>
+          ) : null}
+        </div>
+      </div>
+      {error ? <p className="mt-3 text-[13px] text-destructive">{error}</p> : null}
       {loading ? (
-        <p className="mt-4 text-[13px] text-[#85858A]">
+        <p className="mt-4 text-[13px] text-muted-foreground">
           <Trans>Loading rules…</Trans>
         </p>
       ) : rules.length === 0 ? (
-        <p className="mt-4 text-[13px] text-[#85858A]">
+        <p className="mt-4 text-[13px] text-muted-foreground">
           <Trans>No exceptions. Actions run automatically.</Trans>
         </p>
       ) : (
@@ -127,16 +167,17 @@ export function ApprovalRulesSettings() {
           {rules.map((rule) => (
             <li
               key={rule.id}
-              className="flex items-center justify-between gap-3 rounded-[11px] border border-[#26262A] px-3.5 py-2.5"
+              className="flex items-center justify-between gap-3 rounded-lg border border-border px-3.5 py-2"
             >
-              <span className="text-[13.5px] text-[#C9C9CE]">{describeRule(rule)}</span>
-              <button
-                type="button"
+              <span className="text-[13.5px] text-foreground/75">{describeRule(rule)}</span>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="text-muted-foreground"
                 onClick={() => void removeRule(rule.id)}
-                className="text-[13px] text-[#85858A]"
               >
                 <Trans>Remove</Trans>
-              </button>
+              </Button>
             </li>
           ))}
         </ul>

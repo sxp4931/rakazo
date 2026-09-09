@@ -1,12 +1,43 @@
 import type { Actor, MessageBlock, SearchHit } from "@rakazo/contracts";
 import { extractLinksFromText, matchesSearchQuery, snippetAroundMatch } from "@rakazo/core";
-import type { Prisma, PrismaClient } from "@rakazo/db";
+import { Prisma, type PrismaClient } from "@rakazo/db";
 
 const SEARCH_LIMIT = 25;
 /** Cap name matches so content hits (messages/files/links/routines) keep most of the budget. */
 const CONVERSATION_HIT_LIMIT = 5;
 
-export async function queryWorkspaceSearch(
+async function findArtifactMessages(
+  prisma: PrismaClient,
+  actor: Actor,
+  artifacts: Array<{ id: string; targetId: string }>,
+  target: "bot" | "group",
+): Promise<Map<string, { id: string; seq: number }>> {
+  if (artifacts.length === 0) return new Map();
+  const targetColumn = target === "bot" ? Prisma.sql`t."botId"` : Prisma.sql`t."groupId"`;
+  const candidates = Prisma.join(
+    artifacts.map(({ id, targetId }) => Prisma.sql`(${id}, ${targetId})`),
+  );
+  const rows = await prisma.$queryRaw<Array<{ artifactId: string; id: string; seq: number }>>(
+    Prisma.sql`
+      SELECT candidate."artifactId", message.id, message.seq
+      FROM (VALUES ${candidates}) AS candidate("artifactId", "targetId")
+      CROSS JOIN LATERAL (
+        SELECT m.id, m.seq
+        FROM messages m
+        INNER JOIN threads t ON t.id = m."threadId"
+        WHERE t."spaceId" = ${actor.spaceId}
+          AND t."userId" = ${actor.userId}
+          AND ${targetColumn} = candidate."targetId"
+          AND m.blocks::text ILIKE ('%' || candidate."artifactId" || '%')
+        ORDER BY m."createdAt" DESC
+        LIMIT 1
+      ) message
+    `,
+  );
+  return new Map(rows.map(({ artifactId, id, seq }) => [artifactId, { id, seq }]));
+}
+
+export async function querySpaceSearch(
   prisma: PrismaClient,
   actor: Actor,
   q: string,
@@ -35,7 +66,7 @@ export async function queryWorkspaceSearch(
 
   const bots = await prisma.bot.findMany({
     where: {
-      workspaceId: actor.workspaceId,
+      spaceId: actor.spaceId,
       userId: actor.userId,
       archivedAt: null,
       OR: [
@@ -62,7 +93,7 @@ export async function queryWorkspaceSearch(
 
   const groups = await prisma.chatGroup.findMany({
     where: {
-      workspaceId: actor.workspaceId,
+      spaceId: actor.spaceId,
       userId: actor.userId,
       name: { contains: query, mode: "insensitive" },
     },
@@ -86,7 +117,7 @@ export async function queryWorkspaceSearch(
 
   const artifacts = await prisma.artifact.findMany({
     where: {
-      workspaceId: actor.workspaceId,
+      spaceId: actor.spaceId,
       userId: actor.userId,
       groupId: null,
       botId: { not: null },
@@ -96,20 +127,17 @@ export async function queryWorkspaceSearch(
     include: { bot: { select: { name: true } } },
     take: SEARCH_LIMIT,
   });
+  const botArtifactMessages = await findArtifactMessages(
+    prisma,
+    actor,
+    artifacts.flatMap((artifact) =>
+      artifact.botId && artifact.bot ? [{ id: artifact.id, targetId: artifact.botId }] : [],
+    ),
+    "bot",
+  );
   for (const artifact of artifacts) {
     if (!artifact.botId || !artifact.bot) continue;
-    const messageRows = await prisma.$queryRaw<Array<{ id: string; seq: number }>>`
-      SELECT m.id, m.seq
-      FROM messages m
-      INNER JOIN threads t ON t.id = m."threadId"
-      WHERE t."workspaceId" = ${actor.workspaceId}
-        AND t."userId" = ${actor.userId}
-        AND t."botId" = ${artifact.botId}
-        AND m.blocks::text ILIKE ${`%${artifact.id}%`}
-      ORDER BY m."createdAt" DESC
-      LIMIT 1
-    `;
-    const message = messageRows[0];
+    const message = botArtifactMessages.get(artifact.id);
     if (!message) continue;
     pushInto(
       contentHits,
@@ -129,7 +157,7 @@ export async function queryWorkspaceSearch(
 
   const groupArtifacts = await prisma.artifact.findMany({
     where: {
-      workspaceId: actor.workspaceId,
+      spaceId: actor.spaceId,
       userId: actor.userId,
       groupId: { not: null },
       name: { contains: query, mode: "insensitive" },
@@ -137,20 +165,17 @@ export async function queryWorkspaceSearch(
     include: { group: { select: { name: true } } },
     take: SEARCH_LIMIT,
   });
+  const groupArtifactMessages = await findArtifactMessages(
+    prisma,
+    actor,
+    groupArtifacts.flatMap((artifact) =>
+      artifact.groupId && artifact.group ? [{ id: artifact.id, targetId: artifact.groupId }] : [],
+    ),
+    "group",
+  );
   for (const artifact of groupArtifacts) {
     if (!artifact.groupId || !artifact.group) continue;
-    const messageRows = await prisma.$queryRaw<Array<{ id: string; seq: number }>>`
-      SELECT m.id, m.seq
-      FROM messages m
-      INNER JOIN threads t ON t.id = m."threadId"
-      WHERE t."workspaceId" = ${actor.workspaceId}
-        AND t."userId" = ${actor.userId}
-        AND t."groupId" = ${artifact.groupId}
-        AND m.blocks::text ILIKE ${`%${artifact.id}%`}
-      ORDER BY m."createdAt" DESC
-      LIMIT 1
-    `;
-    const message = messageRows[0];
+    const message = groupArtifactMessages.get(artifact.id);
     if (!message) continue;
     pushInto(
       contentHits,
@@ -170,7 +195,7 @@ export async function queryWorkspaceSearch(
 
   const routines = await prisma.routine.findMany({
     where: {
-      workspaceId: actor.workspaceId,
+      spaceId: actor.spaceId,
       userId: actor.userId,
       OR: [
         { name: { contains: query, mode: "insensitive" } },
@@ -211,7 +236,7 @@ export async function queryWorkspaceSearch(
     FROM messages m
     INNER JOIN threads t ON t.id = m."threadId"
     INNER JOIN bots b ON b.id = t."botId"
-    WHERE t."workspaceId" = ${actor.workspaceId}
+    WHERE t."spaceId" = ${actor.spaceId}
       AND t."userId" = ${actor.userId}
       AND b."archivedAt" IS NULL
       AND m.blocks::text ILIKE ${pattern}
@@ -244,7 +269,7 @@ export async function queryWorkspaceSearch(
     FROM messages m
     INNER JOIN threads t ON t.id = m."threadId"
     INNER JOIN chat_groups g ON g.id = t."groupId"
-    WHERE t."workspaceId" = ${actor.workspaceId}
+    WHERE t."spaceId" = ${actor.spaceId}
       AND t."userId" = ${actor.userId}
       AND t."groupId" IS NOT NULL
       AND m.blocks::text ILIKE ${pattern}

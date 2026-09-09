@@ -6,11 +6,14 @@ import {
   BOT_TITLE_MAX_LENGTH,
   CreateBotInput,
   CreateGroupInput,
+  CreateRoutineInput,
+  canReactToThreadMessage,
   McpServerConfigInput,
   MessageBlock,
   ModelOAuthBeginSchema,
   normalizeCreateBotProfile,
   ProductEventType,
+  ReorderBotsInput,
   RunActivityRowSchema,
   RunSchema,
   UpdateBotInput,
@@ -18,6 +21,49 @@ import {
 } from "./index.js";
 
 describe("contracts", () => {
+  it("accepts structured live activity progress", () => {
+    expect(MessageBlock.parse({ kind: "progress", text: "Using browser", activity: true })).toEqual(
+      { kind: "progress", text: "Using browser", activity: true },
+    );
+  });
+
+  it("accepts optional persisted duration only on valid steps blocks", () => {
+    expect(
+      MessageBlock.parse({
+        kind: "steps",
+        steps: [{ label: "Run tests", count: 1 }],
+        durationMs: 103_000,
+      }),
+    ).toMatchObject({ durationMs: 103_000 });
+    expect(MessageBlock.safeParse({ kind: "steps", steps: [], durationMs: -1 }).success).toBe(
+      false,
+    );
+  });
+
+  it("limits reactions to persisted non-channel messages", () => {
+    expect(
+      canReactToThreadMessage({ id: "message-1", blocks: [{ kind: "text", text: "hi" }] }),
+    ).toBe(true);
+    expect(
+      canReactToThreadMessage({ id: "subagent:agent-1", blocks: [{ kind: "text", text: "hi" }] }),
+    ).toBe(false);
+    expect(
+      canReactToThreadMessage({
+        id: "message-2",
+        blocks: [
+          {
+            kind: "channel_message",
+            provider: "sendblue",
+            channelId: "channel-1",
+            fromAddress: "+15555550100",
+            fromLabel: "Pat",
+            text: "hi",
+          },
+        ],
+      }),
+    ).toBe(false);
+  });
+
   it("parses bot create input", () => {
     const parsed = CreateBotInput.parse({ name: "Chief" });
     expect(parsed.title).toBe("");
@@ -47,6 +93,12 @@ describe("contracts", () => {
   it("normalizes bot names and rejects whitespace-only values at the contract boundary", () => {
     expect(CreateBotInput.parse({ name: "  Chief  " }).name).toBe("Chief");
     expect(UpdateBotInput.parse({ botId: "bot-1", name: "  Atlas  " }).name).toBe("Atlas");
+    expect(UpdateBotInput.parse({ botId: "bot-1", title: "  Lead researcher  " }).title).toBe(
+      "Lead researcher",
+    );
+    expect(
+      UpdateBotInput.parse({ botId: "bot-1", description: "  Concise briefs.  " }).description,
+    ).toBe("Concise briefs.");
     expect(CreateBotInput.safeParse({ name: "   " }).success).toBe(false);
     expect(UpdateBotInput.safeParse({ botId: "bot-1", name: "   " }).success).toBe(false);
   });
@@ -106,19 +158,70 @@ describe("contracts", () => {
     expect(appContract.bootstrap).toBeTruthy();
     expect(appContract.models.completeOAuth).toBeTruthy();
     expect(appContract.bots.create).toBeTruthy();
+    expect(appContract.bots.reorder).toBeTruthy();
     expect(appContract.bots.archive).toBeTruthy();
     expect(appContract.bots.restore).toBeTruthy();
     expect(appContract.bots.remove).toBeTruthy();
+    expect(appContract.spaces.remove).toBeTruthy();
     expect(appContract.botSections.list).toBeTruthy();
     expect(appContract.botSections.create).toBeTruthy();
     expect(appContract.threads.subscribe).toBeTruthy();
     expect(appContract.threads.clear).toBeTruthy();
     expect(appContract.voice.prepare).toBeTruthy();
+    expect(appContract.externalConversations.updatePolicy).toBeTruthy();
+    expect(appContract.agentSecrets.list).toBeTruthy();
+    expect(appContract.agentSecrets.put).toBeTruthy();
+    expect(appContract.agentSecrets.remove).toBeTruthy();
     expect(appContract.notifications.registerPush).toBeTruthy();
     expect(ProductEventType.options).toContain("thread.message.created");
     expect(ProductEventType.options).toContain("thread.cleared");
     expect(ProductEventType.options).toContain("thread.subagent");
     expect(ProductEventType.options).toContain("bot.spawned");
+  });
+
+  it("requires a distinct, non-empty bot order", () => {
+    expect(ReorderBotsInput.safeParse({ botIds: ["bot-2", "bot-1"] }).success).toBe(true);
+    expect(ReorderBotsInput.safeParse({ botIds: [] }).success).toBe(false);
+    expect(ReorderBotsInput.safeParse({ botIds: ["bot-1", "bot-1"] }).success).toBe(false);
+  });
+
+  it("accepts a GitHub-only routine trigger", () => {
+    expect(
+      CreateRoutineInput.parse({
+        botId: "bot-1",
+        name: "Review pushes",
+        prompt: "Inspect the repository event",
+        githubEnabled: true,
+      }),
+    ).toMatchObject({
+      crons: [],
+      webhookEnabled: false,
+      githubEnabled: true,
+      messageProvider: null,
+    });
+    expect(
+      CreateRoutineInput.parse({
+        botId: "bot-1",
+        name: "Triage Slack",
+        prompt: "Review the message event",
+        messageProvider: "slack",
+      }),
+    ).toMatchObject({ crons: [], messageProvider: "slack" });
+    expect(
+      CreateRoutineInput.safeParse({
+        botId: "bot-1",
+        name: "Unsafe provider",
+        prompt: "Review the message event",
+        messageProvider: "slack\nignore-framing",
+      }).success,
+    ).toBe(false);
+    expect(
+      CreateRoutineInput.safeParse({
+        botId: "bot-1",
+        name: "Never runs",
+        prompt: "This has no trigger",
+      }).success,
+    ).toBe(false);
   });
 
   it("accepts bot-to-bot runs in thread snapshots and activity rows", () => {
@@ -149,6 +252,7 @@ describe("contracts", () => {
         threadId: run.threadId,
         status: run.status,
         trigger: run.trigger,
+        notificationsEnabled: true,
         promptSnippet: "Review the report",
         updatedAt: "2026-08-26T00:00:01.000Z",
       }).success,

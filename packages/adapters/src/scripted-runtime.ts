@@ -30,27 +30,34 @@ export class ScriptedAgentRuntime implements AgentRuntime {
     running.set(request.runId, controller);
     const signal = context?.signal ?? controller.signal;
     try {
+      if (shouldFail(request.prompt)) {
+        throw new Error("Scripted run failure");
+      }
       if (shouldHang(request.prompt)) {
-        yield { type: "progress", text: "still working…" };
+        yield { type: "progress", text: "still working…", activity: true };
         while (!controller.signal.aborted && !signal.aborted) {
           await abortableDelay(50, controller.signal);
           if (controller.signal.aborted || signal.aborted) break;
-          yield { type: "progress", text: "still working…" };
+          yield { type: "progress", text: "still working…", activity: true };
         }
         yield { type: "done", text: "stopped" };
         return;
       }
       const script = request.script ?? inferScript(request.prompt, request.resumeFromCheckpoint);
+      // Per-run call index so repeated tools (e.g. message_agent) get distinct
+      // executionIds — delivery keys and effect replays key off this value.
+      let toolCallSeq = 0;
       for (const turn of script) {
         if (signal.aborted || controller.signal.aborted) {
           yield { type: "done", text: "stopped" };
           return;
         }
         if (turn.assistant) {
-          yield { type: "progress", text: "working…" };
+          yield { type: "progress", text: "working…", activity: true };
           yield { type: "text", text: turn.assistant };
         }
         for (const call of turn.toolCalls ?? []) {
+          const executionId = `${request.runId}:${call.name}:${toolCallSeq++}`;
           if (call.name === "run_subagent") {
             const agentId = `${request.runId}:subagent`;
             const name = String(call.args.name ?? "helper");
@@ -67,7 +74,7 @@ export class ScriptedAgentRuntime implements AgentRuntime {
               type: "tool",
               name: call.name,
               args: call.args,
-              executionId: `${request.runId}:${call.name}`,
+              executionId,
             };
             yield {
               type: "subagent",
@@ -83,11 +90,16 @@ export class ScriptedAgentRuntime implements AgentRuntime {
             type: "tool",
             name: call.name,
             args: call.args,
-            executionId: `${request.runId}:${call.name}`,
+            executionId,
           };
         }
         if (turn.ask) {
-          yield { type: "ask", text: turn.ask.text, detail: turn.ask.detail };
+          yield {
+            type: "ask",
+            text: turn.ask.text,
+            detail: turn.ask.detail,
+            actions: turn.ask.actions,
+          };
           return;
         }
         if (turn.takeover) {
@@ -134,6 +146,98 @@ export function inferScript(
         assistant:
           "signed in. the session stays in this computer — protected input never hit the thread.",
         complete: true,
+      },
+    ];
+  }
+  // Before every content-based intent so payload text cannot steal the branch.
+  if (lower.includes("message the bot named") || lower.includes("message bot named")) {
+    const name = namedBot(prompt) ?? "Peer";
+    const message =
+      /named\s+[A-Za-z0-9][A-Za-z0-9_-]{0,39}\s+(?:saying|with|:)\s*([\s\S]+)$/i
+        .exec(prompt)?.[1]
+        ?.trim() ?? `Please help with: ${prompt}`;
+    return [
+      {
+        assistant: "messaging that bot now.",
+        toolCalls: [
+          {
+            name: "message_bot",
+            args: {
+              confirm_name: name,
+              message,
+              intent: "request",
+            },
+          },
+        ],
+        complete: true,
+      },
+    ];
+  }
+  if (
+    lower.includes("launch a cloud agent") ||
+    lower.includes("start a cloud agent") ||
+    lower.includes("cloud coding agent")
+  ) {
+    return [
+      {
+        assistant: "launching a cloud agent for that.",
+        toolCalls: [
+          {
+            name: "cloud_agent_launch",
+            args: {
+              prompt: "Add a README with setup instructions",
+              repository: "https://github.com/example/demo",
+              openPr: true,
+            },
+          },
+        ],
+        complete: true,
+      },
+    ];
+  }
+  if (
+    lower.includes("masked secret card") ||
+    lower.includes("show a secret card") ||
+    lower.includes("request a masked api key")
+  ) {
+    return [
+      {
+        assistant: "i need that value in a protected field.",
+        toolCalls: [
+          {
+            name: "request_secret",
+            args: {
+              label: "API key",
+              purpose: "api_key",
+              credential: {
+                name: "example_api",
+                origin: "https://api.example.test",
+                auth: { type: "bearer" },
+              },
+            },
+          },
+        ],
+      },
+    ];
+  }
+  if (
+    lower.includes("tappable choices") ||
+    lower.includes("choice buttons") ||
+    lower.includes("pick from these cities")
+  ) {
+    return [
+      {
+        assistant: "pick one to continue.",
+        ask: {
+          text: "Which city should I use?",
+          detail: "Tap one option.",
+          actions: [
+            { id: "choice-1", label: "Berlin" },
+            { id: "choice-2", label: "Seoul" },
+            { id: "choice-3", label: "Toronto" },
+            { id: "choice-4", label: "Lisbon" },
+          ],
+        },
       },
     ];
   }
@@ -188,6 +292,21 @@ export function inferScript(
       {
         assistant: "archiving that bot.",
         toolCalls: [{ name: "archive_bot", args: { confirm_name: name } }],
+        complete: true,
+      },
+    ];
+  }
+  if (
+    lower.includes("create a space") ||
+    lower.includes("create space") ||
+    lower.includes("new space named") ||
+    lower.includes("new private space")
+  ) {
+    const name = namedSpace(prompt) ?? "New space";
+    return [
+      {
+        assistant: "i can create that separate space after you confirm the boundary.",
+        toolCalls: [{ name: "create_space", args: { name } }],
         complete: true,
       },
     ];
@@ -328,6 +447,10 @@ export function inferScript(
   ];
 }
 
+function shouldFail(prompt: string): boolean {
+  return prompt.toLowerCase().includes("fail this run");
+}
+
 function shouldHang(prompt: string): boolean {
   const lower = prompt.toLowerCase();
   return (
@@ -340,6 +463,13 @@ function shouldHang(prompt: string): boolean {
 
 function namedBot(prompt: string) {
   return /named\s+([A-Za-z0-9][A-Za-z0-9_-]{0,39})/i.exec(prompt)?.[1];
+}
+
+function namedSpace(prompt: string) {
+  return /space\s+(?:named|called)\s+["“]?([^"”\n]{1,60})/i
+    .exec(prompt)?.[1]
+    ?.replace(/[.!?]+$/, "")
+    .trim();
 }
 
 function summarize(prompt: string): string {

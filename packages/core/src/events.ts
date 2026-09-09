@@ -1,4 +1,5 @@
 import type { MessageBlock, ThreadMessage } from "@rakazo/contracts";
+import { cloudAgentBlockFromPayload } from "./cloud-agent.js";
 
 export function projectMessages(
   events: Array<{
@@ -73,6 +74,16 @@ export function projectMessages(
         runId: event.runId ?? undefined,
         createdAt,
       });
+      continue;
+    }
+    if (event.type === "thread.cloud_agent") {
+      const block = cloudAgentBlockFromPayload(payload);
+      for (const message of messages) {
+        if (message.id === payload.messageId)
+          message.blocks = message.blocks.map((old) =>
+            old.kind === "cloud_agent" && old.agentId === block.agentId ? block : old,
+          );
+      }
       continue;
     }
     if (event.type === "thread.progress") {
@@ -158,6 +169,24 @@ export function isRunTerminalEvent(event: { type: string }): boolean {
   );
 }
 
+const RUN_FAILURE_ERROR_MAX = 300;
+
+/** Reason a run failed, clamped for display, or null when there is no usable error to show. */
+export function runFailureError(event: {
+  type: string;
+  payload?: Record<string, unknown>;
+}): string | null {
+  if (event.type !== "run.failed") return null;
+  const error = event.payload?.error;
+  if (typeof error !== "string" || !error.trim()) return null;
+  const message = error.trim();
+  // A provider can fail with a stack or a whole response body; the run record keeps the full
+  // text while the UI shows a bounded first line.
+  return message.length > RUN_FAILURE_ERROR_MAX
+    ? `${message.slice(0, RUN_FAILURE_ERROR_MAX)}…`
+    : message;
+}
+
 export type LiveMessageUpdate =
   | { type: "progress"; payload: Record<string, unknown> | undefined }
   | { type: "tool"; name: string };
@@ -181,9 +210,13 @@ export function reduceLiveMessageBlocks(
     ...(tail?.kind === "progress" ? (tail.pendingToolNames ?? []) : []),
     ...(update.type === "tool" ? [update.name] : []),
   ];
+  const activity =
+    update.type === "progress"
+      ? update.payload?.activity === true
+      : tail?.kind === "progress" && tail.activity === true;
 
   if (pendingToolNames.length > 0 && endsSentence(tailText)) {
-    let next = appendTextSegment(segments, tailText);
+    let next = activity ? [...segments] : appendTextSegment(segments, tailText);
     for (const name of pendingToolNames) next = appendToolCallSegment(next, name);
     return next;
   }
@@ -193,6 +226,7 @@ export function reduceLiveMessageBlocks(
     {
       kind: "progress",
       text: tailText,
+      ...(activity ? { activity: true as const } : {}),
       ...(pendingToolNames.length > 0 ? { pendingToolNames } : {}),
     },
   ];
@@ -301,8 +335,96 @@ export function redactSecrets(value: string, secrets: string[]): string {
 }
 
 export function containsSecret(value: unknown, secrets: string[]): boolean {
-  const text = JSON.stringify(value);
-  return secrets.some((secret) => secret.length > 0 && text.includes(secret));
+  const active = secrets.filter((secret) => secret.length > 0);
+  if (active.length === 0) return false;
+  const serialized = JSON.stringify(value);
+  if (serialized === undefined) return false;
+  const pending: unknown[] = [JSON.parse(serialized)];
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (typeof current === "string") {
+      if (active.some((secret) => current.includes(secret))) return true;
+      continue;
+    }
+    if (current === null || typeof current === "number" || typeof current === "boolean") {
+      const primitive = String(current);
+      if (active.some((secret) => primitive.includes(secret))) return true;
+      continue;
+    }
+    if (Array.isArray(current)) {
+      pending.push(...current);
+      continue;
+    }
+    if (current && typeof current === "object") {
+      for (const [key, nested] of Object.entries(current)) {
+        if (active.some((secret) => key.includes(secret))) return true;
+        pending.push(nested);
+      }
+    }
+  }
+  return false;
+}
+
+/** UTF-16 high surrogates (0xD800–0xDBFF) must be paired with a low surrogate for valid JSON. */
+const HIGH_SURROGATE_START = 0xd800;
+const HIGH_SURROGATE_END = 0xdbff;
+const LOW_SURROGATE_START = 0xdc00;
+const LOW_SURROGATE_END = 0xdfff;
+
+function isHighSurrogate(code: number): boolean {
+  return code >= HIGH_SURROGATE_START && code <= HIGH_SURROGATE_END;
+}
+
+function isLowSurrogate(code: number): boolean {
+  return code >= LOW_SURROGATE_START && code <= LOW_SURROGATE_END;
+}
+
+function endsWithHighSurrogate(value: string): boolean {
+  return value.length > 0 && isHighSurrogate(value.charCodeAt(value.length - 1));
+}
+
+/**
+ * Replace unpaired UTF-16 surrogates so the string is safe for JSON (Postgres rejects them).
+ */
+export function sanitizeUtf16ForJson(value: string): string {
+  let result = "";
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (isHighSurrogate(code)) {
+      const next = i + 1 < value.length ? value.charCodeAt(i + 1) : -1;
+      if (isLowSurrogate(next)) {
+        result += value[i]! + value[i + 1]!;
+        i += 1;
+      } else {
+        result += "\uFFFD";
+      }
+    } else if (isLowSurrogate(code)) {
+      result += "\uFFFD";
+    } else {
+      result += value[i]!;
+    }
+  }
+  return result;
+}
+
+/** Deep-sanitize string leaves so event payloads never carry unpaired surrogates into JSON. */
+export function sanitizeJsonValue<T>(value: T): T {
+  if (typeof value === "string") return sanitizeUtf16ForJson(value) as T;
+  if (Array.isArray(value)) return value.map((item) => sanitizeJsonValue(item)) as T;
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    const used = new Map<string, number>();
+    for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+      let safeKey = sanitizeUtf16ForJson(key);
+      const seen = used.get(safeKey) ?? 0;
+      used.set(safeKey, seen + 1);
+      // Deterministic collision handling when sanitizing collapses distinct keys.
+      if (seen > 0) safeKey = `${safeKey}#${seen + 1}`;
+      out[safeKey] = sanitizeJsonValue(nested);
+    }
+    return out as T;
+  }
+  return value;
 }
 
 export function createStreamingRedactor(secrets: string[]) {
@@ -311,26 +433,45 @@ export function createStreamingRedactor(secrets: string[]) {
   let buffer = "";
 
   const drain = (final: boolean) => {
+    let output: string;
     if (values.length === 0) {
-      const output = buffer;
+      output = buffer;
       buffer = "";
-      return output;
-    }
-    const safeStartLimit = final ? buffer.length : Math.max(0, buffer.length - maxLength + 1);
-    let offset = 0;
-    let output = "";
-    while (offset < safeStartLimit) {
-      const secret = values.find((value) => buffer.startsWith(value, offset));
-      if (secret) {
-        output += "[redacted]";
-        offset += secret.length;
-      } else {
+    } else {
+      const safeStartLimit = final ? buffer.length : Math.max(0, buffer.length - maxLength + 1);
+      let offset = 0;
+      output = "";
+      while (offset < safeStartLimit) {
+        const secret = values.find((value) => buffer.startsWith(value, offset));
+        if (secret) {
+          output += "[redacted]";
+          offset += secret.length;
+          continue;
+        }
+        const code = buffer.charCodeAt(offset);
+        if (isHighSurrogate(code)) {
+          const hasNext = offset + 1 < buffer.length;
+          const next = hasNext ? buffer.charCodeAt(offset + 1) : -1;
+          if (hasNext && isLowSurrogate(next)) {
+            // Keep the pair together; hold both if the low unit is outside this drain window.
+            if (!final && offset + 1 >= safeStartLimit) break;
+            output += buffer[offset]! + buffer[offset + 1]!;
+            offset += 2;
+            continue;
+          }
+          if (!final && !hasNext) break; // trailing high surrogate — wait for the next chunk
+        }
         output += buffer[offset];
         offset += 1;
       }
+      buffer = buffer.slice(offset);
     }
-    buffer = buffer.slice(offset);
-    return output;
+    // No-secret path emits the whole buffer; hold a trailing high until the next chunk.
+    if (!final && endsWithHighSurrogate(output)) {
+      buffer = output.slice(-1) + buffer;
+      output = output.slice(0, -1);
+    }
+    return sanitizeUtf16ForJson(output);
   };
 
   return {

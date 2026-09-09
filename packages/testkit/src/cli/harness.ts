@@ -3,6 +3,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { loadRootEnv } from "@rakazo/core/node/load-root-env";
 import { PostgreSqlContainer } from "@testcontainers/postgresql";
+import type { createApp } from "../../../../apps/api/src/app.ts";
 import { runProcess } from "./process.js";
 
 loadRootEnv();
@@ -52,10 +53,14 @@ async function main() {
     const webOrigin = `http://127.0.0.1:${webPort}`;
 
     process.env.DATABASE_URL = databaseUrl;
+    process.env.REALTIME_DATABASE_URL = databaseUrl;
     process.env.VERIFY_DATABASE = "1";
     process.env.WAKEUP_DRIVER = "memory";
     process.env.SANDBOX_PROVIDER = sandboxProvider;
     process.env.AGENT_RUNTIME = agentRuntime;
+    // Playwright/E2E force the offline cloud-agent emulator; clear Cursor keys so cards never hit a live VM.
+    process.env.CLOUD_AGENT_PROVIDER = "emulator";
+    delete process.env.CURSOR_API_KEY;
     process.env.COMPOSIO_API_KEY = "";
     process.env.BETTER_AUTH_SECRET = "test-secret-test-secret-32chars!";
     process.env.ENCRYPTION_KEY = "test-encryption-key-test-encryption-key";
@@ -81,25 +86,63 @@ async function main() {
     });
 
     if (integration) {
-      execSync(
-        [
-          "pnpm exec vitest run --no-file-parallelism",
-          "packages/testkit/src/journeys.test.ts",
-          "packages/testkit/src/authorization.test.ts",
-          "packages/testkit/src/attachments.test.ts",
-          "packages/testkit/src/voice.test.ts",
-          "packages/testkit/src/search.test.ts",
-          "packages/testkit/src/executor-lifecycle.test.ts",
-          "packages/testkit/src/connections.test.ts",
-          "packages/adapters/src/wakeup.postgres.test.ts",
-          "packages/adapters/src/realtime.postgres.test.ts",
-          "packages/adapters/src/job-reconciler.postgres.test.ts",
-        ].join(" "),
-        {
-          stdio: "inherit",
-          env: process.env,
-        },
-      );
+      const suites = [
+        "packages/testkit/src/pi-offline.postgres.test.ts",
+        "packages/testkit/src/computer-approval.postgres.test.ts",
+        "packages/testkit/src/eval-history.postgres.test.ts",
+        "packages/testkit/src/eval-customer-support.postgres.test.ts",
+        "packages/testkit/src/journeys.test.ts",
+        "packages/testkit/src/authorization.test.ts",
+        "packages/testkit/src/attachments.test.ts",
+        "packages/testkit/src/voice.test.ts",
+        "packages/testkit/src/search.test.ts",
+        "packages/testkit/src/executor-lifecycle.test.ts",
+        "packages/testkit/src/connections.test.ts",
+        "packages/testkit/src/bot-secrets.test.ts",
+        "packages/db/src/space-membership.postgres.test.ts",
+        "packages/db/src/messaging.postgres.test.ts",
+        "packages/memory/src/commit.postgres.test.ts",
+        "packages/adapters/src/wakeup.postgres.test.ts",
+        "packages/adapters/src/realtime.postgres.test.ts",
+        "packages/adapters/src/job-reconciler.postgres.test.ts",
+        "packages/adapters/src/cloud-agent.postgres.test.ts",
+      ];
+      // Each app reconciles all durable work in its database, including intentionally
+      // unfinished fixture runs. Clone the pristine migrated schema so one suite
+      // cannot execute another suite's backlog or wait for it during shutdown.
+      const template = container.getDatabase().replaceAll('"', '""');
+      const databaseCommand = async (statement: string) => {
+        const result = await container.exec([
+          "psql",
+          "-U",
+          container.getUsername(),
+          "-d",
+          "postgres",
+          "-v",
+          "ON_ERROR_STOP=1",
+          "-c",
+          statement,
+        ]);
+        if (result.exitCode !== 0)
+          throw new Error("Isolated integration database operation failed");
+      };
+      for (const [index, suite] of suites.entries()) {
+        const database = `integration_${index}`;
+        await databaseCommand(`CREATE DATABASE "${database}" TEMPLATE "${template}"`);
+        const suiteUrl = new URL(databaseUrl);
+        suiteUrl.pathname = `/${database}`;
+        try {
+          await runProcess("pnpm", ["exec", "vitest", "run", suite], {
+            ...process.env,
+            DATABASE_URL: suiteUrl.toString(),
+            REALTIME_DATABASE_URL: suiteUrl.toString(),
+            OPENROUTER_API_KEY: "",
+            MODEL_API_KEY: "",
+          });
+        } finally {
+          await databaseCommand(`DROP DATABASE IF EXISTS "${database}" WITH (FORCE)`);
+        }
+      }
       await writeSummary(reportDir, {
         ok: true,
         mode,
@@ -109,8 +152,10 @@ async function main() {
       return;
     }
 
-    const [{ ComposioEmulator, PipedreamConnector, ThirdPartyConnectorEmulator }, { createApp }] =
-      await Promise.all([import("@rakazo/adapters"), import("../../../../apps/api/src/app.ts")]);
+    const [
+      { ComposioEmulator, EmailEmulator, PipedreamConnector, ThirdPartyConnectorEmulator },
+      { createApp },
+    ] = await Promise.all([import("@rakazo/adapters"), import("../../../../apps/api/src/app.ts")]);
     const { serve } = await import("@hono/node-server");
     const thirdParties = new ThirdPartyConnectorEmulator();
     const pipedream = new PipedreamConnector(
@@ -123,20 +168,26 @@ async function main() {
       },
       { fetch: thirdParties.fetch, resolveHostname: thirdParties.resolveHostname },
     );
+    const email = new EmailEmulator();
     const handles = await createApp({
       databaseUrl,
       prisma: undefined,
       composio: new ComposioEmulator(),
       pipedream,
+      email,
       remoteConnectors: {
         fetch: thirdParties.fetch,
         resolveHostname: thirdParties.resolveHostname,
       },
+      integrationsCatalogUrl: "https://catalog.example.test/",
     });
     let activeRequests = 0;
     const requestWaiters = new Set<() => void>();
     const server = serve({
       fetch: async (request) => {
+        if (new URL(request.url).pathname === "/__e2e/emails") {
+          return Response.json(email.sent, { headers: { "cache-control": "no-store" } });
+        }
         activeRequests += 1;
         try {
           return await handles.app.fetch(request);
@@ -213,7 +264,7 @@ async function main() {
               {
                 operationId: "e2e-cleanup",
                 traceId: "e2e-cleanup",
-                workspaceId: computer.workspaceId,
+                spaceId: computer.spaceId,
                 userId: computer.userId,
                 signal: new AbortController().signal,
               },
@@ -236,15 +287,13 @@ async function main() {
   }
 }
 
-type AppHandles = Awaited<
-  ReturnType<typeof import("../../../../apps/api/src/app.ts")["createApp"]>
->;
+type AppHandles = Awaited<ReturnType<typeof createApp>>;
 
 async function managedComputers(handles: AppHandles) {
   if (!["e2b", "daytona", "box"].includes(sandboxProvider)) return [];
   return handles.prisma.computer.findMany({
     where: { providerRef: { not: null } },
-    select: { homeKey: true, kind: true, providerRef: true, userId: true, workspaceId: true },
+    select: { homeKey: true, kind: true, providerRef: true, userId: true, spaceId: true },
   });
 }
 

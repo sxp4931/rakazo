@@ -1,23 +1,25 @@
-import type { ComposioProvider } from "@rakazo/adapters";
+import type { ConnectorRegistry } from "@rakazo/adapters";
 import type { Actor, MessageBlock } from "@rakazo/contracts";
 import { featuredConnectorProvidersMatch } from "@rakazo/core";
 import {
-  createThreadMessage,
+  appendEventInTransaction,
+  createThreadMessageInTransaction,
   IsolationError,
+  type Prisma,
   type PrismaClient,
   type ThreadEvents,
 } from "@rakazo/db";
 
 /**
  * First-run conversational onboarding, seeded deterministically into the bot's
- * thread: greeting, a focus choice, and Composio app cards the user authorizes
+ * thread: greeting, a focus choice, and available app cards the user authorizes
  * inline. Focus must not rename the bot. No model tokens are spent.
  */
 
 type OnboardingDeps = {
   prisma: PrismaClient;
   events: ThreadEvents;
-  composio?: Pick<ComposioProvider, "catalog">;
+  connectors: ConnectorRegistry;
 };
 
 type FocusOption = {
@@ -68,18 +70,9 @@ const APP_DESCRIPTIONS: Record<string, string> = {
   hackernews: "Search stories and discussions.",
 };
 
-const APP_NAMES: Record<string, string> = {
-  gmail: "Gmail",
-  googlecalendar: "Google Calendar",
-  googledocs: "Google Docs",
-  hackernews: "Hacker News",
-  notion: "Notion",
-  slack: "Slack",
-};
-
 async function requireBotThread(deps: OnboardingDeps, actor: Actor, botId: string) {
   const bot = await deps.prisma.bot.findFirst({
-    where: { id: botId, workspaceId: actor.workspaceId, userId: actor.userId },
+    where: { id: botId, spaceId: actor.spaceId, userId: actor.userId },
     include: { thread: true },
   });
   if (!bot?.thread) throw new IsolationError();
@@ -88,64 +81,149 @@ async function requireBotThread(deps: OnboardingDeps, actor: Actor, botId: strin
 
 async function post(
   deps: OnboardingDeps,
-  target: { workspaceId: string; botId: string; threadId: string },
+  target: { spaceId: string; botId: string; threadId: string },
   blocks: MessageBlock[],
 ): Promise<string> {
-  const message = await createThreadMessage(deps.prisma, {
-    threadId: target.threadId,
-    role: "bot",
-    blocks,
+  const committed = await deps.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    const message = await createThreadMessageInTransaction(tx, {
+      threadId: target.threadId,
+      role: "bot",
+      blocks,
+    });
+    const event = await appendEventInTransaction(tx, {
+      spaceId: target.spaceId,
+      threadId: target.threadId,
+      botId: target.botId,
+      type: "thread.message.created",
+      payload: { messageId: message.id, role: "bot", blocks },
+    });
+    return { message, event };
   });
-  await deps.events.append({
-    workspaceId: target.workspaceId,
-    threadId: target.threadId,
-    botId: target.botId,
-    type: "thread.message.created",
-    payload: { messageId: message.id, role: "bot", blocks },
-  });
-  return message.id;
+  await deps.events.notify(target.threadId, committed.event.seq);
+  return committed.message.id;
 }
 
 async function updateBlocks(
   deps: OnboardingDeps,
-  target: { workspaceId: string; botId: string; threadId: string },
+  target: { spaceId: string; botId: string; threadId: string },
   messageId: string,
   blocks: MessageBlock[],
 ): Promise<void> {
-  await deps.prisma.message.update({ where: { id: messageId }, data: { blocks } });
-  await deps.events.append({
-    workspaceId: target.workspaceId,
-    threadId: target.threadId,
-    botId: target.botId,
-    type: "thread.message.updated",
-    payload: { messageId, role: "bot", blocks },
+  const event = await deps.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    await tx.message.update({ where: { id: messageId }, data: { blocks } });
+    return appendEventInTransaction(tx, {
+      spaceId: target.spaceId,
+      threadId: target.threadId,
+      botId: target.botId,
+      type: "thread.message.updated",
+      payload: { messageId, role: "bot", blocks },
+    });
   });
+  await deps.events.notify(target.threadId, event.seq);
 }
+
+/** Sentinel answerId for a focus card the user dismissed without choosing. */
+export const FOCUS_DISMISSED_ANSWER_ID = "_dismissed";
 
 export async function startOnboarding(
   deps: OnboardingDeps,
   actor: Actor,
   botId: string,
 ): Promise<void> {
-  const { bot, thread } = await requireBotThread(deps, actor, botId);
+  const { thread } = await requireBotThread(deps, actor, botId);
   const existing = await deps.prisma.message.count({ where: { threadId: thread.id } });
   if (existing > 0) return;
-  const user = await deps.prisma.user.findUnique({
-    where: { id: actor.userId },
-    select: { name: true },
-  });
-  const firstName = (user?.name ?? "there").split(/\s+/)[0];
-  const target = { workspaceId: actor.workspaceId, botId: bot.id, threadId: thread.id };
-  await post(deps, target, [
-    { kind: "text", text: `Hey ${firstName}. Fresh start on my side, so I’ll keep this short.` },
-  ]);
-  await post(deps, target, [
+  // Fresh chats start empty (same as web). The focus card is posted later via
+  // promptFocus so non-first bots can wait ~10s for free typing, or skip if the
+  // user already engaged.
+}
+
+function messageHasChoice(blocks: MessageBlock[]): boolean {
+  return blocks.some((block) => block.kind === "choice");
+}
+
+function messageHasPendingChoice(blocks: MessageBlock[]): boolean {
+  return blocks.some((block) => block.kind === "choice" && !block.answerId);
+}
+
+export async function promptFocus(
+  deps: OnboardingDeps,
+  actor: Actor,
+  botId: string,
+): Promise<void> {
+  const { bot, thread } = await requireBotThread(deps, actor, botId);
+  const target = { spaceId: actor.spaceId, botId: bot.id, threadId: thread.id };
+  const blocks: MessageBlock[] = [
     {
       kind: "choice",
       question: "What do you want me on first?",
       options: FOCUS_OPTIONS.map(({ id, letter, label }) => ({ id, letter, label })),
     },
-  ]);
+  ];
+  // Check + insert + event in one transaction so concurrent promptFocus calls
+  // cannot duplicate cards, and a concurrent user send cannot publish first.
+  const committed = await deps.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    // Serialize concurrent promptFocus callers on this thread before the gate check.
+    await tx.$executeRaw`SELECT id FROM threads WHERE id = ${thread.id} FOR UPDATE`;
+    const recent = await tx.message.findMany({
+      where: { threadId: thread.id },
+      select: { role: true, blocks: true },
+      orderBy: { createdAt: "asc" },
+    });
+    if (recent.some((message) => message.role === "user")) return null;
+    if (recent.some((message) => messageHasChoice(message.blocks as MessageBlock[]))) return null;
+    const message = await createThreadMessageInTransaction(tx, {
+      threadId: target.threadId,
+      role: "bot",
+      blocks,
+    });
+    const event = await appendEventInTransaction(tx, {
+      spaceId: target.spaceId,
+      threadId: target.threadId,
+      botId: target.botId,
+      type: "thread.message.created",
+      payload: { messageId: message.id, role: "bot", blocks },
+    });
+    return { message, event };
+  });
+  if (!committed) return;
+  await deps.events.notify(target.threadId, committed.event.seq);
+}
+
+export async function dismissFocus(
+  deps: OnboardingDeps,
+  actor: Actor,
+  botId: string,
+): Promise<void> {
+  const { bot, thread } = await requireBotThread(deps, actor, botId);
+  const target = { spaceId: actor.spaceId, botId: bot.id, threadId: thread.id };
+  const claimed = await deps.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    await tx.$executeRaw`SELECT id FROM threads WHERE id = ${thread.id} FOR UPDATE`;
+    const recent = await tx.message.findMany({
+      where: { threadId: thread.id },
+      orderBy: { createdAt: "asc" },
+    });
+    const pending = recent.find((message) =>
+      messageHasPendingChoice(message.blocks as MessageBlock[]),
+    );
+    if (!pending) return null;
+    const blocks = (pending.blocks as MessageBlock[]).map((block) =>
+      block.kind === "choice" && !block.answerId
+        ? { ...block, answerId: FOCUS_DISMISSED_ANSWER_ID }
+        : block,
+    );
+    await tx.message.update({ where: { id: pending.id }, data: { blocks } });
+    const event = await appendEventInTransaction(tx, {
+      spaceId: target.spaceId,
+      threadId: target.threadId,
+      botId: target.botId,
+      type: "thread.message.updated",
+      payload: { messageId: pending.id, role: "bot", blocks },
+    });
+    return { messageId: pending.id, blocks, event };
+  });
+  if (!claimed) return;
+  await deps.events.notify(target.threadId, claimed.event.seq);
 }
 
 export async function chooseFocus(
@@ -157,20 +235,33 @@ export async function chooseFocus(
   const option = FOCUS_OPTIONS.find((entry) => entry.id === optionId);
   if (!option) throw new IsolationError();
   const { bot, thread } = await requireBotThread(deps, actor, botId);
-  const target = { workspaceId: actor.workspaceId, botId: bot.id, threadId: thread.id };
+  const target = { spaceId: actor.spaceId, botId: bot.id, threadId: thread.id };
 
-  const recent = await deps.prisma.message.findMany({
-    where: { threadId: thread.id },
-    orderBy: { createdAt: "asc" },
+  const claimed = await deps.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    await tx.$executeRaw`SELECT id FROM threads WHERE id = ${thread.id} FOR UPDATE`;
+    const recent = await tx.message.findMany({
+      where: { threadId: thread.id },
+      orderBy: { createdAt: "asc" },
+    });
+    const pending = recent.find((message) =>
+      messageHasPendingChoice(message.blocks as MessageBlock[]),
+    );
+    if (!pending) return null;
+    const blocks = (pending.blocks as MessageBlock[]).map((block) =>
+      block.kind === "choice" ? { ...block, answerId: option.id } : block,
+    );
+    await tx.message.update({ where: { id: pending.id }, data: { blocks } });
+    const event = await appendEventInTransaction(tx, {
+      spaceId: target.spaceId,
+      threadId: target.threadId,
+      botId: target.botId,
+      type: "thread.message.updated",
+      payload: { messageId: pending.id, role: "bot", blocks },
+    });
+    return { messageId: pending.id, blocks, event };
   });
-  const pending = recent.find((message) =>
-    (message.blocks as MessageBlock[]).some((block) => block.kind === "choice" && !block.answerId),
-  );
-  if (!pending) return;
-  const blocks = (pending.blocks as MessageBlock[]).map((block) =>
-    block.kind === "choice" ? { ...block, answerId: option.id } : block,
-  );
-  await updateBlocks(deps, target, pending.id, blocks);
+  if (!claimed) return;
+  await deps.events.notify(target.threadId, claimed.event.seq);
 
   // Keep the name and title the user chose when creating the bot; the focus
   // step only suggests apps, it must not rename the bot.
@@ -181,30 +272,46 @@ export async function chooseFocus(
     },
   ]);
 
-  const catalog = deps.composio
-    ? await deps.composio
-        .catalog({
-          operationId: "onboarding.choose",
-          traceId: "onboarding.choose",
-          workspaceId: actor.workspaceId,
-          userId: actor.userId,
-          botId: bot.id,
-          signal: new AbortController().signal,
-        })
-        .catch(() => [])
-    : [];
-  const bySlug = new Map(catalog.map((entry) => [entry.slug.toLowerCase(), entry]));
-  const cards: MessageBlock[] = option.apps.map((slug) => {
-    const entry = bySlug.get(slug.toLowerCase());
-    return {
-      kind: "app_connect",
-      provider: entry?.slug ?? slug,
-      name: entry?.name ?? APP_NAMES[slug] ?? capitalize(slug),
-      description: APP_DESCRIPTIONS[slug] ?? `Connect ${entry?.name ?? slug} to your account.`,
-      logo: entry?.logo ?? null,
-      status: entry?.connected ? "connected" : "pending",
-    };
+  const providers = deps.connectors.managedProviders();
+  const catalog = (
+    await Promise.all(
+      providers.map((provider) =>
+        provider
+          .catalog({
+            operationId: "onboarding.choose",
+            traceId: "onboarding.choose",
+            spaceId: actor.spaceId,
+            userId: actor.userId,
+            botId: bot.id,
+            signal: AbortSignal.timeout(15_000),
+          })
+          .catch(() => []),
+      ),
+    )
+  ).flat();
+  const cards: MessageBlock[] = option.apps.flatMap((slug) => {
+    const entry = catalog.find(
+      (item) =>
+        item.slug.toLowerCase() === slug.toLowerCase() ||
+        featuredConnectorProvidersMatch(item.slug, slug),
+    );
+    if (!entry) return [];
+    return [
+      {
+        kind: "app_connect" as const,
+        connectorId: entry.connectorId ?? "composio",
+        provider: entry.slug,
+        name: entry.name,
+        description: APP_DESCRIPTIONS[slug] ?? "",
+        logo: entry.logo ?? null,
+        status: entry.connected ? ("connected" as const) : ("pending" as const),
+      },
+    ];
   });
+  if (!cards.length) {
+    await post(deps, target, [{ kind: "text", text: "What would you like to work on first?" }]);
+    return;
+  }
   const cardNames = cards
     .map((card) => (card.kind === "app_connect" ? card.name : ""))
     .filter(Boolean);
@@ -229,9 +336,10 @@ export async function markAppConnected(
   actor: Actor,
   botId: string,
   provider: string,
+  connectorId = "composio",
 ): Promise<void> {
   const { bot, thread } = await requireBotThread(deps, actor, botId);
-  const target = { workspaceId: actor.workspaceId, botId: bot.id, threadId: thread.id };
+  const target = { spaceId: actor.spaceId, botId: bot.id, threadId: thread.id };
   const messages = await deps.prisma.message.findMany({
     where: { threadId: thread.id },
     select: { id: true, blocks: true },
@@ -244,13 +352,16 @@ export async function markAppConnected(
       !blocks.some(
         (block) =>
           block.kind === "app_connect" &&
+          (block.connectorId ?? "composio") === connectorId &&
           featuredConnectorProvidersMatch(block.provider, provider) &&
           block.status !== "connected",
       )
     )
       continue;
     const next = blocks.map((block) =>
-      block.kind === "app_connect" && featuredConnectorProvidersMatch(block.provider, provider)
+      block.kind === "app_connect" &&
+      (block.connectorId ?? "composio") === connectorId &&
+      featuredConnectorProvidersMatch(block.provider, provider)
         ? { ...block, status: "connected" as const }
         : block,
     );

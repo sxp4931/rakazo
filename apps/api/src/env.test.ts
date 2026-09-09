@@ -13,6 +13,14 @@ describe("loadEnv", () => {
     expect(env.sandboxProvider).toBe("docker");
     expect(env.wakeupDriver).toBe("graphile");
     expect(env.apiHost).toBe("127.0.0.1");
+    expect(env.nodeEnv).toBe("test");
+  });
+
+  it("defaults Pi JSONL session recording to off", () => {
+    expect(loadEnv(base).piSessionRecording).toBe(false);
+    expect(loadEnv({ ...base, PI_SESSION_RECORDING: "false" }).piSessionRecording).toBe(false);
+    expect(loadEnv({ ...base, PI_SESSION_RECORDING: "1" }).piSessionRecording).toBe(false);
+    expect(loadEnv({ ...base, PI_SESSION_RECORDING: "true" }).piSessionRecording).toBe(true);
   });
 
   it("keeps explicit emulator settings for pnpm test", () => {
@@ -25,6 +33,35 @@ describe("loadEnv", () => {
     expect(env.agentRuntime).toBe("scripted");
     expect(env.sandboxProvider).toBe("fake");
     expect(env.wakeupDriver).toBe("memory");
+  });
+
+  it("loads an optional integrations catalog mirror", () => {
+    expect(loadEnv(base).integrationsCatalogUrl).toBeUndefined();
+    expect(
+      loadEnv({ ...base, INTEGRATIONS_CATALOG_URL: " https://catalog.example.test/feed " })
+        .integrationsCatalogUrl,
+    ).toBe("https://catalog.example.test/feed");
+  });
+
+  it("falls back to none when a remote provider key is missing", () => {
+    expect(
+      loadEnv({
+        ...base,
+        SANDBOX_PROVIDER: "e2b",
+      }).sandboxProvider,
+    ).toBe("none");
+    expect(
+      loadEnv({
+        ...base,
+        SANDBOX_PROVIDER: "none",
+      }).sandboxProvider,
+    ).toBe("none");
+    expect(
+      loadEnv({
+        ...base,
+        SANDBOX_PROVIDER: "",
+      }).sandboxProvider,
+    ).toBe("none");
   });
 
   it("loads provider-specific Daytona configuration", () => {
@@ -96,7 +133,20 @@ describe("loadEnv", () => {
     expect(env.apiHost).toBe("0.0.0.0");
   });
 
-  it("requires a dedicated supervisor token for the Docker provider", () => {
+  it("falls back to none in production when Docker has no supervisor token", () => {
+    const env = loadEnv({
+      DATABASE_URL: base.DATABASE_URL,
+      NODE_ENV: "production",
+      BETTER_AUTH_SECRET: "prod-auth-secret-with-enough-length",
+      ENCRYPTION_KEY: "prod-encryption-key-with-enough-length",
+      SCREEN_PROXY_SECRET: "prod-screen-proxy-secret-with-enough-length",
+      SANDBOX_PROVIDER: "docker",
+    });
+    expect(env.sandboxProvider).toBe("none");
+    expect(env.sandboxSupervisorToken).toBeUndefined();
+  });
+
+  it("requires a dedicated supervisor token when Docker stays selected", () => {
     expect(() =>
       loadEnv({
         DATABASE_URL: base.DATABASE_URL,
@@ -105,6 +155,7 @@ describe("loadEnv", () => {
         ENCRYPTION_KEY: "prod-encryption-key-with-enough-length",
         SCREEN_PROXY_SECRET: "prod-screen-proxy-secret-with-enough-length",
         SANDBOX_PROVIDER: "docker",
+        SANDBOX_SUPERVISOR_TOKEN: "too-short",
       }),
     ).toThrow(/SANDBOX_SUPERVISOR_TOKEN/);
   });
@@ -125,5 +176,32 @@ describe("loadEnv", () => {
     });
     expect(env.updaterUrl).toBe("http://updater:7092");
     expect(env.updaterToken).toBe("fake-review-updater-token-000000000000");
+  });
+
+  it("loads SMTP configuration and keeps the email emulator out of production", () => {
+    expect(
+      loadEnv({
+        ...base,
+        SMTP_URL: " smtps://user:secret@smtp.example.test:465 ",
+        EMAIL_FROM: " OtterBot <no-reply@example.test> ",
+        EMAIL_EMULATOR: "true",
+      }),
+    ).toMatchObject({
+      smtpUrl: "smtps://user:secret@smtp.example.test:465",
+      emailFrom: "OtterBot <no-reply@example.test>",
+      emailEmulator: true,
+    });
+    expect(
+      loadEnv({
+        ...base,
+        NODE_ENV: "production",
+        BETTER_AUTH_SECRET: "prod-auth-secret-with-enough-length",
+        ENCRYPTION_KEY: "prod-encryption-key-with-enough-length",
+        SCREEN_PROXY_SECRET: "prod-screen-proxy-secret-with-enough-length",
+        SANDBOX_PROVIDER: "none",
+        EMAIL_EMULATOR: "true",
+      }).emailEmulator,
+    ).toBe(false);
+    expect(loadEnv({ ...base, NODE_ENV: "development" }).nodeEnv).toBe("development");
   });
 });

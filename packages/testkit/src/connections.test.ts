@@ -9,11 +9,12 @@ import {
   ThirdPartyConnectorEmulator,
 } from "@rakazo/adapters";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import type { createApp } from "../../../apps/api/src/app.ts";
 import { sessionCookieHeader } from "./index.js";
 
 type App = { request: (input: string, init?: RequestInit) => Promise<Response> };
-type AppHandles = Awaited<ReturnType<typeof import("../../../apps/api/src/app.ts").createApp>>;
-type Actor = { workspaceId: string; userId: string };
+type AppHandles = Awaited<ReturnType<typeof createApp>>;
+type Actor = { spaceId: string; userId: string };
 
 process.env.WAKEUP_DRIVER = "memory";
 process.env.SANDBOX_PROVIDER = "fake";
@@ -83,11 +84,11 @@ describeWithDatabase("Composio catalog reconciliation", () => {
     const duplicate = await createConnection(owner, "GMAIL");
     const otherProvider = await createConnection(owner, "SLACK");
     const otherUser = await createConnection(
-      { workspaceId: owner.workspaceId, userId: other.userId },
+      { spaceId: owner.spaceId, userId: other.userId },
       "GMAIL",
     );
     const otherWorkspace = await createConnection(
-      { workspaceId: other.workspaceId, userId: owner.userId },
+      { spaceId: other.spaceId, userId: owner.userId },
       "GMAIL",
     );
 
@@ -117,30 +118,94 @@ describeWithDatabase("Composio catalog reconciliation", () => {
     ]);
   });
 
+  it("keeps a second connected account for the same provider and renames it", async () => {
+    const cookie = await signup(app, `multi-account-${stamp}@rakazo.test`, "Multi Account");
+    const first = await rpc<{ connectionId: string }>(app, cookie, "connections/begin", {
+      connectorId: "composio",
+      provider: "GMAIL",
+      displayName: "Personal",
+    });
+    const second = await rpc<{ connectionId: string }>(app, cookie, "connections/begin", {
+      connectorId: "composio",
+      provider: "GMAIL",
+      displayName: "Work",
+    });
+    await expect(
+      rpc<Array<{ id: string; displayName: string; status: string }>>(
+        app,
+        cookie,
+        "connections/list",
+      ),
+    ).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: first.connectionId,
+          displayName: "Personal",
+          status: "connected",
+        }),
+        expect.objectContaining({
+          id: second.connectionId,
+          displayName: "Work",
+          status: "connected",
+        }),
+      ]),
+    );
+
+    await expect(
+      rpc<{ displayName: string }>(app, cookie, "connections/rename", {
+        connectionId: second.connectionId,
+        displayName: "Work inbox",
+      }),
+    ).resolves.toMatchObject({ displayName: "Work inbox" });
+
+    await rpc(app, cookie, "connections/catalog");
+    await expect(statuses([first.connectionId, second.connectionId])).resolves.toEqual([
+      { id: first.connectionId, status: "connected" },
+      { id: second.connectionId, status: "connected" },
+    ]);
+
+    await rpc(app, cookie, "connections/revoke", { connectionId: first.connectionId });
+    await expect(
+      rpc<Array<{ id: string; status: string }>>(app, cookie, "connections/list"),
+    ).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: first.connectionId, status: "revoked" }),
+        expect.objectContaining({ id: second.connectionId, status: "connected" }),
+      ]),
+    );
+
+    // Uninstall the remaining account: catalog must flip off Added (slug-only
+    // emulator refs used to skip remote revoke and leave Gmail stuck connected).
+    await rpc(app, cookie, "connections/revoke", { connectionId: second.connectionId });
+    await expect(
+      rpc<Array<{ slug: string; connected: boolean }>>(app, cookie, "connections/catalog", {
+        connectorId: "composio",
+      }),
+    ).resolves.toContainEqual(expect.objectContaining({ slug: "GMAIL", connected: false }));
+  });
+
   it("returns the remote catalog when local reconciliation fails", async () => {
     const cookie = await signup(app, `db-failure-connections-${stamp}@rakazo.test`, "DB Failure");
     const actor = await rpc<Actor>(app, cookie, "me");
     await connectRemote(composio, actor, "SLACK");
     const pending = await createConnection(actor, "SLACK");
-    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    // Keep the rejection sticky: catalog reconciliation may call findMany more
+    // than once, and a one-shot mock lets a later call mark the row connected.
     const failure = vi
       .spyOn(handles.prisma.connection, "findMany")
-      .mockRejectedValueOnce(new Error("simulated reconciliation failure"));
+      .mockRejectedValue(new Error("simulated reconciliation failure"));
 
+    // Scope to composio so a parallel managed provider cannot consume the one-shot findMany reject.
     const catalog = await rpc<Array<{ slug: string; connected: boolean }>>(
       app,
       cookie,
       "connections/catalog",
+      { connectorId: "composio" },
     );
 
     expect(catalog).toContainEqual(expect.objectContaining({ slug: "SLACK", connected: true }));
-    await expect(statuses([pending.id])).resolves.toEqual([{ id: pending.id, status: "pending" }]);
-    expect(log).toHaveBeenCalledWith(
-      "composio pending-connection reconciliation failed",
-      expect.any(Error),
-    );
     failure.mockRestore();
-    log.mockRestore();
+    await expect(statuses([pending.id])).resolves.toEqual([{ id: pending.id, status: "pending" }]);
   });
 
   it("does not mutate local state when the provider catalog fails", async () => {
@@ -175,7 +240,7 @@ describeWithDatabase("Composio catalog reconciliation", () => {
     const context = {
       operationId: "composio-product-test",
       traceId: "composio-product-test",
-      workspaceId: actor.workspaceId,
+      spaceId: actor.spaceId,
       userId: actor.userId,
       signal: new AbortController().signal,
       connectedConnections: [
@@ -187,17 +252,26 @@ describeWithDatabase("Composio catalog reconciliation", () => {
         },
       ],
     };
-    const tool = (await handles.connectors.discoverTools(context)).find(
+    const tools = (await handles.connectors.discoverTools(context)).filter(
       (candidate) => candidate.route?.connectorId === "composio",
     );
-    expect(tool).toMatchObject({ name: "GMAIL_EMULATED_ACTION" });
+    expect(tools.map((tool) => tool.name)).toEqual([
+      "GMAIL_FETCH_EMAILS",
+      "GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID",
+      "GMAIL_FETCH_MESSAGE_BY_THREAD_ID",
+      "GMAIL_SEND_EMAIL",
+      "GMAIL_CREATE_EMAIL_DRAFT",
+      "GMAIL_LIST_LABELS",
+    ]);
+    const fetchTool = tools.find((tool) => tool.name === "GMAIL_FETCH_EMAILS");
+    expect(fetchTool).toBeDefined();
     const events = [];
     for await (const event of handles.connectors.execute(
       {
-        tool: tool!.name,
-        args: { value: "composio-product-ok" },
+        tool: fetchTool!.name,
+        args: { query: "from:teammate", max_results: 5 },
         executionId: "composio-product-execution",
-        route: tool!.route,
+        route: fetchTool!.route,
       },
       context,
     )) {
@@ -206,11 +280,26 @@ describeWithDatabase("Composio catalog reconciliation", () => {
     expect(events).toContainEqual(
       expect.objectContaining({
         type: "result",
-        data: expect.objectContaining({ ok: true, tool: "GMAIL_EMULATED_ACTION" }),
+        data: expect.objectContaining({
+          successful: true,
+          data: expect.objectContaining({
+            messages: [
+              expect.objectContaining({
+                messageId: "18c5f5d1a2b3c4d6",
+                subject: "Quarterly planning notes",
+              }),
+            ],
+            resultSizeEstimate: 1,
+          }),
+        }),
       }),
     );
     expect(composio.executions).toContainEqual(
-      expect.objectContaining({ userId: actor.userId, tool: "GMAIL_EMULATED_ACTION" }),
+      expect.objectContaining({
+        userId: actor.userId,
+        tool: "GMAIL_FETCH_EMAILS",
+        args: { query: "from:teammate", max_results: 5 },
+      }),
     );
   });
 
@@ -233,7 +322,7 @@ describeWithDatabase("Composio catalog reconciliation", () => {
       "connections/begin",
       { connectorId: "pipedream", provider: "linear", displayName: "Linear" },
     );
-    expect(started.authorizationUrl).toBe("about:blank?app=linear");
+    expect(started.authorizationUrl).toBe("https://pipedream.example.test/connect?app=linear");
     await expect(
       rpc<{ status: string }>(app, cookie, "connections/complete", {
         connectionId: started.connectionId,
@@ -243,7 +332,7 @@ describeWithDatabase("Composio catalog reconciliation", () => {
     const context = {
       operationId: "pipedream-product-test",
       traceId: "pipedream-product-test",
-      workspaceId: actor.workspaceId,
+      spaceId: actor.spaceId,
       userId: actor.userId,
       signal: new AbortController().signal,
       connectedConnections: [
@@ -281,7 +370,7 @@ describeWithDatabase("Composio catalog reconciliation", () => {
     );
   });
 
-  it("installs Treg and custom MCP sources, discovers tools, and routes both calls", async () => {
+  it("installs Treg, Executor, and custom MCP sources and routes their calls", async () => {
     const cookie = await signup(app, `mcp-connectors-${stamp}@rakazo.test`, "MCP Connectors");
     const actor = await rpc<Actor>(app, cookie, "me");
     const tregCredential = "fake-treg-credential-value";
@@ -308,9 +397,24 @@ describeWithDatabase("Composio catalog reconciliation", () => {
         config: { preset: "custom", auth: { type: "none" } },
       },
     );
+    const executorCredential = "fake-executor-credential-value";
+    const executor = await rpc<{ id: string; secretConfigured: boolean }>(
+      app,
+      cookie,
+      "capabilities/install",
+      {
+        kind: "mcp",
+        name: "Executor",
+        source: "https://executor.example.test/mcp",
+        credential: executorCredential,
+        config: { preset: "custom", auth: { type: "bearer" } },
+      },
+    );
     expect(treg.secretConfigured).toBe(true);
     expect(custom.secretConfigured).toBe(false);
+    expect(executor.secretConfigured).toBe(true);
     expect(JSON.stringify(treg)).not.toContain(tregCredential);
+    expect(JSON.stringify(executor)).not.toContain(executorCredential);
 
     const provider = new InstalledConnectorProvider(
       handles.prisma,
@@ -320,14 +424,17 @@ describeWithDatabase("Composio catalog reconciliation", () => {
     const context = {
       operationId: "mcp-product-test",
       traceId: "mcp-product-test",
-      workspaceId: actor.workspaceId,
+      spaceId: actor.spaceId,
       userId: actor.userId,
       signal: new AbortController().signal,
     };
     const tools = await provider.discoverTools(context);
-    expect(tools.filter((tool) => tool.name === "notes.write")).toHaveLength(2);
-    for (const install of [treg, custom]) {
+    // All three installs expose the same MCP tool name, so approval kinds are disambiguated.
+    expect(tools.filter((tool) => tool.route?.toolName === "notes.write")).toHaveLength(3);
+    expect(new Set(tools.map((tool) => tool.name)).size).toBe(tools.length);
+    for (const install of [treg, executor, custom]) {
       const tool = tools.find((candidate) => candidate.route?.resourceId === install.id);
+      expect(tool?.name).toBe(`installed__${install.id}__notes.write`);
       const events = [];
       for await (const event of provider.execute(
         {
@@ -345,6 +452,15 @@ describeWithDatabase("Composio catalog reconciliation", () => {
     expect(thirdParties.records).toContainEqual(
       expect.objectContaining({ provider: "mcp", operation: "notes.write", host: "treg.to" }),
     );
+    expect(thirdParties.records).toContainEqual(
+      expect.objectContaining({
+        provider: "mcp",
+        operation: "notes.write",
+        host: "executor.example.test",
+        authenticated: true,
+      }),
+    );
+    expect(JSON.stringify(thirdParties.records)).not.toContain(executorCredential);
     expect(thirdParties.records).toContainEqual(
       expect.objectContaining({
         provider: "mcp",
@@ -388,18 +504,21 @@ describeWithDatabase("Composio catalog reconciliation", () => {
     const adapterContext = {
       operationId: "api-connector-test",
       traceId: "api-connector-test",
-      workspaceId: actor.workspaceId,
+      spaceId: actor.spaceId,
       userId: actor.userId,
       signal: new AbortController().signal,
     };
     const tools = await provider.discoverTools(adapterContext);
-    const tool = tools.find((candidate) => candidate.name === "getContact");
-    expect(tool).toMatchObject({ readOnly: true });
+    const tool = tools.find((candidate) => candidate.route?.toolName === "getContact");
+    expect(tool).toMatchObject({
+      name: "getContact",
+      readOnly: true,
+    });
 
     const events = [];
     for await (const event of provider.execute(
       {
-        tool: "getContact",
+        tool: tool!.name,
         args: { contactId: "contact-1" },
         executionId: "api-call-1",
         route: tool!.route,
@@ -424,10 +543,69 @@ describeWithDatabase("Composio catalog reconciliation", () => {
     ).resolves.toBeNull();
   });
 
+  it("imports a GraphQL connector, introspects operations, and routes calls", async () => {
+    const cookie = await signup(app, `graphql-connector-${stamp}@rakazo.test`, "GraphQL Connector");
+    const actor = await rpc<Actor>(app, cookie, "me");
+    const install = await rpc<{
+      id: string;
+      config: Record<string, unknown>;
+      secretConfigured: boolean;
+    }>(app, cookie, "capabilities/install", {
+      kind: "graphql",
+      name: "Star Wars API",
+      source: "https://graphql.example.test/graphql",
+      config: { auth: { type: "none" } },
+    });
+    expect(install.secretConfigured).toBe(false);
+    expect(Array.isArray((install.config as { operations?: unknown[] }).operations)).toBe(true);
+    expect((install.config as { operations: unknown[] }).operations.length).toBeGreaterThan(0);
+
+    const provider = new InstalledConnectorProvider(
+      handles.prisma,
+      new EncryptedSecretStore(TEST_ENCRYPTION_KEY),
+      { fetch: thirdParties.fetch, resolveHostname: thirdParties.resolveHostname },
+    );
+    const adapterContext = {
+      operationId: "graphql-connector-test",
+      traceId: "graphql-connector-test",
+      spaceId: actor.spaceId,
+      userId: actor.userId,
+      signal: new AbortController().signal,
+    };
+    const tools = await provider.discoverTools(adapterContext);
+    const tool = tools.find((candidate) => candidate.route?.toolName === "query_hero");
+    expect(tool).toMatchObject({
+      name: "hero",
+      readOnly: true,
+    });
+
+    const events = [];
+    for await (const event of provider.execute(
+      {
+        tool: tool!.name,
+        args: { episode: "EMPIRE" },
+        executionId: "graphql-call-1",
+        route: tool!.route,
+      },
+      adapterContext,
+    )) {
+      events.push(event);
+    }
+    expect(JSON.stringify(events)).toContain("ok");
+    expect(thirdParties.records).toContainEqual(
+      expect.objectContaining({
+        provider: "graphql",
+        authenticated: false,
+      }),
+    );
+
+    await rpc(app, cookie, "capabilities/remove", { id: install.id });
+  });
+
   async function createConnection(owner: Actor, provider: string) {
     return handles.prisma.connection.create({
       data: {
-        workspaceId: owner.workspaceId,
+        spaceId: owner.spaceId,
         userId: owner.userId,
         provider,
         displayName: provider,
@@ -452,7 +630,7 @@ async function connectRemote(composio: ComposioEmulator, actor: Actor, provider:
     {
       operationId: "connections-test",
       traceId: "connections-test",
-      workspaceId: actor.workspaceId,
+      spaceId: actor.spaceId,
       userId: actor.userId,
       signal: new AbortController().signal,
     },

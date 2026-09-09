@@ -10,6 +10,7 @@ import {
   resolveScreenProxySecret,
   resolveSupervisorToken,
   resolveUpdaterToken,
+  timingSafeStringEqual,
 } from "./secrets-guard.js";
 
 describe("secrets-guard", () => {
@@ -70,6 +71,36 @@ describe("secrets-guard", () => {
         SCREEN_PROXY_SECRET: "replace-with-32-plus-character-screen-proxy-secret",
       }),
     ).toThrow(/SCREEN_PROXY_SECRET/);
+  });
+
+  it("rejects blank and whitespace-padded placeholder secrets in production", () => {
+    expect(() => resolveAuthSecret({ NODE_ENV: "production", BETTER_AUTH_SECRET: "   " })).toThrow(
+      /BETTER_AUTH_SECRET/,
+    );
+    expect(() => resolveEncryptionKey({ NODE_ENV: "production", ENCRYPTION_KEY: "\t" })).toThrow(
+      /ENCRYPTION_KEY/,
+    );
+    expect(() =>
+      resolveAuthSecret({
+        NODE_ENV: "production",
+        BETTER_AUTH_SECRET: ` ${DEV_AUTH_SECRET_PLACEHOLDER}\n`,
+      }),
+    ).toThrow(/BETTER_AUTH_SECRET/);
+    expect(() =>
+      resolveEncryptionKey({
+        NODE_ENV: "production",
+        ENCRYPTION_KEY: `${DEV_ENCRYPTION_KEY_PLACEHOLDER} `,
+      }),
+    ).toThrow(/ENCRYPTION_KEY/);
+  });
+
+  it("does not treat disabled Vitest flags as a test environment", () => {
+    expect(() => resolveAuthSecret({ NODE_ENV: "production", VITEST: "0" })).toThrow(
+      /BETTER_AUTH_SECRET/,
+    );
+    expect(() => resolveEncryptionKey({ NODE_ENV: "production", VITEST: "false" })).toThrow(
+      /ENCRYPTION_KEY/,
+    );
   });
 
   it("accepts real dedicated credentials in production", () => {
@@ -186,6 +217,15 @@ describe("secrets-guard", () => {
         RAKAZO_UPDATER_TOKEN: "too-short",
       }),
     ).toThrow(/at least 32 characters/);
+  });
+
+  it("compares raw strings in constant time", () => {
+    expect(timingSafeStringEqual("secret-token", "secret-token")).toBe(true);
+    expect(timingSafeStringEqual("secret-token-longer", "secret-token")).toBe(false);
+    expect(timingSafeStringEqual("secret-toke", "secret-token")).toBe(false);
+    expect(timingSafeStringEqual("Secret-token", "secret-token")).toBe(false);
+    expect(timingSafeStringEqual(undefined, "secret-token")).toBe(false);
+    expect(timingSafeStringEqual("", "")).toBe(true);
   });
 
   it("compares bearer tokens without leaking a length or a prefix match", () => {

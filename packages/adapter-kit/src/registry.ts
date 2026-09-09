@@ -33,4 +33,7 @@ export const slots = {
   auth: "connection-auth",
   runner: "runner",
   voice: "voice",
+  web: "web",
+  browser: "browser",
+  cloudAgent: "cloud-agent",
 } as const;

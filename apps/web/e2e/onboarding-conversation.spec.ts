@@ -14,10 +14,14 @@ test("focus choice suggests apps and preserves a completed connection", async ({
 
   await expect(
     page.getByText("Hey Robin. Fresh start on my side, so I’ll keep this short."),
-  ).toBeVisible();
+  ).toHaveCount(0);
   await expect(page.getByText("What do you want me on first?", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Day-to-day work/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Research & writing/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /A bit of everything/ })).toBeVisible();
   await page.mouse.move(1, 1);
   await captureScreenshot(page, testInfo, "01-focus-choice");
+  await captureScreenshot(page, testInfo, "choice-card-onboarding");
 
   await page.getByRole("button", { name: /Day-to-day work/ }).click();
   // The focus step suggests apps but must not rename the bot: the name the
@@ -26,14 +30,42 @@ test("focus choice suggests apps and preserves a completed connection", async ({
   await expect(page.getByPlaceholder("Message Chief")).toBeVisible();
   await expect(page.getByText("Slack", { exact: true })).toBeVisible();
   await expect(page.getByText("Gmail", { exact: true })).toBeVisible();
+  const connectionCards = page.getByRole("group", { name: / connection$/ });
+  await expect(connectionCards).toHaveCount(3);
+  const cardBoxes = await connectionCards.evaluateAll((cards) =>
+    cards.map((card) => {
+      const { bottom, top } = card.getBoundingClientRect();
+      return { bottom, top };
+    }),
+  );
+  expect(cardBoxes[1].top - cardBoxes[0].bottom).toBeGreaterThanOrEqual(8);
+  expect(cardBoxes[2].top - cardBoxes[1].bottom).toBeGreaterThanOrEqual(8);
   await page
     .getByTestId("transcript")
     .getByText("Hit those three and I’ll start pulling the picture.")
     .scrollIntoViewIfNeeded();
   await page.mouse.move(1, 1);
   await captureScreenshot(page, testInfo, "02-app-suggestions");
+  const authorizeButton = slackCard(page).getByRole("button", { name: "Authorize" });
+  const restingBackground = await authorizeButton.evaluate(
+    (button) => getComputedStyle(button).backgroundColor,
+  );
+  const accentBackground = await authorizeButton.evaluate((button) => {
+    const probe = document.createElement("span");
+    probe.style.backgroundColor = "var(--accent)";
+    button.append(probe);
+    const backgroundColor = getComputedStyle(probe).backgroundColor;
+    probe.remove();
+    return backgroundColor;
+  });
+  expect(accentBackground).not.toBe(restingBackground);
+  await authorizeButton.hover();
+  await expect
+    .poll(() => authorizeButton.evaluate((button) => getComputedStyle(button).backgroundColor))
+    .toBe(accentBackground);
+  await captureScreenshot(page, testInfo, "02-app-suggestions-authorize-hover");
 
-  await slackCard(page).getByRole("button", { name: "Authorize" }).click();
+  await authorizeButton.click();
   await expect(slackCard(page).getByText("Connected", { exact: true })).toBeVisible();
   await expect(slackCard(page).getByText("Connected", { exact: true })).toHaveCSS("opacity", "1");
   await expect
@@ -55,4 +87,22 @@ test("focus choice suggests apps and preserves a completed connection", async ({
   await expect(slackCard(page).getByText("Connected", { exact: true })).toBeVisible();
   await page.mouse.move(1, 1);
   await captureScreenshot(page, testInfo, "04-connected-after-reload");
+});
+
+test("choice refresh failures leave options available for retry", async ({ page }) => {
+  await signup(page, `choice-refresh-${Date.now()}@rakazo.test`, "password12", "Choice Retry");
+  await completeOnboarding(page);
+  const choice = page.getByRole("button", { name: /Day-to-day work/ });
+  await expect(choice).toBeEnabled();
+  // Keep the existing choice rendered while its save succeeds and navigation refresh fails.
+  await page.route("**/rpc/onboarding/choose", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ json: { ok: true } }),
+    }),
+  );
+  await page.route("**/rpc/spaces/list", (route) => route.abort());
+  await Promise.all([page.waitForRequest("**/rpc/spaces/list"), choice.click()]);
+  await expect(choice).toBeEnabled();
 });

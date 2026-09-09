@@ -1,23 +1,34 @@
 import type { RealtimeFanout } from "@rakazo/adapter-kit";
 import {
+  type BotSecretDestination,
   type MessageBlock,
   MessageBlock as MessageBlockSchema,
   type ProductEvent,
 } from "@rakazo/contracts";
-import { isApprovalAskBlock, isSecretAskBlock } from "@rakazo/core";
+import {
+  blocksToAgentHistoryText,
+  isApprovalAskBlock,
+  isSecretAskBlock,
+  messagingChannelId,
+  sanitizeJsonValue,
+} from "@rakazo/core";
+import { getLogger } from "@rakazo/logging";
+import { cancelRunsInTransaction } from "./cancel-runs.js";
 import type { Prisma, PrismaClient } from "./client.js";
+import { expireComputerExecutionLeases } from "./computers.js";
 import {
   assertRunCanWriteHistory,
   createThreadMessageInTransaction,
   RunHistoryWriteError,
 } from "./messages.js";
+import { withTransactionRetry } from "./transaction-retry.js";
 
 const EVENT_BATCH_SIZE = 200;
 const PUSH_CATCH_UP_MS = 30_000;
 const POLL_ONLY_CATCH_UP_MS = 400;
 
 export interface AppendEventInput {
-  workspaceId: string;
+  spaceId: string;
   threadId: string;
   botId: string;
   type: ProductEvent["type"];
@@ -28,11 +39,12 @@ export interface AppendEventInput {
 export interface ThreadEvents {
   answerRunInput(input: AnswerRunInput): Promise<boolean>;
   append(input: AppendEventInput): Promise<ProductEvent>;
+  claimSteering(input: ClaimSteeringInput): Promise<ClaimedSteeringMessage[]>;
   clearThread(input: ClearThreadInput): Promise<ClearThreadResult>;
   finalizeComputerControlRelease(
     input: FinalizeComputerControlReleaseInput,
   ): Promise<FinalizeComputerControlReleaseResult | false>;
-  finalizeRun(input: FinalizeRunInput): Promise<boolean>;
+  finalizeRun(input: FinalizeRunInput): Promise<FinalizeRunResult | false>;
   notify(threadId: string, seq: number): Promise<void>;
   pauseRunForInput(input: PauseRunForInput): Promise<boolean>;
   pauseRunForTakeover(input: PauseRunForTakeover): Promise<boolean>;
@@ -41,7 +53,7 @@ export interface ThreadEvents {
 }
 
 export interface ClearThreadInput {
-  workspaceId: string;
+  spaceId: string;
   threadId: string;
   /** Event author and the bot-scoped target for one-to-one chats. */
   botId: string;
@@ -55,7 +67,7 @@ export interface ClearThreadResult {
 }
 
 export interface FinalizeComputerControlReleaseInput {
-  workspaceId: string;
+  spaceId: string;
   computerId: string;
   botId: string;
   runId: string | null;
@@ -68,8 +80,28 @@ export interface FinalizeComputerControlReleaseResult {
   runId: string | null;
 }
 
+export interface ClaimSteeringInput {
+  threadId: string;
+  botId: string;
+  runId: string;
+  leaseOwner: string;
+  leaseFence: number;
+  seenIds: string[];
+}
+
+export interface ClaimedSteeringMessage {
+  id: string;
+  messageId: string;
+  text: string;
+  blocks: MessageBlock[];
+}
+
+export interface FinalizeRunResult {
+  continuationRunId: string | null;
+}
+
 interface FinalizeRunBase {
-  workspaceId: string;
+  spaceId: string;
   threadId: string;
   botId: string;
   runId: string;
@@ -80,10 +112,17 @@ interface FinalizeRunBase {
 }
 
 export type FinalizeRunInput = FinalizeRunBase &
-  ({ outcome: "completed"; blocks: MessageBlock[] } | { outcome: "failed"; error: string });
+  (
+    | {
+        outcome: "completed";
+        blocks: MessageBlock[];
+        markUnread?: boolean;
+      }
+    | { outcome: "failed"; error: string }
+  );
 
 export interface PauseRunForInput {
-  workspaceId: string;
+  spaceId: string;
   threadId: string;
   botId: string;
   runId: string;
@@ -91,10 +130,43 @@ export interface PauseRunForInput {
   leaseOwner: string;
   leaseFence: number;
   blocks: MessageBlock[];
+  /**
+   * Unredacted choice actions for resume. Persisted only on the run checkpoint
+   * (not in message blocks) so clients still see redacted labels.
+   */
+  offeredActions?: Array<{ id: string; label: string }>;
+}
+
+const CHOICE_ASK_CHECKPOINT_KIND = "choice_ask_v1";
+
+function choiceAskCheckpoint(actions: Array<{ id: string; label: string }>): string {
+  return JSON.stringify({ kind: CHOICE_ASK_CHECKPOINT_KIND, actions });
+}
+
+function resumeChoiceLabel(
+  selected: { id: string; label: string },
+  checkpoint: string | null | undefined,
+): string {
+  if (!checkpoint) return selected.label;
+  try {
+    const parsed = JSON.parse(checkpoint) as {
+      kind?: string;
+      actions?: Array<{ id?: unknown; label?: unknown }>;
+    };
+    if (parsed.kind !== CHOICE_ASK_CHECKPOINT_KIND || !Array.isArray(parsed.actions)) {
+      return selected.label;
+    }
+    const offered = parsed.actions.find((action) => action.id === selected.id);
+    return typeof offered?.label === "string" && offered.label.length > 0
+      ? offered.label
+      : selected.label;
+  } catch {
+    return selected.label;
+  }
 }
 
 export interface PauseRunForTakeover {
-  workspaceId: string;
+  spaceId: string;
   threadId: string;
   botId: string;
   runId: string;
@@ -102,10 +174,12 @@ export interface PauseRunForTakeover {
   leaseOwner: string;
   leaseFence: number;
   reason: string;
+  /** Computer that should expose the pending takeover to the UI via controlRunId. */
+  computerId: string;
 }
 
 export interface AnswerRunInput {
-  workspaceId: string;
+  spaceId: string;
   threadId: string;
   runId: string;
   messageId: string;
@@ -114,17 +188,19 @@ export interface AnswerRunInput {
 }
 
 export interface SendUserMessageInput {
-  workspaceId: string;
+  spaceId: string;
   threadId: string;
   botId: string;
   userId: string;
   blocks: MessageBlock[];
   prompt: string;
-  trigger: "user" | "follow_up" | "webhook";
+  trigger: "user" | "follow_up" | "webhook" | "messaging";
   clientNonce?: string;
-  /** Skip task/run creation when the bot already has active work (follow-up behavior). */
-  onlyIfIdle?: boolean;
   linkMessageToRun?: boolean;
+  /** When false, persist the user message without starting a run (team-chat transcript). */
+  createRun?: boolean;
+  /** When true, start a new run even if the bot is already busy (team-chat delivery). */
+  allowParallelRun?: boolean;
 }
 
 export interface SendUserMessageResult {
@@ -136,9 +212,11 @@ export interface SendUserMessageResult {
 
 export interface RunSecretWriter {
   store(input: {
+    botId: string;
+    credential?: BotSecretDestination;
     runId: string;
     userId: string;
-    workspaceId: string;
+    spaceId: string;
     plaintext: string;
     tx: Prisma.TransactionClient;
   }): Promise<void>;
@@ -152,6 +230,7 @@ export function createThreadEvents(
   return {
     answerRunInput: (input) => answerRunInput(prisma, input, realtime, options.runSecretWriter),
     append: (input) => appendEvent(prisma, input, realtime),
+    claimSteering: (input) => claimSteering(prisma, input),
     clearThread: (input) => clearThread(prisma, input, realtime),
     finalizeComputerControlRelease: (input) =>
       finalizeComputerControlRelease(prisma, input, realtime),
@@ -174,7 +253,7 @@ export async function clearThread(
     const thread = await tx.thread.update({
       where: {
         id: input.threadId,
-        workspaceId: input.workspaceId,
+        spaceId: input.spaceId,
         ...(input.groupId ? { groupId: input.groupId } : { botId: input.botId }),
       },
       data: { unread: false },
@@ -182,7 +261,7 @@ export async function clearThread(
     });
     const activeRuns = await tx.run.findMany({
       where: {
-        workspaceId: input.workspaceId,
+        spaceId: input.spaceId,
         threadId: input.threadId,
         ...(input.groupId ? {} : { botId: input.botId }),
         status: { in: ["queued", "leased", "running", "waiting_input", "waiting_takeover"] },
@@ -191,29 +270,9 @@ export async function clearThread(
     });
     const now = new Date();
     const runIds = activeRuns.map((run) => run.id);
-    const taskIds = activeRuns.map((run) => run.taskId);
-    if (runIds.length > 0) {
-      await tx.run.updateMany({
-        where: { id: { in: runIds } },
-        data: {
-          status: "cancelled",
-          completedAt: now,
-          leaseOwner: null,
-          leaseExpiresAt: null,
-        },
-      });
-      await tx.attempt.updateMany({
-        where: { runId: { in: runIds }, status: "running" },
-        data: { status: "cancelled", finishedAt: now },
-      });
-      await tx.task.updateMany({
-        where: { id: { in: taskIds } },
-        data: { status: "cancelled" },
-      });
-    }
-    await tx.computerExecutionLease.deleteMany({
-      where: { runId: { in: runIds } },
-    });
+    await cancelRunsInTransaction(tx, activeRuns, now);
+    // Expire as tombstones so a still-open provider screen claim cannot reset fencing to 1.
+    await expireComputerExecutionLeases(tx, { runId: { in: runIds } });
     await tx.computer.updateMany({
       where: { executionRunId: { in: runIds } },
       data: {
@@ -249,7 +308,7 @@ export async function clearThread(
       await tx.chatGroup.update({ where: { id: input.groupId }, data: { updatedAt: now } });
     } else {
       await tx.bot.update({
-        where: { id: input.botId, workspaceId: input.workspaceId },
+        where: { id: input.botId, spaceId: input.spaceId },
         data: { updatedAt: now },
       });
     }
@@ -289,11 +348,14 @@ export async function sendUserMessage(
       include: { sourceRuns: { orderBy: { createdAt: "asc" }, take: 1 } },
     });
     if (!message) return null;
-    const run = message.sourceRuns[0] ?? null;
+    const created = message.sourceRuns[0];
+    const run =
+      created ??
+      (message.runId ? await prisma.run.findUnique({ where: { id: message.runId } }) : null);
     return {
       messageId: message.id,
       seq: message.seq,
-      taskId: run?.taskId ?? null,
+      taskId: created?.taskId ?? null,
       runId: run?.id ?? null,
     };
   };
@@ -313,18 +375,26 @@ export async function sendUserMessage(
         blocks: input.blocks,
         clientNonce: input.clientNonce,
       });
-      const busy = input.onlyIfIdle
-        ? await tx.run.findFirst({
-            where: { botId: input.botId, status: { in: ["running", "queued", "leased"] } },
-            select: { id: true },
-          })
-        : null;
+      const createRun = input.createRun !== false;
+      const busy =
+        createRun && !input.allowParallelRun
+          ? await tx.run.findFirst({
+              where: {
+                threadId: input.threadId,
+                botId: input.botId,
+                status: {
+                  in: ["running", "queued", "leased", "waiting_input", "waiting_takeover"],
+                },
+              },
+              select: { id: true, taskId: true },
+            })
+          : null;
       let task = null;
       let run = null;
-      if (!busy) {
+      if (createRun && !busy) {
         task = await tx.task.create({
           data: {
-            workspaceId: input.workspaceId,
+            spaceId: input.spaceId,
             botId: input.botId,
             threadId: input.threadId,
             userId: input.userId,
@@ -334,7 +404,7 @@ export async function sendUserMessage(
         });
         run = await tx.run.create({
           data: {
-            workspaceId: input.workspaceId,
+            spaceId: input.spaceId,
             botId: input.botId,
             threadId: input.threadId,
             taskId: task.id,
@@ -348,16 +418,26 @@ export async function sendUserMessage(
         if (input.linkMessageToRun) {
           await tx.message.update({ where: { id: message.id }, data: { runId: run.id } });
         }
+      } else if (createRun && busy) {
+        await tx.steeringMessage.create({
+          data: {
+            messageId: message.id,
+            botId: input.botId,
+            userId: input.userId,
+            runId: busy.id,
+          },
+        });
+        await tx.message.update({ where: { id: message.id }, data: { runId: busy.id } });
       }
       const event = await appendEventInTransaction(tx, {
-        workspaceId: input.workspaceId,
+        spaceId: input.spaceId,
         threadId: input.threadId,
         botId: input.botId,
         type: "thread.message.created",
-        runId: run?.id,
+        runId: run?.id ?? busy?.id,
         payload: { messageId: message.id, role: "user", blocks: input.blocks },
       });
-      return { message, task, run, event };
+      return { message, task, run, busy, event };
     });
   const committed = await commit().catch(async (error) => {
     const winner = await replay();
@@ -367,14 +447,66 @@ export async function sendUserMessage(
   if ("replay" in committed) return committed.replay;
   await notifyRealtime(realtime, input.threadId, committed.event.seq).catch((error) => {
     // The event is durable; subscribers recover it from their persisted cursor.
-    console.error("user message realtime notification", error);
+    getLogger().error("user message realtime notification", error);
   });
   return {
     messageId: committed.message.id,
     seq: committed.message.seq,
     taskId: committed.task?.id ?? null,
-    runId: committed.run?.id ?? null,
+    runId: committed.run?.id ?? committed.busy?.id ?? null,
   };
+}
+
+export async function claimSteering(
+  prisma: PrismaClient,
+  input: ClaimSteeringInput,
+): Promise<ClaimedSteeringMessage[]> {
+  return prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    await tx.$queryRaw`SELECT id FROM threads WHERE id = ${input.threadId} FOR UPDATE`;
+    const run = await tx.run.findFirst({
+      where: {
+        id: input.runId,
+        threadId: input.threadId,
+        botId: input.botId,
+        status: "running",
+        leaseOwner: input.leaseOwner,
+        leaseFence: input.leaseFence,
+      },
+      select: { id: true, trigger: true, sourceMessage: { select: { blocks: true } } },
+    });
+    if (!run) return [];
+    const channelId =
+      run.trigger === "messaging"
+        ? messagingChannelId(run.sourceMessage?.blocks as MessageBlock[] | undefined)
+        : undefined;
+    const steering = await tx.steeringMessage.findMany({
+      where: {
+        botId: input.botId,
+        id: input.seenIds.length ? { notIn: input.seenIds } : undefined,
+        OR: [{ runId: null }, { runId: input.runId }],
+        message: {
+          threadId: input.threadId,
+          // Private follow-ups remain unclaimed for the existing private continuation.
+          ...(channelId
+            ? { blocks: { array_contains: [{ kind: "channel_message", channelId }] } }
+            : {}),
+        },
+      },
+      include: { message: { select: { blocks: true, seq: true } } },
+      orderBy: [{ message: { seq: "asc" } }, { id: "asc" }],
+    });
+    if (steering.length === 0) return [];
+    await tx.steeringMessage.updateMany({
+      where: { id: { in: steering.map((item) => item.id) }, claimedAt: null },
+      data: { runId: input.runId, claimedAt: new Date() },
+    });
+    return steering.map((item) => ({
+      id: item.id,
+      messageId: item.messageId,
+      text: blocksToAgentHistoryText(item.message.blocks as MessageBlock[]),
+      blocks: item.message.blocks as MessageBlock[],
+    }));
+  });
 }
 
 export async function answerRunInput(
@@ -390,11 +522,11 @@ export async function answerRunInput(
     const run = await tx.run.findFirst({
       where: {
         id: input.runId,
-        workspaceId: input.workspaceId,
+        spaceId: input.spaceId,
         threadId: input.threadId,
         status: "waiting_input",
       },
-      select: { botId: true, userId: true },
+      select: { botId: true, userId: true, checkpoint: true },
     });
     if (!run) return null;
     const message = await tx.message.findFirst({
@@ -413,7 +545,13 @@ export async function answerRunInput(
     if (pendingAsk?.kind !== "ask") return null;
     const approvalAsk = isApprovalAskBlock(pendingAsk);
     const secretAsk = isSecretAskBlock(pendingAsk);
+    const choiceAsk = !approvalAsk && !secretAsk && Boolean(pendingAsk.actions?.length);
+    const selectedChoice = choiceAsk
+      ? pendingAsk.actions?.find((action) => action.id === input.answer)
+      : undefined;
+    if (choiceAsk && !selectedChoice) return null;
     if (secretAsk && !runSecretWriter) return null;
+    if (secretAsk && pendingAsk.credential && run.userId !== input.answeredByUserId) return null;
     let approvalEffect: { id: string; kind: string } | null = null;
     let approvalUserId: string | null = null;
 
@@ -422,7 +560,7 @@ export async function answerRunInput(
       approvalEffect = await tx.externalEffect.findFirst({
         where: {
           id: pendingAsk.approvalEffectId,
-          workspaceId: input.workspaceId,
+          spaceId: input.spaceId,
           runId: input.runId,
           status: "intended",
         },
@@ -437,11 +575,14 @@ export async function answerRunInput(
     const queued = await tx.run.updateMany({
       where: {
         id: input.runId,
-        workspaceId: input.workspaceId,
+        spaceId: input.spaceId,
         threadId: input.threadId,
         status: "waiting_input",
       },
-      data: { status: "queued" },
+      data: {
+        status: "queued",
+        ...(choiceAsk ? { checkpoint: null } : {}),
+      },
     });
     if (queued.count !== 1) return null;
 
@@ -454,8 +595,8 @@ export async function answerRunInput(
       if (input.answer === "always") {
         await tx.actionApprovalRule.upsert({
           where: {
-            workspaceId_createdByUserId_effect_matchKind_matchValue: {
-              workspaceId: input.workspaceId,
+            spaceId_createdByUserId_effect_matchKind_matchValue: {
+              spaceId: input.spaceId,
               createdByUserId: approvalUserId!,
               effect: "always_allow",
               matchKind: "tool",
@@ -463,7 +604,7 @@ export async function answerRunInput(
             },
           },
           create: {
-            workspaceId: input.workspaceId,
+            spaceId: input.spaceId,
             createdByUserId: approvalUserId!,
             effect: "always_allow",
             matchKind: "tool",
@@ -474,25 +615,37 @@ export async function answerRunInput(
       }
     } else if (secretAsk) {
       await runSecretWriter!.store({
+        botId: run.botId,
+        credential: pendingAsk.credential,
         runId: input.runId,
         userId: run.userId,
-        workspaceId: input.workspaceId,
+        spaceId: input.spaceId,
         plaintext: input.answer,
         tx,
       });
       await tx.externalEffect.updateMany({
         where: {
           runId: input.runId,
-          workspaceId: input.workspaceId,
+          spaceId: input.spaceId,
           kind: "request_secret",
           status: "intended",
         },
-        data: { status: "approved" },
+        data: {
+          status: "approved",
+          ...(pendingAsk.credential ? { result: { credentialSaved: pendingAsk.credential } } : {}),
+        },
       });
     } else {
+      const resumeLabel = selectedChoice
+        ? resumeChoiceLabel(selectedChoice, run.checkpoint)
+        : undefined;
       const task = await tx.task.updateMany({
         where: { runs: { some: { id: input.runId } } },
-        data: { prompt: input.answer },
+        data: {
+          prompt: selectedChoice
+            ? `Selected choice ${selectedChoice.id}: ${resumeLabel}`
+            : input.answer,
+        },
       });
       if (task.count !== 1) throw new Error("Run task was not available to answer");
     }
@@ -508,7 +661,7 @@ export async function answerRunInput(
     );
     await tx.message.update({ where: { id: message.id }, data: { blocks } });
     const updated = await appendEventInTransaction(tx, {
-      workspaceId: input.workspaceId,
+      spaceId: input.spaceId,
       threadId: input.threadId,
       botId: run.botId,
       type: "thread.message.updated",
@@ -535,14 +688,21 @@ export async function pauseRunForInput(
     const paused = await tx.run.updateMany({
       where: {
         id: input.runId,
-        workspaceId: input.workspaceId,
+        spaceId: input.spaceId,
         threadId: input.threadId,
         botId: input.botId,
         status: "running",
         leaseOwner: input.leaseOwner,
         leaseFence: input.leaseFence,
       },
-      data: { status: "waiting_input", leaseOwner: null, leaseExpiresAt: null },
+      data: {
+        status: "waiting_input",
+        leaseOwner: null,
+        leaseExpiresAt: null,
+        ...(input.offeredActions?.length
+          ? { checkpoint: choiceAskCheckpoint(input.offeredActions) }
+          : {}),
+      },
     });
     if (paused.count !== 1) return null;
 
@@ -565,7 +725,7 @@ export async function pauseRunForInput(
       runId: input.runId,
     });
     await appendEventInTransaction(tx, {
-      workspaceId: input.workspaceId,
+      spaceId: input.spaceId,
       threadId: input.threadId,
       botId: input.botId,
       type: "thread.message.created",
@@ -573,7 +733,7 @@ export async function pauseRunForInput(
       payload: { messageId: message.id, role: "bot", blocks: input.blocks },
     });
     const waitingEvent = await appendEventInTransaction(tx, {
-      workspaceId: input.workspaceId,
+      spaceId: input.spaceId,
       threadId: input.threadId,
       botId: input.botId,
       type: "run.waiting_input",
@@ -599,7 +759,7 @@ export async function pauseRunForTakeover(
     const paused = await tx.run.updateMany({
       where: {
         id: input.runId,
-        workspaceId: input.workspaceId,
+        spaceId: input.spaceId,
         threadId: input.threadId,
         botId: input.botId,
         status: "running",
@@ -626,13 +786,62 @@ export async function pauseRunForTakeover(
     });
     if (attempt.count !== 1) throw new Error("Active run attempt was not available to pause");
 
+    const now = new Date();
+    // Serialize with concurrent computer/takeover grants that mutate the same row.
+    await tx.$queryRaw`
+      SELECT id FROM computers WHERE id = ${input.computerId} AND "spaceId" = ${input.spaceId} FOR UPDATE`;
+    const computer = await tx.computer.findFirst({
+      where: { id: input.computerId, spaceId: input.spaceId },
+      select: {
+        controlHolder: true,
+        controlBotId: true,
+        controlLeaseId: true,
+        controlLeaseExpiresAt: true,
+      },
+    });
+    const activeUserLease = Boolean(
+      computer?.controlHolder === "user" &&
+        computer.controlLeaseId &&
+        computer.controlLeaseExpiresAt &&
+        computer.controlLeaseExpiresAt.getTime() > now.getTime(),
+    );
+    // Keep an active same-bot user lease so Skip / I'm done appear immediately.
+    // Preserve another bot's active lease — computer/takeover owns revocation. Do not attach
+    // this run to that lease: release validates controlBotId and could clear the binding without
+    // resuming the waiting run. The requesting bot's takeover flow binds it after revocation.
+    // Otherwise clear stale control, but bind controlRunId so takeoverRequested is true.
+    const retainControl = Boolean(activeUserLease && computer?.controlBotId === input.botId);
+    const preserveForeignLease = Boolean(
+      activeUserLease && computer?.controlBotId && computer.controlBotId !== input.botId,
+    );
+    const marked = await tx.computer.updateMany({
+      where: { id: input.computerId, spaceId: input.spaceId },
+      data: retainControl
+        ? { state: "running", controlRunId: input.runId }
+        : preserveForeignLease
+          ? { state: "running" }
+          : {
+              state: "running",
+              controlHolder: "none",
+              controlLeaseId: null,
+              controlLeaseExpiresAt: null,
+              controlBotId: null,
+              controlRunId: input.runId,
+            },
+    });
+    if (marked.count !== 1) throw new Error("Computer was not available to mark for takeover");
+
     const waitingEvent = await appendEventInTransaction(tx, {
-      workspaceId: input.workspaceId,
+      spaceId: input.spaceId,
       threadId: input.threadId,
       botId: input.botId,
       type: "computer.takeover.requested",
       runId: input.runId,
-      payload: { reason: input.reason },
+      payload: {
+        reason: input.reason,
+        takeoverRequested: true,
+        retainedControl: retainControl,
+      },
     });
     await tx.event.deleteMany({ where: { runId: input.runId, type: "thread.progress" } });
     return { threadId: waitingEvent.threadId, seq: waitingEvent.seq };
@@ -652,7 +861,7 @@ export async function finalizeComputerControlRelease(
     const cleared = await tx.computer.updateMany({
       where: {
         id: input.computerId,
-        workspaceId: input.workspaceId,
+        spaceId: input.spaceId,
         controlBotId: input.botId,
         controlLeaseId: input.leaseId,
         controlRunId: input.runId,
@@ -671,7 +880,7 @@ export async function finalizeComputerControlRelease(
       ? await tx.run.updateMany({
           where: {
             id: input.runId,
-            workspaceId: input.workspaceId,
+            spaceId: input.spaceId,
             botId: input.botId,
             status: "waiting_takeover",
           },
@@ -687,12 +896,12 @@ export async function finalizeComputerControlRelease(
     const runId = resumed.count === 1 ? input.runId : null;
 
     const bot = await tx.bot.findFirst({
-      where: { id: input.botId, workspaceId: input.workspaceId },
+      where: { id: input.botId, spaceId: input.spaceId },
       select: { thread: { select: { id: true } } },
     });
     if (!bot?.thread) return { threadId: null, seq: null, runId };
     const event = await appendEventInTransaction(tx, {
-      workspaceId: input.workspaceId,
+      spaceId: input.spaceId,
       threadId: bot.thread.id,
       botId: input.botId,
       runId: runId ?? undefined,
@@ -730,11 +939,40 @@ export async function finalizeRun(
   prisma: PrismaClient,
   input: FinalizeRunInput,
   realtime?: RealtimeFanout,
-): Promise<boolean> {
-  const committed = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+): Promise<FinalizeRunResult | false> {
+  const committed = await withTransactionRetry(() => finalizeRunOnce(prisma, input));
+  if (!committed) return false;
+  await notifyRealtime(realtime, committed.threadId, committed.seq);
+  return { continuationRunId: committed.continuationRunId };
+}
+
+/** Stamps one turn-level wall-clock duration on the final tool block. */
+export function completedRunBlocks(
+  blocks: MessageBlock[],
+  startedAt: Date | null,
+  completedAt: Date,
+): MessageBlock[] {
+  if (!startedAt) return blocks;
+  const durationMs = completedAt.getTime() - startedAt.getTime();
+  if (!Number.isFinite(durationMs) || durationMs < 0) return blocks;
+  const index = blocks.findLastIndex((block) => block.kind === "steps");
+  if (index < 0) return blocks;
+  return blocks.map((block, blockIndex) =>
+    blockIndex === index && block.kind === "steps"
+      ? { ...block, durationMs: Math.round(durationMs) }
+      : block,
+  );
+}
+
+async function finalizeRunOnce(
+  prisma: PrismaClient,
+  input: FinalizeRunInput,
+): Promise<{ threadId: string; seq: number; continuationRunId: string | null } | null> {
+  return prisma.$transaction(async (tx: Prisma.TransactionClient) => {
     await tx.$queryRaw`SELECT id FROM threads WHERE id = ${input.threadId} FOR UPDATE`;
+    let writableRun: { startedAt: Date | null } | undefined;
     try {
-      await assertRunCanWriteHistory(tx, input.runId);
+      writableRun = await assertRunCanWriteHistory(tx, input.runId);
     } catch (error) {
       if (error instanceof RunHistoryWriteError) return null;
       throw error;
@@ -743,7 +981,7 @@ export async function finalizeRun(
     const terminal = await tx.run.updateMany({
       where: {
         id: input.runId,
-        workspaceId: input.workspaceId,
+        spaceId: input.spaceId,
         threadId: input.threadId,
         botId: input.botId,
         taskId: input.taskId,
@@ -779,7 +1017,7 @@ export async function finalizeRun(
     const task = await tx.task.updateMany({
       where: {
         id: input.taskId,
-        workspaceId: input.workspaceId,
+        spaceId: input.spaceId,
         threadId: input.threadId,
         botId: input.botId,
       },
@@ -788,24 +1026,28 @@ export async function finalizeRun(
     if (task.count !== 1) throw new Error("Run task was not available to finalize");
 
     if (input.outcome === "completed") {
-      const message = await createThreadMessageInTransaction(tx, {
-        threadId: input.threadId,
-        role: "bot",
-        blocks: input.blocks,
-        botId: input.botId,
-        runId: input.runId,
-      });
-      await appendEventInTransaction(tx, {
-        workspaceId: input.workspaceId,
-        threadId: input.threadId,
-        botId: input.botId,
-        type: "thread.message.created",
-        runId: input.runId,
-        payload: { messageId: message.id, role: "bot", blocks: input.blocks },
-      });
+      const completedBlocks = completedRunBlocks(input.blocks, writableRun?.startedAt ?? null, now);
+      if (completedBlocks.length > 0) {
+        const message = await createThreadMessageInTransaction(tx, {
+          threadId: input.threadId,
+          role: "bot",
+          blocks: completedBlocks,
+          botId: input.botId,
+          runId: input.runId,
+          markUnread: input.markUnread,
+        });
+        await appendEventInTransaction(tx, {
+          spaceId: input.spaceId,
+          threadId: input.threadId,
+          botId: input.botId,
+          type: "thread.message.created",
+          runId: input.runId,
+          payload: { messageId: message.id, role: "bot", blocks: completedBlocks },
+        });
+      }
     }
     const lastEvent = await appendEventInTransaction(tx, {
-      workspaceId: input.workspaceId,
+      spaceId: input.spaceId,
       threadId: input.threadId,
       botId: input.botId,
       type: input.outcome === "completed" ? "run.completed" : "run.failed",
@@ -813,13 +1055,86 @@ export async function finalizeRun(
       payload: input.outcome === "completed" ? {} : { error: input.error },
     });
     await tx.event.deleteMany({ where: { runId: input.runId, type: "thread.progress" } });
+    if (input.outcome === "completed") {
+      await tx.steeringMessage.deleteMany({
+        where: { runId: input.runId, claimedAt: { not: null } },
+      });
+      await tx.steeringMessage.updateMany({
+        where: { runId: input.runId },
+        data: { runId: null },
+      });
+    } else {
+      const { sourceMessage } = await tx.run.findUniqueOrThrow({
+        where: { id: input.runId },
+        select: { sourceMessage: { select: { seq: true } } },
+      });
+      // A continuation's source is the newest steering it was created for. Only newer
+      // messages justify another run after failure, even if setup failed before claiming.
+      await tx.steeringMessage.updateMany({
+        where: {
+          runId: input.runId,
+          message: sourceMessage ? { seq: { gt: sourceMessage.seq } } : undefined,
+        },
+        data: { runId: null },
+      });
+    }
+    const continuationRunId = await createSteeringContinuation(tx, input);
     await tx.bot.update({ where: { id: input.botId }, data: { updatedAt: now } });
-    return { threadId: lastEvent.threadId, seq: lastEvent.seq };
+    return { threadId: lastEvent.threadId, seq: lastEvent.seq, continuationRunId };
   });
+}
 
-  if (!committed) return false;
-  await notifyRealtime(realtime, committed.threadId, committed.seq);
-  return true;
+async function createSteeringContinuation(
+  tx: Prisma.TransactionClient,
+  input: FinalizeRunBase,
+): Promise<string | null> {
+  const active = await tx.run.findFirst({
+    where: {
+      threadId: input.threadId,
+      botId: input.botId,
+      status: { in: ["queued", "leased", "running", "waiting_input", "waiting_takeover"] },
+    },
+    select: { id: true },
+  });
+  if (active) return null;
+  const pending = await tx.steeringMessage.findMany({
+    where: {
+      botId: input.botId,
+      runId: null,
+      message: { threadId: input.threadId },
+    },
+    include: { message: { select: { id: true, blocks: true, seq: true } } },
+    orderBy: [{ message: { seq: "asc" } }, { id: "asc" }],
+  });
+  if (pending.length === 0) return null;
+  const last = pending.at(-1)!;
+  const task = await tx.task.create({
+    data: {
+      spaceId: input.spaceId,
+      botId: input.botId,
+      threadId: input.threadId,
+      userId: pending[0]!.userId,
+      prompt: "Respond to the user's steering context.",
+      status: "queued",
+    },
+  });
+  const run = await tx.run.create({
+    data: {
+      spaceId: input.spaceId,
+      botId: input.botId,
+      threadId: input.threadId,
+      taskId: task.id,
+      userId: pending[0]!.userId,
+      status: "queued",
+      trigger: "follow_up",
+      sourceMessageId: last.message.id,
+    },
+  });
+  await tx.steeringMessage.updateMany({
+    where: { id: { in: pending.map((item) => item.id) }, runId: null },
+    data: { runId: run.id, claimedAt: null },
+  });
+  return run.id;
 }
 
 export async function appendEventInTransaction(
@@ -832,14 +1147,16 @@ export async function appendEventInTransaction(
     select: { nextEventSeq: true },
   });
   await assertRunCanWriteHistory(tx, input.runId);
+  // Unpaired UTF-16 surrogates (e.g. a split emoji high half) are invalid JSON for Postgres.
+  const payload = sanitizeJsonValue(input.payload);
   return tx.event.create({
     data: {
-      workspaceId: input.workspaceId,
+      spaceId: input.spaceId,
       threadId: input.threadId,
       botId: input.botId,
       seq: thread.nextEventSeq - 1,
       type: input.type,
-      payload: input.payload as Prisma.InputJsonValue,
+      payload: payload as Prisma.InputJsonValue,
       runId: input.runId,
     },
   });
@@ -907,7 +1224,7 @@ function threadTopic(threadId: string): string {
 
 function mapProductEvent(event: {
   id: string;
-  workspaceId: string;
+  spaceId: string;
   threadId: string;
   botId: string;
   seq: number;
@@ -918,7 +1235,7 @@ function mapProductEvent(event: {
 }): ProductEvent {
   return {
     id: event.id,
-    workspaceId: event.workspaceId,
+    spaceId: event.spaceId,
     threadId: event.threadId,
     botId: event.botId,
     seq: event.seq,

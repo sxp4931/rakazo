@@ -1,7 +1,14 @@
 import { ORPCError } from "@orpc/server";
 import { BUILTIN_AGENT_SKILLS } from "@rakazo/adapters";
 import type { Actor, AgentSkill, AgentSkillSource } from "@rakazo/contracts";
-import { buildSkillMd, isSkillReadOnly, parseSkillMd, type SkillSource } from "@rakazo/core";
+import {
+  buildSkillMd,
+  findSkillByName,
+  isSkillReadOnly,
+  mergeBuiltinSkills,
+  parseSkillMd,
+  type SkillSource,
+} from "@rakazo/core";
 import { IsolationError, type PrismaClient } from "@rakazo/db";
 
 type AgentSkillRow = {
@@ -116,7 +123,7 @@ export function createAgentSkillsService(prisma: PrismaClient) {
     const row = await prisma.agentSkill.findFirst({
       where: {
         id: skillId,
-        workspaceId: actor.workspaceId,
+        spaceId: actor.spaceId,
         userId: actor.userId,
       },
     });
@@ -127,21 +134,20 @@ export function createAgentSkillsService(prisma: PrismaClient) {
   return {
     async list(actor: Actor): Promise<Omit<AgentSkill, "content">[]> {
       const rows = await prisma.agentSkill.findMany({
-        where: { workspaceId: actor.workspaceId, userId: actor.userId },
+        where: { spaceId: actor.spaceId, userId: actor.userId },
         orderBy: [{ name: "asc" }, { id: "asc" }],
       });
-      const catalog = [...builtinCatalog(), ...rows.map(mapAgentSkill)].map(
+      return mergeBuiltinSkills(builtinCatalog(), rows.map(mapAgentSkill)).map(
         ({ content: _content, ...entry }) => entry,
       );
-      return catalog;
     },
 
     async listWithContent(actor: Actor): Promise<AgentSkill[]> {
       const rows = await prisma.agentSkill.findMany({
-        where: { workspaceId: actor.workspaceId, userId: actor.userId },
+        where: { spaceId: actor.spaceId, userId: actor.userId },
         orderBy: [{ name: "asc" }, { id: "asc" }],
       });
-      return [...builtinCatalog(), ...rows.map(mapAgentSkill)];
+      return mergeBuiltinSkills(builtinCatalog(), rows.map(mapAgentSkill));
     },
 
     async get(actor: Actor, input: { skillId?: string; name?: string }): Promise<AgentSkill> {
@@ -154,19 +160,18 @@ export function createAgentSkillsService(prisma: PrismaClient) {
         return mapAgentSkill(await owned(actor, input.skillId));
       }
       const name = input.name?.trim() ?? "";
-      const builtin = builtinCatalog().find(
-        (skill) => skill.name.toLowerCase() === name.toLowerCase(),
-      );
-      if (builtin) return builtin;
-      const row = await prisma.agentSkill.findFirst({
+      const rows = await prisma.agentSkill.findMany({
         where: {
-          workspaceId: actor.workspaceId,
+          spaceId: actor.spaceId,
           userId: actor.userId,
-          name: { equals: name, mode: "insensitive" },
         },
+        orderBy: [{ name: "asc" }, { id: "asc" }],
       });
-      if (!row) throw new IsolationError();
-      return mapAgentSkill(row);
+      const row = findSkillByName(rows, name);
+      if (row) return mapAgentSkill(row);
+      const builtin = findSkillByName(builtinCatalog(), name);
+      if (!builtin) throw new IsolationError();
+      return builtin;
     },
 
     async create(
@@ -176,7 +181,7 @@ export function createAgentSkillsService(prisma: PrismaClient) {
       const resolved = resolveSkillContent(input);
       const clash = await prisma.agentSkill.findFirst({
         where: {
-          workspaceId: actor.workspaceId,
+          spaceId: actor.spaceId,
           userId: actor.userId,
           name: { equals: resolved.name, mode: "insensitive" },
         },
@@ -190,7 +195,7 @@ export function createAgentSkillsService(prisma: PrismaClient) {
       try {
         const row = await prisma.agentSkill.create({
           data: {
-            workspaceId: actor.workspaceId,
+            spaceId: actor.spaceId,
             userId: actor.userId,
             name: resolved.name,
             description: resolved.description,
@@ -226,10 +231,10 @@ export function createAgentSkillsService(prisma: PrismaClient) {
         throw new ORPCError("BAD_REQUEST", { message: "Builtin and plugin skills are read-only." });
       }
       const resolved = resolveSkillContent({ ...input, prior: existing });
-      if (resolved.name.toLowerCase() !== existing.name.toLowerCase()) {
+      if (!findSkillByName([existing], resolved.name)) {
         const clash = await prisma.agentSkill.findFirst({
           where: {
-            workspaceId: actor.workspaceId,
+            spaceId: actor.spaceId,
             userId: actor.userId,
             name: { equals: resolved.name, mode: "insensitive" },
             NOT: { id: existing.id },
@@ -247,7 +252,7 @@ export function createAgentSkillsService(prisma: PrismaClient) {
         const updated = await prisma.agentSkill.updateMany({
           where: {
             id: existing.id,
-            workspaceId: actor.workspaceId,
+            spaceId: actor.spaceId,
             userId: actor.userId,
             source: "user",
           },
@@ -272,7 +277,7 @@ export function createAgentSkillsService(prisma: PrismaClient) {
       const row = await prisma.agentSkill.findFirst({
         where: {
           id: existing.id,
-          workspaceId: actor.workspaceId,
+          spaceId: actor.spaceId,
           userId: actor.userId,
         },
       });
@@ -288,7 +293,7 @@ export function createAgentSkillsService(prisma: PrismaClient) {
       const deleted = await prisma.agentSkill.deleteMany({
         where: {
           id: existing.id,
-          workspaceId: actor.workspaceId,
+          spaceId: actor.spaceId,
           userId: actor.userId,
           source: "user",
         },

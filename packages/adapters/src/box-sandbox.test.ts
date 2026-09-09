@@ -1,15 +1,21 @@
 import type { Command200Response } from "@asciidev/box-sdk";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { BoxSandboxProvider, type BoxSandboxSdk, isUnrecoverableBoxError } from "./box-sandbox.js";
+import { desktopCommandResponder } from "./linux-desktop.test-support.js";
 
 const context = {
   operationId: "test",
   traceId: "trace",
-  workspaceId: "workspace",
+  spaceId: "workspace",
   userId: "user",
   botId: "bot-a",
   signal: new AbortController().signal,
 };
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 
 describe("BoxSandboxProvider", () => {
   it("creates no-env boxes and implements execution and file operations", async () => {
@@ -112,7 +118,122 @@ describe("BoxSandboxProvider", () => {
     expect(replacement).toMatchObject({ providerRef: "bx_testbox2", fresh: true });
   });
 
-  it("captures the desktop, exposes a private view, and enforces one screen", async () => {
+  it("downloads binary files over the JSON endpoint limit through the SDK artifact route", async () => {
+    const content = Buffer.alloc(6 * 1024 * 1024, 0xff);
+    content[0] = 0;
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(content, { headers: { "content-length": String(content.byteLength) } }),
+      );
+    try {
+      const provider = new BoxSandboxProvider({
+        apiKey: "test-key",
+        apiUrl: "https://box.test/api/box/v1",
+      });
+      const computer = {
+        id: "bx_testbox2",
+        providerRef: "bx_testbox2",
+        kind: "box" as const,
+        botId: "bot-a",
+      };
+      const filePath = "notes/a file & more.bin";
+      const downloaded = await provider.readFile(computer, filePath, context);
+
+      expect(Buffer.from(downloaded).equals(content)).toBe(true);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [request, init] = fetchMock.mock.calls[0]!;
+      const url = new URL(String(request));
+      expect(url.pathname).toBe("/api/box/v1/boxes/bx_testbox2/artifacts");
+      expect(url.searchParams.get("path")).toBe(`/home/user/rakazo-home/${filePath}`);
+      expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer test-key");
+      expect(init?.signal).toBe(context.signal);
+    } finally {
+      fetchMock.mockRestore();
+    }
+  });
+
+  it("exports browser profile files over 5 MiB without losing their bytes", async () => {
+    const fixture = boxFixture();
+    const content = Buffer.alloc(6 * 1024 * 1024, 0xab);
+    fixture.files.set("/home/user/rakazo-home/.browser-profiles/chrome/Default/History", content);
+    const provider = new BoxSandboxProvider({ apiKey: "test-key" }, fixture.client);
+    const computer = await provider.provision({ botId: "bot-a", homePath: "/unused" }, context);
+    const exported = [];
+    for await (const file of provider.exportWorkspace(computer, context)) exported.push(file);
+
+    expect(exported).toHaveLength(1);
+    expect(exported[0]?.path).toBe(".browser-profiles/chrome/Default/History");
+    expect(Buffer.from(exported[0]!.content).equals(content)).toBe(true);
+    expect(fixture.artifactRaw).toHaveBeenCalledWith(
+      {
+        boxId: computer.id,
+        path: "/home/user/rakazo-home/.browser-profiles/chrome/Default/History",
+      },
+      { signal: context.signal },
+    );
+  });
+
+  it.each([undefined, "1", "20"])(
+    "cancels oversized downloads with content-length %s",
+    async (contentLength) => {
+      const fixture = boxFixture();
+      const cancel = vi.fn();
+      const pull = vi.fn((controller: ReadableStreamDefaultController<Uint8Array>) => {
+        controller.enqueue(Uint8Array.from([1, 2, 3]));
+      });
+      const body = new ReadableStream({ pull, cancel }, { highWaterMark: 0 });
+      fixture.artifactRaw.mockResolvedValueOnce({
+        raw: new Response(body, {
+          headers: contentLength ? { "content-length": contentLength } : undefined,
+        }),
+      });
+      const provider = new BoxSandboxProvider({ apiKey: "test-key" }, fixture.client);
+      const computer = await provider.provision({ botId: "bot-a", homePath: "/unused" }, context);
+
+      await expect(
+        provider.readFile(computer, "large.bin", context, { maxBytes: 4 }),
+      ).rejects.toThrow("computer file exceeds 4 bytes");
+      expect(pull).toHaveBeenCalledTimes(contentLength === "20" ? 0 : 2);
+      expect(cancel).toHaveBeenCalledTimes(1);
+      expect(body.locked).toBe(false);
+    },
+  );
+
+  it("accepts empty files and files exactly at the download limit", async () => {
+    const fixture = boxFixture();
+    fixture.files.set("/home/user/rakazo-home/exact.bin", Uint8Array.from([0, 255]));
+    const provider = new BoxSandboxProvider({ apiKey: "test-key" }, fixture.client);
+    const computer = await provider.provision({ botId: "bot-a", homePath: "/unused" }, context);
+
+    expect(await provider.readFile(computer, "empty.bin", context, { maxBytes: 0 })).toHaveLength(
+      0,
+    );
+    expect(await provider.readFile(computer, "exact.bin", context, { maxBytes: 2 })).toEqual(
+      Uint8Array.from([0, 255]),
+    );
+  });
+
+  it("propagates interrupted downloads instead of returning partial files", async () => {
+    const fixture = boxFixture();
+    const aborted = new DOMException("download aborted", "AbortError");
+    let first = true;
+    const body = new ReadableStream({
+      pull(controller) {
+        if (first) controller.enqueue(Uint8Array.from([1, 2, 3]));
+        else controller.error(aborted);
+        first = false;
+      },
+    });
+    fixture.artifactRaw.mockResolvedValueOnce({ raw: new Response(body) });
+    const provider = new BoxSandboxProvider({ apiKey: "test-key" }, fixture.client);
+    const computer = await provider.provision({ botId: "bot-a", homePath: "/unused" }, context);
+
+    await expect(provider.readFile(computer, "partial.bin", context)).rejects.toBe(aborted);
+    expect(body.locked).toBe(false);
+  });
+
+  it("captures independent desktops and exposes protected ports", async () => {
     const fixture = boxFixture();
     const provider = new BoxSandboxProvider({ apiKey: "test-key" }, fixture.client);
     const computer = await provider.provision({ botId: "bot-a", homePath: "/unused" }, context);
@@ -121,19 +242,20 @@ describe("BoxSandboxProvider", () => {
     const observation = await provider.observe(computer, context);
     expect(observation).toMatchObject({
       mimeType: "image/png",
-      width: 1920,
-      height: 1080,
-      cursor: { x: 21, y: 34 },
-      activeWindow: { id: "42", title: "Box browser" },
+      width: 1280,
+      height: 800,
+      cursor: { x: 10, y: 20 },
     });
-    expect(observation.image).toEqual(Uint8Array.from([137, 80, 78, 71]));
+    expect(observation.image).toEqual(Uint8Array.from([1, 2, 3]));
 
     const screen = await provider.connectScreen(
       computer,
       { view: "stream", interactive: false },
       context,
     );
-    expect(screen.url).toContain("view_only=true");
+    expect(new URL(screen.url!).searchParams.get("path")).toMatch(
+      /^websockify\?_token=secret&token=view-/,
+    );
     expect(screen.url).toContain("_token=secret");
 
     await provider.act(
@@ -147,24 +269,10 @@ describe("BoxSandboxProvider", () => {
       ),
     ).toBe(true);
 
-    await expect(provider.observe(computer, { ...context, botId: "bot-b" })).rejects.toThrow(
-      /multiple screens/i,
-    );
-    expect(provider.describe().capabilities.multiScreen).toBe(false);
-  });
-
-  it("releases the screen claim when desktop connection fails", async () => {
-    const fixture = boxFixture();
-    fixture.desktop.mockRejectedValueOnce(new Error("desktop unavailable"));
-    const provider = new BoxSandboxProvider({ apiKey: "test-key" }, fixture.client);
-    const computer = await provider.provision({ botId: "bot-a", homePath: "/unused" }, context);
-
-    await expect(
-      provider.connectScreen(computer, { view: "stream", interactive: false }, context),
-    ).rejects.toThrow("desktop unavailable");
     await expect(provider.observe(computer, { ...context, botId: "bot-b" })).resolves.toMatchObject(
-      { width: 1920, height: 1080 },
+      { width: 1280 },
     );
+    expect(provider.describe().capabilities.multiScreen).toBe(true);
   });
 
   it("archives on stop and permanently deletes on destroy", async () => {
@@ -182,6 +290,60 @@ describe("BoxSandboxProvider", () => {
     expect(fixture.deleteBox).toHaveBeenCalledWith("bx_testbox2");
   });
 
+  it("bounds a stalled permanent-delete request", async () => {
+    const deadline = new AbortController();
+    vi.spyOn(AbortSignal, "timeout").mockReturnValue(deadline.signal);
+    const fetchMock = vi.fn(
+      async (_url: string | URL | Request, init?: RequestInit): Promise<Response> =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), {
+            once: true,
+          });
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = new BoxSandboxProvider({ apiKey: "test-key" });
+
+    const pending = provider.destroy(
+      { id: "box-test", providerRef: "box-test", botId: "bot-test", kind: "box" },
+      context,
+    );
+    deadline.abort(new DOMException("Timed out", "TimeoutError"));
+
+    await expect(pending).rejects.toThrow("Box box-test was not deleted within 60 seconds");
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls[0]?.[1]?.signal).toBe(deadline.signal);
+  });
+
+  it("keeps the same deadline on permanent-delete status polling", async () => {
+    const deadline = new AbortController();
+    vi.spyOn(AbortSignal, "timeout").mockReturnValue(deadline.signal);
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(null, { status: 202 }))
+      .mockImplementationOnce(
+        async (_url: string | URL | Request, init?: RequestInit): Promise<Response> =>
+          new Promise((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), {
+              once: true,
+            });
+          }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = new BoxSandboxProvider({ apiKey: "test-key" });
+
+    const pending = provider.destroy(
+      { id: "box-test", providerRef: "box-test", botId: "bot-test", kind: "box" },
+      context,
+    );
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    deadline.abort(new DOMException("Timed out", "TimeoutError"));
+
+    await expect(pending).rejects.toThrow("Box box-test was not deleted within 60 seconds");
+    expect(fetchMock.mock.calls[0]?.[1]?.signal).toBe(deadline.signal);
+    expect(fetchMock.mock.calls[1]?.[1]?.signal).toBe(deadline.signal);
+  });
+
   it("recognizes provider 404 errors without swallowing transient failures", () => {
     expect(isUnrecoverableBoxError({ status: 404 })).toBe(true);
     expect(isUnrecoverableBoxError(new Error("temporary Box outage"))).toBe(false);
@@ -190,6 +352,7 @@ describe("BoxSandboxProvider", () => {
 
 function boxFixture(options: { state?: string } = {}) {
   const files = new Map<string, Uint8Array>();
+  const respond = desktopCommandResponder();
   const create = vi.fn(async () => createResponse());
   const fixture = {
     state: options.state ?? "ready",
@@ -212,6 +375,12 @@ function boxFixture(options: { state?: string } = {}) {
     commandStatus: vi.fn(),
     command: vi.fn(async (request: { commandRequest: { command: string; cwd?: string } }) => {
       const command = request.commandRequest.command;
+      const response = respond(command);
+      if (response) return finished(response);
+      if (command.includes("host ") && command.includes("--private")) {
+        const port = command.match(/host (\d+)/)?.[1];
+        return finished({ stdout: `https://box-test-${port}.on.ascii.dev?_token=secret` });
+      }
       if (command.includes("TEST_VALUE=works")) return finished({ stdout: "hello\n" });
       if (command.includes("find ") && command.includes("rakazo-home/bin")) {
         const target = "/home/user/rakazo-home/bin/tool";
@@ -264,22 +433,14 @@ function boxFixture(options: { state?: string } = {}) {
         };
       },
     ),
-    readFile: vi.fn(async ({ path }: { path: string }) => {
+    artifactRaw: vi.fn(async ({ path }: { path: string }) => {
       const content = path.startsWith("/tmp/rakazo-observe-")
-        ? Uint8Array.from([137, 80, 78, 71])
+        ? Uint8Array.from([1, 2, 3])
         : (files.get(path) ?? new Uint8Array());
-      return {
-        ok: true,
-        type: "file.read" as const,
-        success: true,
-        path,
-        encoding: "base64" as const,
-        size: content.byteLength,
-        content: Buffer.from(content).toString("base64"),
-      };
+      return { raw: new Response(Buffer.from(content)) };
     }),
   };
-  return { ...fixture, client: fixture as unknown as BoxSandboxSdk };
+  return { ...fixture, files, client: fixture as unknown as BoxSandboxSdk };
 }
 
 function box(id: string, state: string) {

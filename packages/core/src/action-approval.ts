@@ -3,6 +3,9 @@ import type { ActionApprovalRule as StoredActionApprovalRule } from "@rakazo/con
 const APPROVAL_EXEMPT_TOOLS = new Set([
   "computer_observe",
   "computer_act",
+  "browser_navigate",
+  "browser_snapshot",
+  "browser_act",
   "list_files",
   "read_file",
   "write_file",
@@ -19,7 +22,34 @@ const APPROVAL_EXEMPT_TOOLS = new Set([
   "schedule_cancel",
 ]);
 
-const APPROVAL_REQUIRED_BUILTIN_TOOLS = new Set(["destination.write", "delete_bot", "archive_bot"]);
+const APPROVAL_REQUIRED_BUILTIN_TOOLS = new Set([
+  "destination.write",
+  "delete_bot",
+  "archive_bot",
+  "secret_request",
+  "forget_secret",
+  "cloud_agent_launch",
+  "cloud_agent_reply",
+  "cloud_agent_cancel",
+]);
+const EXPLICIT_APPROVAL_BUILTIN_TOOLS = new Set(["create_space"]);
+
+const UNATTENDED_SAFE_BUILTIN_TOOLS = new Set([
+  "browser_snapshot",
+  "cloud_agent_status",
+  "computer_observe",
+  "list_files",
+  "list_secrets",
+  "read_file",
+  "recall_memory",
+  "request_takeover",
+  "run_subagent",
+  "schedule_list",
+  "scratchpad_list",
+  "skill_read",
+  "web_fetch",
+  "web_search",
+]);
 
 const READ_ONLY_CONNECTOR_PATTERN = /(^|_)(get|list|search|find|read)(_|$)/i;
 const MUTATING_CONNECTOR_PATTERN =
@@ -53,9 +83,27 @@ export function connectorToolRequiresApproval(toolName: string): boolean {
 
 export function toolRequiresApproval(toolName: string, viaConnector: boolean): boolean {
   if (APPROVAL_EXEMPT_TOOLS.has(toolName)) return false;
+  if (toolRequiresExplicitApproval(toolName)) return true;
   if (APPROVAL_REQUIRED_BUILTIN_TOOLS.has(toolName)) return true;
   if (viaConnector) return connectorToolRequiresApproval(toolName);
   return false;
+}
+
+/** Security-boundary changes cannot be auto-reviewed or permanently allowed. */
+export function toolRequiresExplicitApproval(toolName: string): boolean {
+  return EXPLICIT_APPROVAL_BUILTIN_TOOLS.has(toolName);
+}
+
+/** External webhook runs may inspect state unattended, but side effects always need the owner. */
+export function unattendedTriggerToolRequiresApproval(
+  trigger: string,
+  toolName: string,
+  viaConnector: boolean,
+): boolean {
+  if (trigger !== "webhook") return false;
+  return viaConnector
+    ? connectorToolRequiresApproval(toolName)
+    : !UNATTENDED_SAFE_BUILTIN_TOOLS.has(toolName);
 }
 
 function categoryMatches(category: string, toolName: string, connectorKind: string): boolean {
@@ -99,23 +147,78 @@ function ruleSpecificity(rule: ActionApprovalRule): number {
   }
 }
 
+export type ActionApprovalSource = "require_approval" | "always_allow" | "default";
+
+export type ActionApprovalResolved = {
+  decision: "ask" | "allow";
+  source: ActionApprovalSource;
+  matchingRules: ActionApprovalRule[];
+};
+
+/** Deterministic rule resolution. Always-allow and require-approval both beat the default. */
+export function resolveActionApprovalDetail(input: {
+  toolName: string;
+  connectorKind?: string;
+  rules: ActionApprovalRule[];
+}): ActionApprovalResolved {
+  const connectorKind = input.connectorKind ?? connectorKindFromToolName(input.toolName);
+  const matchingRules = input.rules.filter((rule) =>
+    ruleMatches(rule, input.toolName, connectorKind),
+  );
+  if (matchingRules.length === 0) {
+    return { decision: "allow", source: "default", matchingRules };
+  }
+
+  const highestSpecificity = Math.max(...matchingRules.map(ruleSpecificity));
+  const winners = matchingRules.filter((rule) => ruleSpecificity(rule) === highestSpecificity);
+  if (winners.some((rule) => rule.effect === "require_approval")) {
+    return { decision: "ask", source: "require_approval", matchingRules };
+  }
+  return { decision: "allow", source: "always_allow", matchingRules };
+}
+
 export function resolveActionApproval(input: {
   toolName: string;
   connectorKind?: string;
   rules: ActionApprovalRule[];
 }): "ask" | "allow" {
-  const connectorKind = input.connectorKind ?? connectorKindFromToolName(input.toolName);
-  const matchingRules = input.rules.filter((rule) =>
-    ruleMatches(rule, input.toolName, connectorKind),
-  );
-  if (matchingRules.length === 0) return "allow";
+  return resolveActionApprovalDetail(input).decision;
+}
 
-  const highestSpecificity = Math.max(...matchingRules.map(ruleSpecificity));
-  return matchingRules.some(
-    (rule) => ruleSpecificity(rule) === highestSpecificity && rule.effect === "require_approval",
-  )
-    ? "ask"
-    : "allow";
+export type AutoReviewJudgeDecision = "pass" | "ask" | "error";
+
+/**
+ * Pure combiner for Auto Review after rule resolution.
+ * Rules win: require_approval asks, always_allow runs. Only the default path may call a judge.
+ * The judge only escalates to ask; it never silent-denies.
+ */
+export function planActionGate(input: {
+  resolved: ActionApprovalResolved;
+  consequential: boolean;
+  autoReviewEnabled: boolean;
+  checkerConfigured: boolean;
+}): "ask" | "allow" | "judge" {
+  if (input.resolved.decision === "ask") return "ask";
+  if (input.resolved.source === "always_allow") return "allow";
+  if (
+    input.consequential &&
+    input.autoReviewEnabled &&
+    input.checkerConfigured &&
+    input.resolved.source === "default"
+  ) {
+    return "judge";
+  }
+  return "allow";
+}
+
+/** Map a judge outcome onto ask/allow. Errors fail closed on consequential tools. */
+export function applyJudgeDecision(input: {
+  decision: AutoReviewJudgeDecision;
+  consequential: boolean;
+}): "ask" | "allow" {
+  if (input.decision === "pass") return "allow";
+  if (input.decision === "ask") return "ask";
+  return input.consequential ? "ask" : "allow";
 }
 
 export function isSecretAskBlock(block: {

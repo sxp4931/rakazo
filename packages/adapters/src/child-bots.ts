@@ -7,19 +7,23 @@ import type {
   SandboxProvider,
 } from "@rakazo/adapter-kit";
 import { routineJobKey, runContinueJob, runJobKey } from "@rakazo/adapter-kit";
-import { type Actor, type Bot, GROUP_MEMBER_MIN } from "@rakazo/contracts";
+import { type Actor, type Bot, type ComputerMode, GROUP_MEMBER_MIN } from "@rakazo/contracts";
 import { ACTIVE_RUN_STATUSES } from "@rakazo/core";
 import {
+  cancelRunsInTransaction,
   computerScopeKey,
   createRepos,
   createThreadMessageInTransaction,
+  expireComputerExecutionLeases,
   type Prisma,
   type PrismaClient,
   withTransactionRetry,
 } from "@rakazo/db";
+import { getLogger } from "@rakazo/logging";
 import { toComputerRef } from "./computer-support.js";
 import { checkpointAndRecordComputerWorkspace } from "./computer-workspace.js";
 import { resolveAgentHomePath } from "./home.js";
+import { removePiBotSessions } from "./pi-session.js";
 
 export function confirmSpawnedBotName(confirmName: string, botName: string) {
   if (confirmName !== botName) {
@@ -40,7 +44,7 @@ export async function spawnBot(
     spawnedBy: {
       id: string;
       name: string;
-      workspaceId: string;
+      spaceId: string;
       userId: string;
     };
     runId: string;
@@ -49,6 +53,7 @@ export async function spawnBot(
     title?: string;
     instructions?: string;
     prompt?: string;
+    computerMode?: ComputerMode;
   },
 ) {
   const name = input.name.trim();
@@ -56,7 +61,7 @@ export async function spawnBot(
 
   const actor: Actor = {
     userId: input.spawnedBy.userId,
-    workspaceId: input.spawnedBy.workspaceId,
+    spaceId: input.spawnedBy.spaceId,
     email: "",
     isDeploymentOwner: false,
   };
@@ -71,6 +76,7 @@ export async function spawnBot(
       notifyOnFinish: true,
       parentBotId: input.spawnedBy.id,
       spawnKey: input.spawnKey,
+      computerMode: input.computerMode,
       initialMessage: {
         role: "system",
         blocks: [{ kind: "meta", text: `Created by ${input.spawnedBy.name}` }],
@@ -80,8 +86,8 @@ export async function spawnBot(
   } catch (error) {
     const existing = await deps.prisma.bot.findUnique({
       where: {
-        workspaceId_spawnKey: {
-          workspaceId: input.spawnedBy.workspaceId,
+        spaceId_spawnKey: {
+          spaceId: input.spawnedBy.spaceId,
           spawnKey: input.spawnKey,
         },
       },
@@ -101,7 +107,7 @@ export async function spawnBot(
   const prompt = (input.prompt ?? "").trim();
   if (prompt) {
     const run = await ensureSpawnRun(deps.prisma, {
-      workspaceId: input.spawnedBy.workspaceId,
+      spaceId: input.spawnedBy.spaceId,
       userId: input.spawnedBy.userId,
       botId: created.id,
       threadId: created.threadId,
@@ -111,7 +117,7 @@ export async function spawnBot(
     });
     await deps.jobs
       .enqueue(runContinueJob(run.id))
-      .catch((error) => console.error("spawned bot enqueue", error));
+      .catch((error) => getLogger().error("spawned bot enqueue", error));
   }
 
   return {
@@ -127,7 +133,7 @@ export async function spawnBot(
 async function ensureSpawnRun(
   prisma: PrismaClient,
   input: {
-    workspaceId: string;
+    spaceId: string;
     userId: string;
     botId: string;
     threadId: string;
@@ -138,8 +144,8 @@ async function ensureSpawnRun(
 ) {
   const clientNonce = `spawn:${input.spawnKey}`;
   const where = {
-    workspaceId_clientNonce: {
-      workspaceId: input.workspaceId,
+    spaceId_clientNonce: {
+      spaceId: input.spaceId,
       clientNonce,
     },
   } as const;
@@ -156,7 +162,7 @@ async function ensureSpawnRun(
       });
       const task = await tx.task.create({
         data: {
-          workspaceId: input.workspaceId,
+          spaceId: input.spaceId,
           botId: input.botId,
           threadId: input.threadId,
           userId: input.userId,
@@ -166,7 +172,7 @@ async function ensureSpawnRun(
       });
       return tx.run.create({
         data: {
-          workspaceId: input.workspaceId,
+          spaceId: input.spaceId,
           botId: input.botId,
           threadId: input.threadId,
           taskId: task.id,
@@ -195,8 +201,9 @@ type BotLifecycleDeps = {
 
 type LifecycleBot = {
   id: string;
-  workspaceId: string;
+  spaceId: string;
   name: string;
+  userId?: string;
   archivedAt: Date | null;
   computerId?: string | null;
   webhookSecretId?: string | null;
@@ -207,7 +214,7 @@ export async function archiveSpawnedBot(
   input: {
     spawnedByBotId: string;
     userId: string;
-    workspaceId: string;
+    spaceId: string;
     confirmName: string;
     botId?: string;
   },
@@ -222,7 +229,7 @@ export async function archiveSpawnedBot(
     where: {
       parentBotId: input.spawnedByBotId,
       userId: input.userId,
-      workspaceId: input.workspaceId,
+      spaceId: input.spaceId,
     },
   });
   const matches = input.botId
@@ -259,7 +266,7 @@ export async function archiveBot(
 ) {
   const [dedicated, activeRuns, activeRoutines] = await Promise.all([
     deps.prisma.computer.findUnique({
-      where: { scopeKey: computerScopeKey("dedicated", bot.workspaceId, bot.id) },
+      where: { scopeKey: computerScopeKey("dedicated", bot.spaceId, bot.id) },
     }),
     deps.prisma.run.findMany({
       where: { botId: bot.id, status: { in: [...ACTIVE_RUN_STATUSES] } },
@@ -285,7 +292,7 @@ export async function archiveBot(
       where: { botId: bot.id },
       data: { active: false, nextRunAt: null },
     });
-    await tx.computerExecutionLease.deleteMany({ where: { botId: bot.id } });
+    await expireComputerExecutionLeases(tx, { botId: bot.id });
     await tx.computer.updateMany({
       where: {
         OR: [{ controlBotId: bot.id }, { executionBotId: bot.id }],
@@ -334,7 +341,7 @@ export async function destroyBot(
 ) {
   const [dedicated, activeRuns, routines] = await Promise.all([
     deps.prisma.computer.findUnique({
-      where: { scopeKey: computerScopeKey("dedicated", bot.workspaceId, bot.id) },
+      where: { scopeKey: computerScopeKey("dedicated", bot.spaceId, bot.id) },
     }),
     deps.prisma.run.findMany({
       where: { botId: bot.id, status: { in: [...ACTIVE_RUN_STATUSES] } },
@@ -355,21 +362,23 @@ export async function destroyBot(
   if (dedicated?.providerRef) {
     await deps.sandbox.destroy(toComputerRef(dedicated), context).catch(() => undefined);
   }
+  // Keep the bot deletion transaction from committing if raw transcript cleanup fails.
+  await removePiBotSessions(deps.dataDir, bot.userId, bot.id);
   const deletion = await withTransactionRetry(() =>
     deps.prisma.$transaction(async (tx) => {
       const locked = await tx.$queryRaw<Array<{ id: string; webhookSecretId: string | null }>>`
         SELECT id, "webhookSecretId"
         FROM bots
-        WHERE id = ${bot.id} AND "workspaceId" = ${bot.workspaceId}
+        WHERE id = ${bot.id} AND "spaceId" = ${bot.spaceId}
         FOR UPDATE
       `;
       const webhookSecretId = locked[0]?.webhookSecretId ?? bot.webhookSecretId ?? null;
       const botArtifacts = await tx.artifact.findMany({
-        where: { botId: bot.id, groupId: null, workspaceId: bot.workspaceId },
+        where: { botId: bot.id, groupId: null, spaceId: bot.spaceId },
         select: { storageKey: true },
       });
       await tx.artifact.deleteMany({
-        where: { botId: bot.id, groupId: null, workspaceId: bot.workspaceId },
+        where: { botId: bot.id, groupId: null, spaceId: bot.spaceId },
       });
       const groupCleanup = await detachBotFromGroups(tx, bot.id);
       await tx.computerExecutionLease.deleteMany({ where: { botId: bot.id } });
@@ -394,7 +403,7 @@ export async function destroyBot(
       await tx.botDeletion.create({
         data: {
           id: bot.id,
-          workspaceId: bot.workspaceId,
+          spaceId: bot.spaceId,
           name: bot.name,
           deletedByUserId: context.userId,
           memoriesPreserved: !options.deleteMemories,
@@ -403,7 +412,7 @@ export async function destroyBot(
       await tx.bot.delete({ where: { id: bot.id } });
       if (webhookSecretId) {
         await tx.secret.deleteMany({
-          where: { id: webhookSecretId, kind: "webhook", workspaceId: bot.workspaceId },
+          where: { id: webhookSecretId, kind: "webhook", spaceId: bot.spaceId },
         });
       }
       if (dedicated) await tx.computer.delete({ where: { id: dedicated.id } });
@@ -503,24 +512,8 @@ async function detachBotFromGroups(tx: Prisma.TransactionClient, botId: string) 
   if (activeRuns.length) {
     const now = new Date();
     const runIds = activeRuns.map((run) => run.id);
-    await tx.run.updateMany({
-      where: { id: { in: runIds } },
-      data: {
-        status: "cancelled",
-        completedAt: now,
-        leaseOwner: null,
-        leaseExpiresAt: null,
-      },
-    });
-    await tx.attempt.updateMany({
-      where: { runId: { in: runIds }, status: "running" },
-      data: { status: "cancelled", finishedAt: now },
-    });
-    await tx.task.updateMany({
-      where: { id: { in: activeRuns.map((run) => run.taskId) } },
-      data: { status: "cancelled" },
-    });
-    await tx.computerExecutionLease.deleteMany({ where: { runId: { in: runIds } } });
+    await cancelRunsInTransaction(tx, activeRuns, now);
+    await expireComputerExecutionLeases(tx, { runId: { in: runIds } });
     await tx.computer.updateMany({
       where: { executionRunId: { in: runIds } },
       data: {
@@ -562,7 +555,7 @@ async function removeStoredArtifacts(
     [...new Set(storageKeys)].map((storageKey) => artifacts.remove(storageKey, context)),
   );
   for (const result of results) {
-    if (result.status === "rejected") console.error("group artifact cleanup", result.reason);
+    if (result.status === "rejected") getLogger().error("group artifact cleanup", result.reason);
   }
 }
 

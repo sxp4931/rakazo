@@ -1,13 +1,26 @@
+import {
+  BROWSER_APPLICATIONS as DOCKER_BROWSER_ALIASES,
+  MAX_DESKTOP_DISPLAY,
+  resetDesktopRuntimeCommand,
+  shellQuote,
+  stopBrowserCommand,
+  stopExtraScreenCommand,
+} from "@rakazo/core/node/desktop-runtime";
+
+export {
+  browserProfilePathForScreen,
+  ensureScreenCommand,
+  interactiveScreenCommand,
+  prepareBrowserProfileCommand,
+  stopBrowserCommand,
+  stopExtraScreenCommand,
+} from "@rakazo/core/node/desktop-runtime";
+
 import { timingSafeEqual } from "node:crypto";
 import path from "node:path";
 import { canReleaseScreenLease, canTakeScreenLease } from "@rakazo/core";
 import { z } from "zod";
-import {
-  type SandboxInput,
-  screenPorts,
-  TEAM_SCREEN_LIMIT,
-  xdotoolCommand,
-} from "./computer-spec.js";
+import { type SandboxInput, xdotoolCommand } from "./computer-spec.js";
 
 export const computerActionSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("key"), key: z.string(), modifiers: z.array(z.string()).optional() }),
@@ -29,14 +42,25 @@ export const computerActionSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("launch"), application: z.string(), uri: z.string().optional() }),
 ]);
 
+export { BROWSER_APPLICATIONS as DOCKER_BROWSER_ALIASES } from "@rakazo/core/node/desktop-runtime";
+
 export function assertRequestIdentity(
   botId: string | undefined,
-  workspaceId: string | undefined,
-  expected: { botId: string; workspaceId: string },
+  spaceId: string | undefined,
+  expected: { botId: string; spaceId: string },
 ) {
-  if (botId !== expected.botId || workspaceId !== expected.workspaceId) {
+  if (botId !== expected.botId || spaceId !== expected.spaceId) {
     throw new Error("computer identity mismatch");
   }
+}
+
+export function hasComputerIdentity(
+  labels: Record<string, string> | undefined,
+  botId: string,
+  spaceId: string,
+) {
+  const labeledSpaceId = labels?.["rakazo.spaceId"] ?? labels?.["rakazo.workspaceId"];
+  return labels?.["rakazo.botId"] === botId && labeledSpaceId === spaceId;
 }
 
 export function hasValidBearerToken(authorization: string | undefined, expectedToken: string) {
@@ -164,7 +188,7 @@ export function nextScreenIndex(
   assigned: Map<string, ScreenAssignment>,
   screenId: string,
   leaseId?: string,
-  limit = TEAM_SCREEN_LIMIT,
+  limit = MAX_DESKTOP_DISPLAY,
 ): number {
   const existing = assigned.get(screenId);
   if (existing) {
@@ -199,9 +223,10 @@ export function releaseAssignedScreen(
   leaseId?: string,
 ): number | undefined {
   const slot = assigned.get(screenId);
-  if (!slot || slot.releasing || (leaseId && !canReleaseScreenLease(slot.leaseId, leaseId))) {
+  if (!slot || (leaseId && !canReleaseScreenLease(slot.leaseId, leaseId))) {
     return undefined;
   }
+  if (slot.releasing) return slot.index;
   slot.releasing = true;
   return slot.index;
 }
@@ -215,10 +240,22 @@ export function completeReleasedScreen(
   if (slot?.releasing && slot.index === index) assigned.delete(screenId);
 }
 
+export async function teardownReleasedScreen(
+  assigned: Map<string, ScreenAssignment>,
+  screenId: string,
+  index: number,
+  teardown: () => Promise<{ code: number; stderr: string }>,
+) {
+  const result = await teardown();
+  if (result.code !== 0) throw new Error(result.stderr || "computer screen failed to stop");
+  completeReleasedScreen(assigned, screenId, index);
+}
+
 export interface ScreenAssignment {
   index: number;
   leaseId?: string;
   releasing?: boolean;
+  viewToken?: string;
 }
 
 export function clearComputerScreenRegistry(
@@ -228,55 +265,68 @@ export function clearComputerScreenRegistry(
   registry.delete(containerId);
 }
 
-export function stopExtraScreenCommand(index: number) {
-  if (index <= 0) return "";
-  const layout = screenPorts(index);
-  const fluxHome = `/tmp/fluxbox-home-${layout.displayNumber}`;
-  const profile = `/home/rakazo/.browser-profiles/chromium-screen-${layout.displayNumber}`;
-  const tokenFile = `/tmp/rakazo/control-token-${layout.displayNumber}`;
-  return [
-    `pkill -f 'Xvfb ${layout.display} -screen' || true`,
-    `pkill -f 'HOME=${fluxHome} DISPLAY=${layout.display} fluxbox' || true`,
-    `pkill -f -- '--user-data-dir=${profile}' || true`,
-    `pkill -f '^x11vnc .* -rfbport ${layout.viewVncPort}' || true`,
-    `pkill -f '^x11vnc .* -rfbport ${layout.controlVncPort}' || true`,
-    `pkill -f '^/usr/bin/python3 .*websockify.*${layout.viewPort}' || true`,
-    `pkill -f '^/usr/bin/python3 .*websockify.*${layout.controlPort}' || true`,
-    `rm -f /tmp/.X${layout.displayNumber}-lock /tmp/.X11-unix/X${layout.displayNumber} ${tokenFile}`,
-  ].join("; ");
+/** Choose the stop command for DELETE /screen cancel/release.
+ * Callers must hold the per-computer screen lock across this decision and any stop. */
+export function screenReleaseStopCommand(
+  index: number | undefined,
+  options: {
+    hasRegistry: boolean;
+    cancelRunWork: boolean;
+    screenId: string;
+  },
+): string {
+  if (index !== undefined) {
+    return stopExtraScreenCommand(index, options.screenId);
+  }
+  // Missing registry after a supervisor restart: cancel still tears down the
+  // matching bot's orphaned Chromium process without touching another bot.
+  // Present registry + rejected release: newer fence owns the screen — do not kill.
+  if (!options.hasRegistry && options.cancelRunWork) {
+    return stopBrowserCommand(options.screenId);
+  }
+  return "";
 }
 
-export function ensureScreenCommand(index: number) {
-  const layout = screenPorts(index);
-  if (index === 0) {
-    return `for i in $(seq 1 100); do xdpyinfo -display ${layout.display} >/dev/null 2>&1 && exit 0; sleep 0.1; done; exit 1`;
-  }
-  const fluxHome = `/tmp/fluxbox-home-${layout.displayNumber}`;
-  const log = `/tmp/rakazo/screen-${layout.displayNumber}`;
-  const profile = `/home/rakazo/.browser-profiles/chromium-screen-${layout.displayNumber}`;
+export function stopScreensCommand(screens: Array<{ screenId: string; index: number }>) {
   return [
-    `xdpyinfo -display ${layout.display} >/dev/null 2>&1 && exit 0 || true`,
-    `mkdir -p /tmp/rakazo ${fluxHome}/.fluxbox /tmp/.X11-unix ${profile}`,
-    `rm -f /tmp/.X${layout.displayNumber}-lock /tmp/.X11-unix/X${layout.displayNumber}`,
-    `Xvfb ${layout.display} -screen 0 1280x800x24 -ac +extension RANDR +render -noreset >${log}-xvfb.log 2>&1 &`,
-    `for i in $(seq 1 100); do xdpyinfo -display ${layout.display} >/dev/null 2>&1 && break; sleep 0.1; done`,
-    `xdpyinfo -display ${layout.display} >/dev/null 2>&1 || exit 1`,
-    `cp /etc/rakazo/fluxbox/init ${fluxHome}/.fluxbox/init`,
-    `cp /etc/rakazo/fluxbox/apps ${fluxHome}/.fluxbox/apps 2>/dev/null || true`,
-    `cp /etc/rakazo/fluxbox/menu ${fluxHome}/.fluxbox/menu 2>/dev/null || true`,
-    `HOME=${fluxHome} DISPLAY=${layout.display} fluxbox -rc ${fluxHome}/.fluxbox/init >${log}-fluxbox.log 2>&1 &`,
-    `if [ -d /home/rakazo/.browser-profiles/chromium ]; then cp -a /home/rakazo/.browser-profiles/chromium/. ${profile}/; rm -f ${profile}/SingletonLock ${profile}/SingletonCookie ${profile}/SingletonSocket; fi`,
-    `DISPLAY=${layout.display} HOME=/home/rakazo rakazo-browser --user-data-dir=${profile} >${log}-browser.log 2>&1 &`,
-    `x11vnc -display ${layout.display} -forever -shared -viewonly -nopw -listen 127.0.0.1 -rfbport ${layout.viewVncPort} -xkb -ncache 0 >${log}-x11vnc.log 2>&1 &`,
-    `websockify --heartbeat=30 --web=/usr/share/novnc 0.0.0.0:${layout.viewPort} 127.0.0.1:${layout.viewVncPort} >${log}-novnc.log 2>&1 &`,
-    `for i in $(seq 1 50); do (echo >/dev/tcp/127.0.0.1/${layout.viewPort}) >/dev/null 2>&1 && exit 0; sleep 0.1; done`,
-    "exit 1",
+    "set -eu",
+    "failed=0",
+    ...screens.map(
+      ({ screenId }) => `bash -eu -c ${shellQuote(stopBrowserCommand(screenId))} || failed=1`,
+    ),
+    '[ "$failed" -eq 0 ] || { echo "computer browser failed to stop" >&2; exit 1; }',
   ].join("\n");
+}
+
+export function resetManagedScreensCommand() {
+  return resetDesktopRuntimeCommand();
+}
+
+export async function withKeyedLock<T>(
+  locks: Map<string, Promise<unknown>>,
+  key: string,
+  operation: () => Promise<T>,
+) {
+  const previous = locks.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const current = previous.catch(() => undefined).then(() => gate);
+  locks.set(key, current);
+  await previous.catch(() => undefined);
+  try {
+    return await operation();
+  } finally {
+    release();
+    if (locks.get(key) === current) locks.delete(key);
+  }
 }
 
 export function containerActionStep(
   action: z.infer<typeof computerActionSchema>,
   display = ":1",
+  browserProfile?: string,
 ): { argv: string[] } | { waitMs: number } {
   if (action.kind === "wait") {
     return { waitMs: Math.min(Math.max(action.ms, 0), 5_000) };
@@ -298,11 +348,32 @@ export function containerActionStep(
     const target = /^https?:\/\//i.test(action.path)
       ? action.path
       : workspaceTarget(normalizeWorkspaceRelative(action.path));
-    argv = ["env", `DISPLAY=${display}`, "xdg-open", target];
+    argv = [
+      "env",
+      `DISPLAY=${display}`,
+      ...(browserProfile ? [`RAKAZO_BROWSER_PROFILE=${browserProfile}`] : []),
+      "xdg-open",
+      target,
+    ];
   } else {
-    argv = ["env", `DISPLAY=${display}`, action.application, ...(action.uri ? [action.uri] : [])];
+    const browser = DOCKER_BROWSER_ALIASES.has(action.application.toLowerCase());
+    argv = [
+      "env",
+      `DISPLAY=${display}`,
+      ...(browser && browserProfile ? [`RAKAZO_BROWSER_PROFILE=${browserProfile}`] : []),
+      browser ? "rakazo-browser" : action.application,
+      ...(action.uri ? [action.uri] : []),
+    ];
   }
   return { argv };
+}
+
+export function containerActionSteps(
+  actions: Array<z.infer<typeof computerActionSchema>>,
+  display = ":1",
+  browserProfile?: string,
+) {
+  return actions.map((action) => containerActionStep(action, display, browserProfile));
 }
 
 export function normalizeWorkspaceRelative(value: string) {
@@ -335,40 +406,6 @@ export function sandboxCommandTimedOut(exitCode: number, completedWithExit124: b
   return exitCode === 124 && !completedWithExit124;
 }
 
-export function interactiveScreenCommand(
-  interactive: boolean,
-  controlToken?: string,
-  layout = screenPorts(0),
-) {
-  const tokenFile =
-    layout.displayNumber === 1
-      ? "/tmp/rakazo/control-token"
-      : `/tmp/rakazo/control-token-${layout.displayNumber}`;
-  const stopProcesses =
-    `pkill -f '^x11vnc .* -rfbport ${layout.controlVncPort}' || true; ` +
-    `pkill -f '^/usr/bin/python3 .*websockify.*${layout.controlPort}' || true; ` +
-    `rm -f ${tokenFile}`;
-  const stop = controlToken
-    ? `[ -f ${tokenFile} ] && [ "$(cat ${tokenFile})" != ${shellQuote(controlToken)} ] || { ${stopProcesses}; }`
-    : stopProcesses;
-  if (!interactive) return stop;
-  if (!controlToken) throw new Error("interactive screen requires a control token");
-  return [
-    `[ -f ${tokenFile} ] && [ "$(cat ${tokenFile})" = ${shellQuote(controlToken)} ] && pgrep -f '^x11vnc .* -rfbport ${layout.controlVncPort}' >/dev/null && pgrep -f '^/usr/bin/python3 .*websockify.*${layout.controlPort}' >/dev/null && exit 0 || true`,
-    stopProcesses,
-    `printf %s ${shellQuote(controlToken)} > ${tokenFile}`,
-    `export DISPLAY=${layout.display}`,
-    `(x11vnc -display ${layout.display} -forever -shared -nopw -listen 127.0.0.1 -rfbport ${layout.controlVncPort} -xkb -ncache 0 >/tmp/rakazo/x11vnc-control-${layout.displayNumber}.log 2>&1 &)`,
-    `(websockify --heartbeat=30 --web=/usr/share/novnc 0.0.0.0:${layout.controlPort} 127.0.0.1:${layout.controlVncPort} >/tmp/rakazo/novnc-control-${layout.displayNumber}.log 2>&1 &)`,
-    `for i in $(seq 1 50); do (echo >/dev/tcp/127.0.0.1/${layout.controlPort}) >/dev/null 2>&1 && exit 0; sleep 0.1; done`,
-    "exit 1",
-  ].join("; ");
-}
-
-function shellQuote(value: string) {
-  return `'${value.replaceAll("'", `'"'"'`)}'`;
-}
-
 export function parseObservation(output: string) {
   const geometry = output.match(/^GEOM\s+(\d+)\s+(\d+)$/m);
   const cursorLine = output.match(/^CURSOR\s+(.+)$/m)?.[1] ?? "";
@@ -387,5 +424,53 @@ export function parseObservation(output: string) {
       ? { cursor: { x: cursorX, y: cursorY } }
       : {}),
     ...(windowId ? { activeWindow: { id: windowId, ...(title ? { title } : {}) } } : {}),
+  };
+}
+
+/**
+ * True when `buffer` is a complete Docker multiplexed stream: every frame has
+ * type 0/1/2, its payload fits in the remaining bytes, and parsing ends exactly
+ * at the buffer length. Otherwise the buffer is treated as raw (TTY) stdout.
+ */
+function isCompleteDockerMultiplexedStream(buffer: Buffer): boolean {
+  let offset = 0;
+  while (offset < buffer.length) {
+    if (offset + 8 > buffer.length) return false;
+    const type = buffer[offset];
+    if (type !== 0 && type !== 1 && type !== 2) return false;
+    // Bytes 1–3 are reserved padding and must be zero in Docker's multiplex format.
+    if (buffer[offset + 1] !== 0 || buffer[offset + 2] !== 0 || buffer[offset + 3] !== 0) {
+      return false;
+    }
+    const size = buffer.readUInt32BE(offset + 4);
+    if (offset + 8 + size > buffer.length) return false;
+    offset += 8 + size;
+  }
+  return offset === buffer.length;
+}
+
+/**
+ * Split a Docker exec stream into stdout and stderr. Without a TTY the stream is
+ * multiplexed: each frame is an 8-byte header (type byte, 3 reserved bytes, big-endian
+ * length) followed by the payload, and type 2 is stderr. A raw (TTY) stream has no
+ * headers and is all stdout. Only demux when the buffer validates as a complete
+ * multiplexed sequence; otherwise return the whole buffer as stdout.
+ */
+export function demuxDockerStream(buffer: Buffer): { stdout: string; stderr: string } {
+  if (!isCompleteDockerMultiplexedStream(buffer)) {
+    return { stdout: buffer.toString("utf8"), stderr: "" };
+  }
+  const stdout: Buffer[] = [];
+  const stderr: Buffer[] = [];
+  let offset = 0;
+  while (offset < buffer.length) {
+    const size = buffer.readUInt32BE(offset + 4);
+    const payload = buffer.subarray(offset + 8, offset + 8 + size);
+    (buffer[offset] === 2 ? stderr : stdout).push(payload);
+    offset += 8 + size;
+  }
+  return {
+    stdout: Buffer.concat(stdout).toString("utf8"),
+    stderr: Buffer.concat(stderr).toString("utf8"),
   };
 }

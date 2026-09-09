@@ -2,6 +2,9 @@ import type { ComputerStatus } from "@rakazo/contracts";
 import { useState } from "react";
 import { Alert, Pressable, Text, View } from "react-native";
 import { rpc } from "../lib/api";
+import { computerUpdates } from "../lib/computer-updates";
+import { useI18n } from "../lib/i18n";
+import { useMobileTokens } from "../lib/native";
 
 type Action = "recover" | "reset" | "update";
 
@@ -14,6 +17,8 @@ export function ComputerMaintenanceActions({
   computer: ComputerStatus | null;
   onChanged: () => Promise<void>;
 }) {
+  const { t } = useI18n();
+  const tokens = useMobileTokens();
   const [pending, setPending] = useState<Action | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -25,12 +30,12 @@ export function ComputerMaintenanceActions({
     setPending(action);
     setError(null);
     try {
-      if (action === "recover") await rpc("computer/recover", { botId });
+      if (action === "recover") await computerUpdates.start(botId, "recover");
       else if (action === "reset") await rpc("computer/reset", { botId });
-      else await rpc("computer/update", { botId });
+      else await computerUpdates.start(botId);
       await onChanged();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not update computer");
+      setError(err instanceof Error ? err.message : t("Could not update computer"));
     } finally {
       setPending(null);
     }
@@ -38,11 +43,11 @@ export function ComputerMaintenanceActions({
 
   function confirmReset() {
     Alert.alert(
-      "Reset computer?",
-      "Restore the last saved workspace. Unsaved work on the computer is lost.",
+      t("Reset computer?"),
+      t("Restore the last saved workspace. Unsaved work on the computer is lost."),
       [
-        { text: "Cancel", style: "cancel" },
-        { text: "Reset", style: "destructive", onPress: () => void run("reset") },
+        { text: t("Cancel"), style: "cancel" },
+        { text: t("Reset"), style: "destructive", onPress: () => void run("reset") },
       ],
     );
   }
@@ -54,8 +59,8 @@ export function ComputerMaintenanceActions({
         onPress={() => void run("recover")}
         style={{ opacity: busy || pending !== null ? 0.4 : 1 }}
       >
-        <Text style={{ color: "#85858A", fontSize: 14 }}>
-          {pending === "recover" ? "Recovering…" : "Recover computer"}
+        <Text style={{ color: tokens.mutedForeground, fontSize: 14 }}>
+          {pending === "recover" ? t("Recovering…") : t("Recover computer")}
         </Text>
       </Pressable>
       <Pressable
@@ -63,22 +68,22 @@ export function ComputerMaintenanceActions({
         onPress={confirmReset}
         style={{ opacity: busy || pending !== null ? 0.4 : 1 }}
       >
-        <Text style={{ color: "#85858A", fontSize: 14 }}>
-          {pending === "reset" ? "Resetting…" : "Reset computer"}
+        <Text style={{ color: tokens.mutedForeground, fontSize: 14 }}>
+          {pending === "reset" ? t("Resetting…") : t("Reset computer")}
         </Text>
       </Pressable>
-      {computer.updateAvailable ? (
+      {computer.canUpdate ? (
         <Pressable
           disabled={busy || pending !== null}
           onPress={() => void run("update")}
           style={{ opacity: busy || pending !== null ? 0.4 : 1 }}
         >
-          <Text style={{ color: "#85858A", fontSize: 14 }}>
-            {pending === "update" ? "Updating…" : "Update computer"}
+          <Text style={{ color: tokens.mutedForeground, fontSize: 14 }}>
+            {pending === "update" ? t("Updating…") : t("Update computer")}
           </Text>
         </Pressable>
       ) : null}
-      {error ? <Text style={{ color: "#E65707", fontSize: 13 }}>{error}</Text> : null}
+      {error ? <Text style={{ color: tokens.destructive, fontSize: 13 }}>{error}</Text> : null}
     </View>
   );
 }

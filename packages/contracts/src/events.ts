@@ -1,4 +1,5 @@
 import * as z from "zod";
+import { BotSecretDestination } from "./bot-secrets.js";
 import { Id } from "./ids.js";
 import { McpTransportSchema } from "./mcp.js";
 
@@ -6,6 +7,7 @@ export const ProductEventType = z.enum([
   "thread.message.created",
   "thread.cleared",
   "thread.message.updated",
+  "thread.message.reaction",
   "thread.progress",
   "thread.artifact",
   "thread.ask",
@@ -13,6 +15,7 @@ export const ProductEventType = z.enum([
   "thread.meta",
   "thread.computer",
   "thread.subagent",
+  "thread.cloud_agent",
   "run.started",
   "run.checkpointed",
   "run.waiting_input",
@@ -33,9 +36,11 @@ export const ProductEventType = z.enum([
   "skill.saved",
   "effect.recorded",
   "agent.tool.called",
+  "agent.tool.completed",
   "effect.reconciled",
   "usage.recorded",
   "bot.spawned",
+  "bot.updated",
   "bot.archived",
   "bot.deleted",
   "group.created",
@@ -45,6 +50,8 @@ export const ProductEventType = z.enum([
 export type ProductEventType = z.infer<typeof ProductEventType>;
 
 export const MessageRole = z.enum(["user", "bot", "system"]);
+export const BotMessageIntent = z.enum(["request", "result", "question", "status", "fyi"]);
+export type BotMessageIntent = z.infer<typeof BotMessageIntent>;
 
 export const MAX_CHART_DATA_ROWS = 5_000;
 
@@ -78,6 +85,9 @@ const ChartBlock = z
     });
   });
 
+export const SecretAskPurpose = z.enum(["otp", "password", "api_key"]);
+export type SecretAskPurpose = z.infer<typeof SecretAskPurpose>;
+
 export const MessageBlock = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("text"), text: z.string() }),
   z.object({
@@ -90,9 +100,20 @@ export const MessageBlock = z.discriminatedUnion("kind", [
     approvalEffectId: Id.optional(),
     detail: z.string().optional(),
     input: z.enum(["text", "secret"]).optional(),
+    /** Why the secret is needed; drives field label on the masked card. */
+    purpose: SecretAskPurpose.optional(),
+    credential: BotSecretDestination.optional(),
     status: z.enum(["pending", "answered"]).optional(),
     answer: z.string().optional(),
-    actions: z.array(z.object({ id: z.string(), label: z.string() })).optional(),
+    actions: z
+      .array(
+        z.object({
+          id: z.string(),
+          label: z.string(),
+          outcome: z.enum(["created", "cancelled"]).optional(),
+        }),
+      )
+      .optional(),
   }),
   z.object({
     kind: z.literal("choice"),
@@ -106,6 +127,7 @@ export const MessageBlock = z.discriminatedUnion("kind", [
     /** Inline app authorization card (Composio-backed): logo, name, one-line
         description, and an Authorize button that flips to connected. */
     kind: z.literal("app_connect"),
+    connectorId: z.string().optional(),
     provider: z.string(),
     name: z.string(),
     description: z.string(),
@@ -128,11 +150,14 @@ export const MessageBlock = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("progress"),
     text: z.string(),
+    /** Provider-generated tool status rather than assistant-authored narration. */
+    activity: z.literal(true).optional(),
     pendingToolNames: z.array(z.string()).optional(),
   }),
   z.object({
     kind: z.literal("steps"),
     steps: z.array(z.object({ label: z.string(), count: z.number().int().positive() })),
+    durationMs: z.number().int().nonnegative().optional(),
   }),
   z.object({
     kind: z.literal("subagent"),
@@ -149,6 +174,17 @@ export const MessageBlock = z.discriminatedUnion("kind", [
     name: z.string(),
     title: z.string().optional(),
     status: z.enum(["created", "archived", "deleted"]),
+  }),
+  z.object({
+    /** Compact card for a remote cloud coding agent (not the bot computer). */
+    kind: z.literal("cloud_agent"),
+    agentId: z.string(),
+    title: z.string(),
+    status: z.enum(["running", "finished", "failed", "cancelled"]),
+    url: z.string(),
+    branch: z.string().optional(),
+    prUrl: z.string().optional(),
+    latestRunId: z.string().optional(),
   }),
   z.object({
     kind: z.literal("skill_draft"),
@@ -195,6 +231,20 @@ export const MessageBlock = z.discriminatedUnion("kind", [
     fromBotId: Id,
     toBotId: Id,
     text: z.string(),
+    /** Links ownership transfers in one user-started group turn. */
+    hop: z.number().int().positive().optional(),
+  }),
+  z.object({
+    /** A group-chat message delivered into a member bot's own thread. */
+    kind: z.literal("channel_message"),
+    provider: z.string(),
+    /** Per-message network when a provider spans multiple transports. */
+    transport: z.string().optional(),
+    channelId: Id,
+    fromAddress: z.string(),
+    fromLabel: z.string(),
+    text: z.string(),
+    hop: z.number().int().nonnegative().optional(),
   }),
   z.object({
     /** Shown in the sending bot's own chat, so the user can see what it sent. */
@@ -202,6 +252,7 @@ export const MessageBlock = z.discriminatedUnion("kind", [
     toBotId: Id,
     toBotName: z.string(),
     text: z.string(),
+    intent: BotMessageIntent.optional(),
   }),
   z.object({
     /** Delivered into the receiving bot's own chat as the prompt that woke it. */
@@ -209,6 +260,9 @@ export const MessageBlock = z.discriminatedUnion("kind", [
     fromBotId: Id,
     fromBotName: z.string(),
     text: z.string(),
+    intent: BotMessageIntent.optional(),
+    /** Sender-thread echo this delivery answers, when applicable. */
+    returnToMessageId: Id.optional(),
     /** Links in a bot-started chain; absent when a person started it. */
     hop: z.number().int().nonnegative().optional(),
   }),
@@ -217,7 +271,7 @@ export type MessageBlock = z.infer<typeof MessageBlock>;
 
 export const ProductEventSchema = z.object({
   id: Id,
-  workspaceId: Id,
+  spaceId: Id,
   threadId: Id,
   botId: Id,
   seq: z.number().int().nonnegative(),
@@ -240,3 +294,11 @@ export const ThreadMessageSchema = z.object({
   createdAt: z.string(),
 });
 export type ThreadMessage = z.infer<typeof ThreadMessageSchema>;
+
+export function canReactToThreadMessage(message: Pick<ThreadMessage, "id" | "blocks">): boolean {
+  return (
+    !message.id.startsWith("progress:") &&
+    !message.id.startsWith("subagent:") &&
+    !message.blocks.some((block) => block.kind === "channel_message")
+  );
+}

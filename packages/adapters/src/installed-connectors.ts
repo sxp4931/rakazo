@@ -8,10 +8,34 @@ import type {
 import type { PrismaClient } from "@rakazo/db";
 import { z } from "zod";
 import {
+  AuthSchema,
+  applyCredential,
+  asRecord,
+  assertNoSensitiveQuery,
+  HeaderName,
+  isSensitiveHeader,
+  isTransportHeader,
+  PublicHeadersSchema,
+  readBoundedText,
+  requireCredential,
+} from "./connector-http.js";
+import {
   combineSignals,
   redactConnectorPayload,
   sanitizeConnectorError,
 } from "./connector-safety.js";
+import { executeGraphqlOperation, GraphqlConfigSchema } from "./graphql-connectors.js";
+import {
+  CATALOG_EXECUTE,
+  catalogEntries,
+  catalogGroupLabel,
+  DIRECT_TOOL_LIMIT,
+  disambiguateInstalledToolNames,
+  executeLazyCatalogControl,
+  isLazyCatalogControlRoute,
+  lazyCatalogTools,
+  resolveCatalogCall,
+} from "./lazy-tool-catalog.js";
 import {
   assertSafeRemoteUrl,
   callRemoteMcpTool,
@@ -21,49 +45,16 @@ import {
 } from "./remote-mcp.js";
 import type { EncryptedSecretStore } from "./secrets.js";
 
-const HeaderValue = z.string().max(2_048);
-const HeaderName = z
-  .string()
-  .min(1)
-  .max(120)
-  .regex(/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/, "Invalid HTTP header name")
-  .refine((name) => !isTransportHeader(name), "Transport-level headers cannot be customized");
 const ModelHeaderName = HeaderName.refine(
   (name) => !isSensitiveHeader(name),
   "Sensitive headers cannot be model-controlled",
 );
-const AuthSchema = z
-  .object({
-    type: z.enum(["none", "bearer", "header", "query"]).default("none"),
-    name: HeaderName.optional(),
-  })
-  .default({ type: "none" });
-
 const McpAuthSchema = z
   .object({
     type: z.enum(["none", "bearer", "header"]).default("none"),
     name: HeaderName.optional(),
   })
   .default({ type: "none" });
-
-const PublicHeadersSchema = z
-  .record(z.string(), HeaderValue)
-  .default({})
-  .superRefine((headers, context) => {
-    for (const name of Object.keys(headers)) {
-      if (isSensitiveHeader(name)) {
-        context.addIssue({
-          code: "custom",
-          message: `Sensitive header ${name} must use the encrypted credential field`,
-        });
-      } else if (isTransportHeader(name)) {
-        context.addIssue({
-          code: "custom",
-          message: `Transport-level header ${name} cannot be customized`,
-        });
-      }
-    }
-  });
 
 const McpConfigSchema = z.object({
   preset: z.enum(["treg", "custom"]).default("custom"),
@@ -96,6 +87,7 @@ type ApiOperation = z.infer<typeof ApiOperationSchema>;
 type InstalledRow = {
   id: string;
   kind: string;
+  name: string;
   source: string;
   secretId: string | null;
   config: unknown;
@@ -120,11 +112,26 @@ export class InstalledConnectorProvider implements ConnectorProvider {
   }
 
   async discoverTools(context: AdapterContext): Promise<ConnectorTool[]> {
+    const tools = await this.authorizedTools(context);
+    if (tools.length <= DIRECT_TOOL_LIMIT) return tools;
+    return lazyCatalogTools("installed", "installed", "API", catalogEntries(tools));
+  }
+
+  async resolveCall(
+    call: ConnectorCall,
+    context: AdapterContext,
+  ): Promise<{ call: ConnectorCall; tool: ConnectorTool } | undefined> {
+    // Wrappers have no resourceId; real tools always do.
+    if (call.route?.resourceId || call.route?.toolName !== CATALOG_EXECUTE) return undefined;
+    return resolveCatalogCall(call, catalogEntries(await this.authorizedTools(context)));
+  }
+
+  private async authorizedTools(context: AdapterContext): Promise<ConnectorTool[]> {
     const installs = await this.prisma.capabilityInstall.findMany({
       where: {
-        workspaceId: context.workspaceId,
+        spaceId: context.spaceId,
         userId: context.userId,
-        kind: { in: ["mcp", "api"] },
+        kind: { in: ["mcp", "api", "graphql"] },
       },
       orderBy: { createdAt: "asc" },
     });
@@ -135,13 +142,14 @@ export class InstalledConnectorProvider implements ConnectorProvider {
       );
       tools.push(...groups.flat());
     }
-    return tools;
+    return disambiguateInstalledToolNames(tools);
   }
 
   private async discoverInstall(
     install: InstalledRow,
     context: AdapterContext,
   ): Promise<ConnectorTool[]> {
+    const catalogGroup = catalogGroupLabel(install.name, install.kind, install.id);
     try {
       if (install.kind === "mcp") {
         const config = McpConfigSchema.parse(install.config);
@@ -159,6 +167,7 @@ export class InstalledConnectorProvider implements ConnectorProvider {
             connectorId: "installed",
             resourceId: install.id,
             toolName: tool.name,
+            catalogGroup,
           },
         }));
       }
@@ -173,6 +182,22 @@ export class InstalledConnectorProvider implements ConnectorProvider {
             connectorId: "installed",
             resourceId: install.id,
             toolName: operation.id,
+            catalogGroup,
+          },
+        }));
+      }
+      if (install.kind === "graphql") {
+        const config = GraphqlConfigSchema.parse(install.config);
+        return config.operations.map((operation) => ({
+          name: operation.name ?? operation.id,
+          description: operation.description ?? `${operation.operationType} ${operation.fieldName}`,
+          inputSchema: operation.inputSchema,
+          readOnly: operation.readOnly,
+          route: {
+            connectorId: "installed",
+            resourceId: install.id,
+            toolName: operation.id,
+            catalogGroup,
           },
         }));
       }
@@ -183,6 +208,18 @@ export class InstalledConnectorProvider implements ConnectorProvider {
   }
 
   async *execute(call: ConnectorCall, context: AdapterContext): AsyncIterable<ConnectorEvent> {
+    if (call.route?.connectorId === "installed" && isLazyCatalogControlRoute(call.route)) {
+      try {
+        yield* executeLazyCatalogControl(
+          call,
+          catalogEntries(await this.authorizedTools(context)),
+          (resolved) => this.execute(resolved, context),
+        );
+      } catch (error) {
+        yield { type: "error", message: sanitizeConnectorError(error) };
+      }
+      return;
+    }
     const installId = call.route?.resourceId;
     if (!installId) {
       yield { type: "error", message: "Installed connector route is missing" };
@@ -191,9 +228,9 @@ export class InstalledConnectorProvider implements ConnectorProvider {
     const install = await this.prisma.capabilityInstall.findFirst({
       where: {
         id: installId,
-        workspaceId: context.workspaceId,
+        spaceId: context.spaceId,
         userId: context.userId,
-        kind: { in: ["mcp", "api"] },
+        kind: { in: ["mcp", "api", "graphql"] },
       },
     });
     if (!install) {
@@ -215,6 +252,27 @@ export class InstalledConnectorProvider implements ConnectorProvider {
           },
           call.route?.toolName ?? call.tool,
           call.args,
+        );
+        yield {
+          type: "result",
+          data: redactConnectorPayload(result, credential ? [credential] : []),
+        };
+        return;
+      }
+      if (install.kind === "graphql") {
+        const config = GraphqlConfigSchema.parse(install.config);
+        const operation = config.operations.find(
+          (candidate) => candidate.id === (call.route?.toolName ?? call.tool),
+        );
+        if (!operation) throw new Error("GraphQL operation is unavailable");
+        const result = await executeGraphqlOperation(
+          install.source,
+          config,
+          operation,
+          call.args,
+          credential,
+          context.signal,
+          this.remote,
         );
         yield {
           type: "result",
@@ -256,7 +314,7 @@ export class InstalledConnectorProvider implements ConnectorProvider {
     const row = await this.prisma.secret.findFirst({
       where: {
         id: install.secretId,
-        workspaceId: context.workspaceId,
+        spaceId: context.spaceId,
         userId: context.userId,
       },
     });
@@ -327,7 +385,7 @@ async function loadOpenApiDocument(
   signal?: AbortSignal,
   remote: RemoteConnectorDependencies = {},
 ): Promise<Record<string, unknown>> {
-  const safeFetch = createSafeRemoteFetch(remote.fetch ?? globalThis.fetch, remote.resolveHostname);
+  const safeFetch = createSafeRemoteFetch(remote.fetch, remote.resolveHostname);
   try {
     const response = await safeFetch(url, {
       headers,
@@ -492,7 +550,7 @@ async function executeApiOperation(
     headers["content-type"] = "application/json";
   }
   applyCredential(url, headers, config.auth, credential);
-  const safeFetch = createSafeRemoteFetch(remote.fetch ?? globalThis.fetch, remote.resolveHostname);
+  const safeFetch = createSafeRemoteFetch(remote.fetch, remote.resolveHostname);
   try {
     const response = await safeFetch(url, {
       method: operation.method,
@@ -528,78 +586,4 @@ function joinApiUrl(baseUrl: string, path: string): URL {
   base.search = "";
   base.hash = "";
   return base;
-}
-
-function requireCredential(auth: z.infer<typeof AuthSchema>, credential?: string): void {
-  if (auth.type !== "none" && !credential) throw new Error("This connector requires a credential");
-}
-
-function applyCredential(
-  url: URL,
-  headers: Record<string, string>,
-  auth: z.infer<typeof AuthSchema>,
-  credential?: string,
-): void {
-  if (!credential || auth.type === "none") return;
-  if (auth.type === "query") {
-    if (!auth.name) throw new Error("Authentication query name is required");
-    url.searchParams.set(auth.name, credential);
-    return;
-  }
-  const name = auth.type === "header" ? auth.name : "authorization";
-  if (!name) throw new Error("Authentication header name is required");
-  headers[name] = auth.type === "bearer" ? `Bearer ${credential}` : credential;
-}
-
-function isSensitiveHeader(name: string): boolean {
-  return /(authorization|cookie|api[-_]?key|token|secret)/i.test(name);
-}
-
-function isTransportHeader(name: string): boolean {
-  return /^(connection|content-length|host|proxy-authorization|proxy-connection|te|trailer|transfer-encoding|upgrade)$/i.test(
-    name,
-  );
-}
-
-function assertNoSensitiveQuery(value: string): void {
-  let url: URL;
-  try {
-    url = new URL(value);
-  } catch {
-    throw new Error("Connector URL is invalid");
-  }
-  for (const name of url.searchParams.keys()) {
-    if (/(auth|credential|key|password|secret|token)/i.test(name)) {
-      throw new Error(`Connector URL must put ${name} in the encrypted credential field`);
-    }
-  }
-}
-
-async function readBoundedText(
-  response: Response,
-  maximumBytes: number,
-): Promise<{ text: string; truncated: boolean }> {
-  if (!response.body) return { text: "", truncated: false };
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let bytes = 0;
-  let text = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) return { text: text + decoder.decode(), truncated: false };
-    const remaining = maximumBytes - bytes;
-    if (value.byteLength > remaining) {
-      if (remaining > 0) text += decoder.decode(value.subarray(0, remaining), { stream: true });
-      await reader.cancel().catch(() => undefined);
-      return { text: text + decoder.decode(), truncated: true };
-    }
-    bytes += value.byteLength;
-    text += decoder.decode(value, { stream: true });
-  }
-}
-
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
 }

@@ -1,10 +1,16 @@
 import type { AdapterContext, ManagedConnectorProvider } from "@rakazo/adapter-kit";
-import type { Prisma, PrismaClient } from "@rakazo/db";
+import { SecretAskPurpose } from "@rakazo/contracts";
+import type { PrismaClient, RunSecretWriter } from "@rakazo/db";
 import { type ApprovalPausedToolResult, resolveDuplicateEffectGate } from "./approval-effect.js";
+import { storeBotSecret } from "./bot-secrets.js";
 import type { EncryptedSecretStore } from "./secrets.js";
 
 export function runSecretKind(runId: string): string {
   return `run-secret:${runId}`;
+}
+
+export function normalizeSecretAskPurpose(purpose: string | undefined): SecretAskPurpose {
+  return SecretAskPurpose.safeParse(purpose).data ?? "otp";
 }
 
 export function secretPausedToolResult(): ApprovalPausedToolResult {
@@ -72,14 +78,14 @@ export function resolveMissingRunSecretAction(
 export async function reconcileManagedConnection(
   prisma: PrismaClient,
   connectors: { managed(id: string): ManagedConnectorProvider | undefined } | undefined,
-  run: { workspaceId: string; userId: string },
+  run: { spaceId: string; userId: string },
   context: AdapterContext,
   connectionId: string,
 ): Promise<"connected" | "pending" | "missing"> {
   const row = await prisma.connection.findFirst({
     where: {
       id: connectionId,
-      workspaceId: run.workspaceId,
+      spaceId: run.spaceId,
       userId: run.userId,
     },
   });
@@ -103,23 +109,23 @@ export async function reconcileManagedConnection(
   return "pending";
 }
 
-export interface RunSecretWriter {
-  store(input: {
-    runId: string;
-    userId: string;
-    workspaceId: string;
-    plaintext: string;
-    tx: Prisma.TransactionClient;
-  }): Promise<void>;
-}
-
 export function createRunSecretWriter(secretStore: EncryptedSecretStore): RunSecretWriter {
   return {
-    async store({ runId, userId, workspaceId, plaintext, tx }) {
+    async store({ runId, userId, spaceId, botId, credential, plaintext, tx }) {
+      if (credential) {
+        await storeBotSecret({
+          tx,
+          secretStore,
+          scope: { userId, spaceId, botId },
+          destination: credential,
+          plaintext,
+        });
+        return;
+      }
       const stored = await secretStore.put(plaintext, {
         operationId: runId,
         traceId: runId,
-        workspaceId,
+        spaceId,
         userId,
         signal: new AbortController().signal,
       });
@@ -127,7 +133,7 @@ export function createRunSecretWriter(secretStore: EncryptedSecretStore): RunSec
         data: {
           id: stored.id,
           userId,
-          workspaceId,
+          spaceId,
           kind: runSecretKind(runId),
           ciphertext: stored.ciphertext,
         },
@@ -139,7 +145,7 @@ export function createRunSecretWriter(secretStore: EncryptedSecretStore): RunSec
 export async function tryCompleteConnectionWithCode(
   prisma: PrismaClient,
   connectors: { managed(id: string): ManagedConnectorProvider | undefined } | undefined,
-  run: { workspaceId: string; userId: string },
+  run: { spaceId: string; userId: string },
   context: AdapterContext,
   connectionId: string,
   code: string,
@@ -147,7 +153,7 @@ export async function tryCompleteConnectionWithCode(
   const row = await prisma.connection.findFirst({
     where: {
       id: connectionId,
-      workspaceId: run.workspaceId,
+      spaceId: run.spaceId,
       userId: run.userId,
       status: { in: ["pending", "connected"] },
     },

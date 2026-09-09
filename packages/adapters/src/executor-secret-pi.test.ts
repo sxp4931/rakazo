@@ -84,7 +84,7 @@ const secretTool: ConnectorTool = {
 const runContext = {
   operationId: "secret-pi",
   traceId: "secret-pi",
-  workspaceId: "workspace",
+  spaceId: "workspace",
   userId: "user",
   signal: new AbortController().signal,
 };

@@ -1,3 +1,6 @@
+import { readBoundedResponseBytes } from "@rakazo/core";
+import { rpc, selectedSpaceId, withSpaceHeaders } from "./rpc.js";
+
 export type SpeechStatus = "idle" | "preparing" | "speaking";
 
 export interface SpeechSnapshot {
@@ -17,6 +20,9 @@ interface SpeakOptions {
 type TtsErrorBody = { error?: string };
 
 const IDLE: SpeechSnapshot = { status: "idle" };
+export const VOICE_RESPONSE_TIMEOUT_MS = 70_000;
+export const MAX_VOICE_AUDIO_BYTES = 16 * 1024 * 1024;
+const MAX_VOICE_ERROR_BYTES = 64 * 1024;
 
 export class Speaker {
   private snapshot: SpeechSnapshot = IDLE;
@@ -76,12 +82,13 @@ export class Speaker {
     const controller = new AbortController();
     this.request = controller;
     const live = () => this.token === mine && !controller.signal.aborted;
+    const spaceId = selectedSpaceId();
 
     this.set({ status: "preparing", botId: opts.botId, messageId: opts.messageId });
     let utterances: string[];
     try {
       utterances = await withAbort(controller.signal, () =>
-        this.prepare(text, opts, controller.signal),
+        this.prepare(text, opts, controller.signal, spaceId),
       );
     } catch (error) {
       if (live()) {
@@ -99,7 +106,7 @@ export class Speaker {
 
     type Rendered = { blob: Blob; error?: never } | { blob?: never; error: unknown };
     const render = (utterance: string): Promise<Rendered> =>
-      this.render(utterance, opts, controller.signal).then(
+      this.render(utterance, opts, controller.signal, spaceId).then(
         (blob) => ({ blob }),
         (error: unknown) => ({ error }),
       );
@@ -138,11 +145,15 @@ export class Speaker {
     if (this.request === controller) this.request = null;
   }
 
-  private async prepare(text: string, opts: SpeakOptions, signal: AbortSignal): Promise<string[]> {
-    const { rpc } = await import("./rpc.js");
+  private async prepare(
+    text: string,
+    opts: SpeakOptions,
+    signal: AbortSignal,
+    spaceId: string | null,
+  ): Promise<string[]> {
     const body = await rpc.voice.prepare(
       { text, voiceId: opts.voiceId, botId: opts.botId },
-      { signal },
+      { signal, context: { spaceId } },
     );
     if (!body.ready) {
       throw new Error("Add a voice provider key and pick a voice in Voice settings.");
@@ -150,19 +161,34 @@ export class Speaker {
     return body.utterances ?? [];
   }
 
-  private async render(text: string, opts: SpeakOptions, signal: AbortSignal): Promise<Blob> {
-    const res = await fetch("/api/voice/speak", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify({ text, voiceId: opts.voiceId, botId: opts.botId }),
-      signal,
-    });
-    if (!res.ok) {
-      const body: TtsErrorBody = await res.json().catch(() => ({}));
-      throw new Error(body.error ?? `the voice service returned ${res.status}`);
+  private async render(
+    text: string,
+    opts: SpeakOptions,
+    signal: AbortSignal,
+    spaceId: string | null,
+  ): Promise<Blob> {
+    const deadline = requestDeadline(signal, VOICE_RESPONSE_TIMEOUT_MS);
+    try {
+      const res = await withAbort(deadline.signal, () =>
+        fetch("/api/voice/speak", {
+          method: "POST",
+          headers: withSpaceHeaders({ "content-type": "application/json" }, spaceId),
+          credentials: "include",
+          body: JSON.stringify({ text, voiceId: opts.voiceId, botId: opts.botId }),
+          signal: deadline.signal,
+        }),
+      );
+      if (!res.ok) {
+        const body = await readVoiceError(res, deadline.signal);
+        throw new Error(body.error ?? `the voice service returned ${res.status}`);
+      }
+      const bytes = await readResponseBytes(res, MAX_VOICE_AUDIO_BYTES, deadline.signal);
+      return new Blob([new Uint8Array(bytes)], {
+        type: res.headers.get("content-type") ?? "audio/mpeg",
+      });
+    } finally {
+      deadline.dispose();
     }
-    return res.blob();
   }
 
   private play(blob: Blob, live: () => boolean): Promise<boolean> {
@@ -211,4 +237,57 @@ function withAbort<T>(signal: AbortSignal, run: () => Promise<T>): Promise<T> {
       },
     );
   });
+}
+
+function requestDeadline(parent: AbortSignal, timeoutMs: number) {
+  const controller = new AbortController();
+  const abortFromParent = () => controller.abort(parent.reason);
+  if (parent.aborted) abortFromParent();
+  else parent.addEventListener("abort", abortFromParent, { once: true });
+  const timer = setTimeout(
+    () => controller.abort(new Error("Voice request timed out.")),
+    timeoutMs,
+  );
+  return {
+    signal: controller.signal,
+    dispose() {
+      clearTimeout(timer);
+      parent.removeEventListener("abort", abortFromParent);
+    },
+  };
+}
+
+async function readVoiceError(response: Response, signal: AbortSignal): Promise<TtsErrorBody> {
+  const bytes = await readResponseBytes(response, MAX_VOICE_ERROR_BYTES, signal);
+  try {
+    const parsed = JSON.parse(new TextDecoder().decode(bytes)) as unknown;
+    return parsed && typeof parsed === "object" ? (parsed as TtsErrorBody) : {};
+  } catch {
+    return {};
+  }
+}
+
+async function readResponseBytes(
+  response: Response,
+  maxBytes: number,
+  signal: AbortSignal,
+): Promise<Uint8Array> {
+  const declared = Number(response.headers.get("content-length") ?? 0);
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    cancelResponse(response);
+    throw new Error("Voice response is too large.");
+  }
+  return readBoundedResponseBytes(response, {
+    maxBytes,
+    tooLargeMessage: "Voice response is too large.",
+    read: (operation) => withAbort(signal, operation),
+  });
+}
+
+function cancelResponse(response: Response): void {
+  try {
+    void Promise.resolve(response.body?.cancel()).catch(() => undefined);
+  } catch {
+    // Response cleanup is best-effort.
+  }
 }

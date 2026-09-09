@@ -1,29 +1,72 @@
+import { timingSafeEqual } from "node:crypto";
 import http from "node:http";
 import https from "node:https";
 import net from "node:net";
 import path from "node:path";
 import tls from "node:tls";
 import { lingui } from "@lingui/vite-plugin";
+import type { DesktopStackProbeResponse } from "@rakazo/contracts";
+import {
+  safeScreenProxyResponseHeaders,
+  stripSensitiveHandshakeHeaders,
+} from "@rakazo/core/node/screen-proxy-response";
+import babel from "@rolldown/plugin-babel";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
-import { defineConfig, loadEnv, type PreviewServer, type ViteDevServer } from "vite";
+import type { PreviewServer, ViteDevServer } from "vite";
+import { defineConfig, loadEnv } from "vite";
 import { resolveScreenProxySecret } from "../../packages/core/src/secrets-guard.ts";
 import {
   resolveNovncTarget,
   safeProxyHeaders,
-  safeProxyResponseHeaders,
-  stripSensitiveHandshakeHeaders,
+  watchScreenAuthorization,
 } from "./src/screen-proxy.js";
 
 const webPort = Number(process.env.WEB_PORT ?? 5173);
+const DESKTOP_STACK_PROBE_PATH = "/.well-known/rakazo-desktop-stack";
+const DESKTOP_STACK_TOKEN_HEADER = "x-rakazo-desktop-stack-token";
 
-function attachNovncProxy(server: ViteDevServer | PreviewServer, secret: string) {
+function equalStackToken(expected: string, supplied: string | string[] | undefined) {
+  if (expected === "" || typeof supplied !== "string") return false;
+  const expectedBytes = Buffer.from(expected);
+  const suppliedBytes = Buffer.from(supplied);
+  return (
+    expectedBytes.byteLength === suppliedBytes.byteLength &&
+    timingSafeEqual(expectedBytes, suppliedBytes)
+  );
+}
+
+function attachDesktopStackProbe(
+  server: ViteDevServer | PreviewServer,
+  token: string,
+  imageTag: string,
+) {
   server.middlewares.use((req, res, next) => {
+    if (req.url?.split("?", 1)[0] !== DESKTOP_STACK_PROBE_PATH) {
+      next();
+      return;
+    }
+    if (!equalStackToken(token, req.headers[DESKTOP_STACK_TOKEN_HEADER])) {
+      res.statusCode = 404;
+      res.end("Not found");
+      return;
+    }
+    const body: DesktopStackProbeResponse = { ok: true, imageTag };
+    res.statusCode = 200;
+    res.setHeader("cache-control", "no-store");
+    res.setHeader("content-type", "application/json; charset=utf-8");
+    res.end(JSON.stringify(body));
+  });
+}
+
+function attachNovncProxy(server: ViteDevServer | PreviewServer, secret: string, api: string) {
+  server.middlewares.use(async (req, res, next) => {
     if (!req.url?.startsWith("/novnc/")) {
       next();
       return;
     }
-    const target = resolveNovncTarget(req.url, secret);
+    const target = await resolveNovncTarget(req.url, secret, api);
+    if (res.destroyed) return;
     if (!target) {
       res.statusCode = 403;
       res.end("Invalid or expired screen capability");
@@ -44,23 +87,37 @@ function attachNovncProxy(server: ViteDevServer | PreviewServer, secret: string)
         ...(target.protocol === "https:" ? { servername: target.hostname } : {}),
       },
       (incoming) => {
-        res.writeHead(incoming.statusCode ?? 502, {
-          ...safeProxyResponseHeaders(incoming.headers),
-          "access-control-allow-origin": "*",
-        });
+        res.writeHead(incoming.statusCode ?? 502, safeScreenProxyResponseHeaders(incoming.headers));
         incoming.pipe(res);
       },
     );
-    upstream.on("error", (error) => {
+    const stopChecking = watchScreenAuthorization(
+      async () => Boolean(await resolveNovncTarget(req.url, secret, api)),
+      () => {
+        upstream.destroy();
+        res.destroy();
+      },
+    );
+    res.once("close", () => {
+      stopChecking();
+      upstream.destroy();
+    });
+    upstream.on("error", () => {
+      stopChecking();
+      if (res.headersSent) {
+        res.destroy();
+        return;
+      }
       res.statusCode = 502;
-      res.end(error.message);
+      res.end("Screen unavailable");
     });
     req.pipe(upstream);
   });
 
-  server.httpServer?.on("upgrade", (req, socket, head) => {
+  server.httpServer?.on("upgrade", async (req, socket, head) => {
     if (!req.url?.startsWith("/novnc/")) return;
-    const target = resolveNovncTarget(req.url, secret);
+    const target = await resolveNovncTarget(req.url, secret, api);
+    if (socket.destroyed) return;
     if (!target) {
       socket.destroy();
       return;
@@ -69,6 +126,21 @@ function attachNovncProxy(server: ViteDevServer | PreviewServer, secret: string)
       target.protocol === "https:"
         ? tls.connect({ port: target.port, host: target.hostname, servername: target.hostname })
         : net.connect(target.port, target.hostname);
+    const stopChecking = watchScreenAuthorization(
+      async () => Boolean(await resolveNovncTarget(req.url, secret, api)),
+      () => {
+        socket.destroy();
+        upstream.destroy();
+      },
+    );
+    socket.once("close", () => {
+      stopChecking();
+      upstream.destroy();
+    });
+    upstream.once("close", () => {
+      stopChecking();
+      socket.destroy();
+    });
     upstream.once(target.protocol === "https:" ? "secureConnect" : "connect", () => {
       const headerLines = [
         `${req.method ?? "GET"} ${target.path} HTTP/1.1`,
@@ -127,15 +199,21 @@ export default defineConfig(({ mode }) => {
       BETTER_AUTH_SECRET: process.env.BETTER_AUTH_SECRET ?? rootEnv.BETTER_AUTH_SECRET,
     });
   const performanceAssetDelayMs = Number(process.env.RAKAZO_PERFORMANCE_ASSET_DELAY_MS ?? 0);
+  const desktopStackToken =
+    process.env.RAKAZO_DESKTOP_STACK_TOKEN ?? rootEnv.RAKAZO_DESKTOP_STACK_TOKEN ?? "";
+  const imageTag = process.env.RAKAZO_IMAGE_TAG ?? rootEnv.RAKAZO_IMAGE_TAG ?? "edge";
   return {
     plugins: [
-      react({
-        babel: {
-          plugins: ["@lingui/babel-plugin-lingui-macro"],
-        },
-      }),
+      react(),
+      babel({ plugins: ["@lingui/babel-plugin-lingui-macro"] }),
       lingui(),
       tailwindcss(),
+      {
+        name: "rakazo-desktop-stack-probe",
+        configureServer: (server) => attachDesktopStackProbe(server, desktopStackToken, imageTag),
+        configurePreviewServer: (server) =>
+          attachDesktopStackProbe(server, desktopStackToken, imageTag),
+      },
       {
         name: "rakazo-performance-asset-delay",
         configurePreviewServer(server) {
@@ -152,8 +230,8 @@ export default defineConfig(({ mode }) => {
       },
       {
         name: "rakazo-novnc-proxy",
-        configureServer: (server) => attachNovncProxy(server, screenProxySecret()),
-        configurePreviewServer: (server) => attachNovncProxy(server, screenProxySecret()),
+        configureServer: (server) => attachNovncProxy(server, screenProxySecret(), api),
+        configurePreviewServer: (server) => attachNovncProxy(server, screenProxySecret(), api),
       },
     ],
     server: {

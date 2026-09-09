@@ -30,7 +30,7 @@ export async function attachWorkspaceFileToThread(
     artifacts: ArtifactStore;
   },
   input: {
-    workspaceId: string;
+    spaceId: string;
     userId: string;
     botId: string;
     groupId?: string;
@@ -53,7 +53,7 @@ export async function attachWorkspaceFileToThread(
   const context = {
     operationId: input.operationId,
     traceId: input.operationId,
-    workspaceId: input.workspaceId,
+    spaceId: input.spaceId,
     userId: input.userId,
     botId: input.botId,
     signal: new AbortController().signal,
@@ -63,7 +63,7 @@ export async function attachWorkspaceFileToThread(
   const row = await deps.prisma.artifact
     .create({
       data: {
-        workspaceId: input.workspaceId,
+        spaceId: input.spaceId,
         userId: input.userId,
         botId: input.botId,
         groupId: input.groupId,
@@ -101,6 +101,7 @@ export async function materializeCurrentTurnFiles(
     context: AdapterContext & { botId: string };
     computer: ComputerRef;
     computerMode: ComputerMode;
+    markWorkspaceDirty?: () => void;
   },
 ): Promise<MaterializedThreadFile[]> {
   const fileBlocks = blocks?.filter(
@@ -111,7 +112,7 @@ export async function materializeCurrentTurnFiles(
   const rows = await deps.prisma.artifact.findMany({
     where: {
       id: { in: fileBlocks.map((block) => block.artifactId) },
-      workspaceId: input.context.workspaceId,
+      spaceId: input.context.spaceId,
       userId: input.context.userId,
     },
   });
@@ -126,6 +127,7 @@ export async function materializeCurrentTurnFiles(
       throw new Error(`Attached file exceeds the 10 MiB limit: ${row.name}`);
     }
     const relativePath = `attachments/${row.id}${attachmentExtensionForMimeType(row.mimeType)}`;
+    input.markWorkspaceDirty?.();
     await deps.sandbox.writeFile(
       input.computer,
       {

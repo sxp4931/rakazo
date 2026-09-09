@@ -1,7 +1,10 @@
 import type { AdapterContext, ConnectorEvent, ConnectorTool } from "@rakazo/adapter-kit";
-import { describe, expect, it } from "vitest";
+import { createLogger, createTestSink, installLogger } from "@rakazo/logging";
+import { describe, expect, it, vi } from "vitest";
+import { composioToolkitDirectory } from "./composio-catalog-cache.js";
 import {
   asConnectorTools,
+  ComposioConnector,
   CompositeConnector,
   collectLogIds,
   collectPages,
@@ -15,6 +18,113 @@ import {
   sanitizeComposioError,
 } from "./composio-connector.js";
 import { DestinationEmulator } from "./destination-emulator.js";
+
+const composioSdkState = vi.hoisted(() => ({
+  created: [] as Array<{ userId: string; config: Record<string, unknown> }>,
+  directoryFails: false,
+  executions: [] as Array<{ tool: string; args: Record<string, unknown> }>,
+  connectedAccounts: {
+    list: async (_query?: Record<string, unknown>) => ({ items: [] as Array<{ id: string }> }),
+    waitForConnection: async (id: string, _timeout?: number) => ({ id: `resolved-${id}` }),
+    get: async (id: string) => ({ id, userId: "user-1" }),
+    delete: async (_id: string) => undefined,
+  },
+  sessions: new Map<
+    string,
+    {
+      sessionId: string;
+      toolkits?: () => Promise<{
+        items: Array<{
+          slug: string;
+          name: string;
+          logo: string | null;
+          isNoAuth: boolean;
+          connection?: { isActive?: boolean; connectedAccount?: { id: string } };
+        }>;
+        cursor?: string;
+      }>;
+      tools?: () => Promise<unknown[]>;
+      execute?: (
+        tool: string,
+        args: Record<string, unknown>,
+      ) => Promise<{
+        data: Record<string, unknown>;
+        error: null;
+        logId: string;
+      }>;
+    }
+  >(),
+}));
+
+vi.mock("@composio/core", () => ({
+  Composio: class {
+    readonly sessions = {
+      use: async (sessionId: string) => {
+        const session = composioSdkState.sessions.get(sessionId);
+        if (!session) throw new Error(`unknown session ${sessionId}`);
+        return session;
+      },
+    };
+
+    readonly connectedAccounts = {
+      list: (query?: Record<string, unknown>) => composioSdkState.connectedAccounts.list(query),
+      waitForConnection: (id: string, timeout?: number) =>
+        composioSdkState.connectedAccounts.waitForConnection(id, timeout),
+      get: (id: string) => composioSdkState.connectedAccounts.get(id),
+      delete: (id: string) => composioSdkState.connectedAccounts.delete(id),
+    };
+
+    async create(userId: string, config: Record<string, unknown>) {
+      composioSdkState.created.push({ userId, config });
+      const toolkits = Array.isArray(config.toolkits) ? config.toolkits : [];
+      if (toolkits.length === 0) {
+        const session = {
+          sessionId: "catalog-session",
+          toolkits: async () => {
+            if (composioSdkState.directoryFails) throw new Error("directory unavailable");
+            return {
+              items: [
+                {
+                  slug: "GITHUB",
+                  name: "GitHub",
+                  logo: null,
+                  isNoAuth: false,
+                  connection: { isActive: true, connectedAccount: { id: "ca-github" } },
+                },
+              ],
+            };
+          },
+        };
+        composioSdkState.sessions.set(session.sessionId, session);
+        return session;
+      }
+
+      const scopedToCanonicalGithub = toolkits.includes("GITHUB");
+      const session = {
+        sessionId: scopedToCanonicalGithub ? "github-session" : "unscoped-session",
+        tools: async () =>
+          scopedToCanonicalGithub
+            ? [
+                {
+                  type: "function",
+                  function: {
+                    name: "GITHUB_GET_REPOS",
+                    description: "List GitHub repositories",
+                    parameters: { type: "object", properties: {} },
+                  },
+                },
+              ]
+            : [],
+        execute: async (tool: string, args: Record<string, unknown>) => {
+          composioSdkState.executions.push({ tool, args });
+          return { data: { ok: true }, error: null, logId: "log-github" };
+        },
+      };
+      composioSdkState.sessions.set(session.sessionId, session);
+      return session;
+    }
+  },
+}));
 
 describe("composio tool mapping", () => {
   it("maps OpenAI-style session tools and raw slugs", () => {
@@ -72,6 +182,35 @@ describe("composio tool mapping", () => {
     expect(events).toEqual([{ type: "result", data: { provider: "composio" } }]);
   });
 
+  it("logs sanitized connector discovery failures", async () => {
+    const destination = new DestinationEmulator();
+    const failing = {
+      describe: () => ({ ...destination.describe(), id: "failing" }),
+      discoverTools: async () => {
+        throw new Error("denied ak_secretvaluehere");
+      },
+      execute: async function* () {},
+    } as never;
+    const connector = new CompositeConnector(destination, [failing]);
+    const sink = createTestSink();
+    installLogger(createLogger({ service: "rakazo-api", sinks: [sink] }));
+
+    try {
+      await expect(connector.discoverTools({ userId: "u" } as AdapterContext)).resolves.toEqual([
+        expect.objectContaining({ name: "destination.write" }),
+      ]);
+      expect(sink.events[0]).toMatchObject({
+        message: "connector discovery failed",
+        "connector.id": "failing",
+      });
+      const logged = JSON.stringify(sink.events);
+      expect(logged).toContain("[redacted]");
+      expect(logged).not.toContain("ak_secretvaluehere");
+    } finally {
+      installLogger(createLogger({ service: "rakazo-api", level: "off", sinks: [] }));
+    }
+  });
+
   it("redacts project keys from errors", () => {
     expect(sanitizeComposioError("denied ak_secretvaluehere")).toContain("[redacted]");
     expect(sanitizeComposioError("denied ak_secretvaluehere")).not.toContain("ak_secret");
@@ -114,7 +253,345 @@ describe("composio tool mapping", () => {
 
   it("keys execute sessions by sorted unique toolkits", () => {
     expect(executeSessionKey(["hackernews", "gmail", "hackernews"])).toBe("gmail,hackernews");
+    expect(executeSessionKey(["github", "GITHUB"])).toBe("github");
     expect(executeSessionKey([])).toBe("");
+    expect(executeSessionKey(["GMAIL"], { GMAIL: ["ca-work", "ca-personal", "ca-work"] })).toBe(
+      "GMAIL|GMAIL:ca-personal,ca-work",
+    );
+  });
+
+  it("pins every connected account into multi-account execute sessions", async () => {
+    composioSdkState.created.length = 0;
+    composioSdkState.sessions.clear();
+    composioToolkitDirectory.invalidate();
+
+    const connector = new ComposioConnector();
+    await connector.discoverTools({
+      operationId: "composio-multi-account",
+      traceId: "composio-multi-account",
+      spaceId: "workspace",
+      userId: "user-1",
+      signal: new AbortController().signal,
+      connectedConnections: [
+        {
+          id: "connection-personal",
+          connectorId: "composio",
+          externalId: "github",
+          displayName: "Personal",
+          providerRef: "ca-personal",
+        },
+        {
+          id: "connection-work",
+          connectorId: "composio",
+          externalId: "GITHUB",
+          displayName: "Work",
+          providerRef: "ca-work",
+        },
+        {
+          id: "connection-personal-dup",
+          connectorId: "composio",
+          externalId: "GitHub",
+          displayName: "Personal again",
+          providerRef: "ca-personal",
+        },
+        {
+          id: "connection-noauth",
+          connectorId: "composio",
+          externalId: "GITHUB",
+          displayName: "Legacy",
+          providerRef: "github",
+        },
+      ],
+    });
+
+    expect(composioSdkState.created.at(-1)).toEqual({
+      userId: "user-1",
+      config: {
+        manageConnections: false,
+        sandbox: { enable: false },
+        toolkits: ["GITHUB"],
+        connectedAccounts: { GITHUB: ["ca-personal", "ca-work"] },
+        multiAccount: {
+          enable: true,
+          maxAccountsPerToolkit: 10,
+          requireExplicitSelection: true,
+        },
+      },
+    });
+  });
+
+  it("pins a single concrete account without enabling multi-account mode", async () => {
+    composioSdkState.created.length = 0;
+    composioSdkState.sessions.clear();
+    composioToolkitDirectory.invalidate();
+
+    const connector = new ComposioConnector();
+    await connector.discoverTools({
+      operationId: "composio-single-account",
+      traceId: "composio-single-account",
+      spaceId: "workspace",
+      userId: "user-1",
+      signal: new AbortController().signal,
+      connectedConnections: [
+        {
+          id: "connection-work",
+          connectorId: "composio",
+          externalId: "gmail",
+          displayName: "Work",
+          providerRef: "ca-work",
+        },
+      ],
+    });
+
+    expect(composioSdkState.created.at(-1)).toEqual({
+      userId: "user-1",
+      config: {
+        manageConnections: false,
+        sandbox: { enable: false },
+        toolkits: ["GMAIL"],
+        connectedAccounts: { GMAIL: ["ca-work"] },
+      },
+    });
+  });
+
+  it("omits connectedAccounts and multiAccount for legacy slug-only refs", async () => {
+    composioSdkState.created.length = 0;
+    composioSdkState.sessions.clear();
+    composioToolkitDirectory.invalidate();
+
+    const connector = new ComposioConnector();
+    await connector.discoverTools({
+      operationId: "composio-legacy-only",
+      traceId: "composio-legacy-only",
+      spaceId: "workspace",
+      userId: "user-1",
+      signal: new AbortController().signal,
+      connectedConnections: [
+        {
+          id: "connection-legacy",
+          connectorId: "composio",
+          externalId: "GITHUB",
+          displayName: "Legacy",
+          providerRef: "github",
+        },
+        {
+          id: "connection-hackernews",
+          connectorId: "composio",
+          externalId: "hackernews",
+          displayName: "Hacker News",
+          providerRef: "HACKERNEWS",
+        },
+      ],
+    });
+
+    expect(composioSdkState.created.at(-1)).toEqual({
+      userId: "user-1",
+      config: {
+        manageConnections: false,
+        sandbox: { enable: false },
+        toolkits: ["GITHUB", "HACKERNEWS"],
+      },
+    });
+  });
+
+  it("uses catalog-canonical toolkit slugs without preloading every tool", async () => {
+    composioSdkState.created.length = 0;
+    composioSdkState.executions.length = 0;
+    composioSdkState.sessions.clear();
+    composioToolkitDirectory.invalidate();
+
+    const connector = new ComposioConnector();
+    const context: AdapterContext = {
+      operationId: "composio-canonical-slug",
+      traceId: "composio-canonical-slug",
+      spaceId: "workspace",
+      userId: "user-1",
+      signal: new AbortController().signal,
+      connectedConnections: [
+        {
+          id: "connection-github",
+          connectorId: "composio",
+          externalId: "github",
+          displayName: "GitHub",
+        },
+      ],
+    };
+
+    await expect(connector.discoverTools(context)).resolves.toContainEqual(
+      expect.objectContaining({ name: "GITHUB_GET_REPOS" }),
+    );
+    expect(
+      composioSdkState.created.map(({ userId, config }) => ({
+        userId,
+        toolkits: config.toolkits,
+        sessionPreset: config.sessionPreset,
+      })),
+    ).toEqual([
+      { userId: "__rakazo_catalog__", toolkits: undefined, sessionPreset: undefined },
+      { userId: "user-1", toolkits: ["GITHUB"], sessionPreset: undefined },
+    ]);
+
+    const events: ConnectorEvent[] = [];
+    for await (const event of connector.execute(
+      {
+        tool: "GITHUB_GET_REPOS",
+        args: { owner: "composio" },
+        executionId: "composio-canonical-execution",
+      },
+      context,
+    )) {
+      events.push(event);
+    }
+    expect(events).toContainEqual(expect.objectContaining({ type: "result" }));
+    expect(composioSdkState.executions).toEqual([
+      { tool: "GITHUB_GET_REPOS", args: { owner: "composio" } },
+    ]);
+    await expect(connector.connectionReady(context, "github")).resolves.toBe(true);
+    await expect(connector.connectedAccountId("user-1", "github")).resolves.toBe("ca-github");
+  });
+
+  it("resolves connection-request ids to connected-account ids and skips sibling refs", async () => {
+    composioSdkState.created.length = 0;
+    composioSdkState.sessions.clear();
+    composioToolkitDirectory.invalidate();
+    composioSdkState.connectedAccounts.list = async () => ({
+      items: [{ id: "ca-personal" }, { id: "ca-work" }],
+    });
+    composioSdkState.connectedAccounts.waitForConnection = async (id: string) => {
+      if (id === "req-work") return { id: "ca-work" };
+      if (id === "req-missing") throw new Error("timeout");
+      return { id: `resolved-${id}` };
+    };
+
+    const connector = new ComposioConnector();
+    await expect(
+      connector.resolveConnectedAccountId("user-1", "gmail", "req-work", ["ca-personal"]),
+    ).resolves.toBe("ca-work");
+    await expect(
+      connector.resolveConnectedAccountId("user-1", "gmail", "gmail", ["ca-personal"]),
+    ).resolves.toBe("ca-work");
+    await expect(
+      connector.resolveConnectedAccountId("user-1", "gmail", "req-missing", [
+        "ca-personal",
+        "ca-work",
+      ]),
+    ).resolves.toBeUndefined();
+  });
+
+  it("cancels pending authorization requests by request id without waiting", async () => {
+    const deleted: string[] = [];
+    const waited: string[] = [];
+    composioSdkState.connectedAccounts.waitForConnection = async (id: string) => {
+      waited.push(id);
+      throw new Error(`should not wait for ${id}`);
+    };
+    composioSdkState.connectedAccounts.delete = async (id: string) => {
+      deleted.push(id);
+    };
+    const connector = new ComposioConnector();
+    await connector.cancelAuthorizationRequest("req-pending-1", {
+      operationId: "test",
+      traceId: "test",
+      spaceId: "workspace",
+      userId: "user-1",
+      signal: new AbortController().signal,
+    });
+    expect(waited).toEqual([]);
+    expect(deleted).toEqual(["req-pending-1"]);
+  });
+
+  it.each([{ status: 404 }, { statusCode: 404 }])(
+    "ignores missing authorization requests during cancellation (%o)",
+    async (notFound) => {
+      composioSdkState.connectedAccounts.delete = async () => {
+        throw Object.assign(new Error("not found"), notFound);
+      };
+      const connector = new ComposioConnector();
+
+      await expect(
+        connector.cancelAuthorizationRequest("req-missing", {
+          operationId: "test",
+          traceId: "test",
+          spaceId: "workspace",
+          userId: "user-1",
+          signal: new AbortController().signal,
+        }),
+      ).resolves.toBeUndefined();
+    },
+  );
+
+  it("surfaces authorization cancellation failures for router fallback", async () => {
+    composioSdkState.connectedAccounts.delete = async () => {
+      throw Object.assign(new Error("service unavailable"), { status: 503 });
+    };
+    const connector = new ComposioConnector();
+
+    await expect(
+      connector.cancelAuthorizationRequest("req-pending-1", {
+        operationId: "test",
+        traceId: "test",
+        spaceId: "workspace",
+        userId: "user-1",
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toThrow("service unavailable");
+  });
+
+  it("resolves authorization-request ids before deleting on revoke", async () => {
+    const deleted: string[] = [];
+    const waited: string[] = [];
+    composioSdkState.connectedAccounts.list = async () => ({ items: [] });
+    composioSdkState.connectedAccounts.waitForConnection = async (id: string) => {
+      waited.push(id);
+      return { id: `ca-from-${id}` };
+    };
+    composioSdkState.connectedAccounts.delete = async (id: string) => {
+      deleted.push(id);
+    };
+    const connector = new ComposioConnector();
+    await connector.revoke("req-oauth-1", {
+      operationId: "test",
+      traceId: "test",
+      spaceId: "workspace",
+      userId: "user-1",
+      signal: new AbortController().signal,
+    });
+    expect(waited).toEqual(["req-oauth-1"]);
+    expect(deleted).toEqual(["ca-from-req-oauth-1"]);
+  });
+
+  it("uses Composio slug casing when the toolkit directory is unavailable", async () => {
+    composioSdkState.created.length = 0;
+    composioSdkState.sessions.clear();
+    composioSdkState.directoryFails = true;
+    composioToolkitDirectory.invalidate();
+
+    try {
+      const connector = new ComposioConnector();
+      const context = {
+        operationId: "composio-directory-fallback",
+        traceId: "composio-directory-fallback",
+        spaceId: "workspace",
+        userId: "user-1",
+        signal: new AbortController().signal,
+        connectedConnections: [
+          {
+            id: "connection-github",
+            connectorId: "composio",
+            externalId: "github",
+            displayName: "GitHub",
+          },
+        ],
+      } satisfies AdapterContext;
+
+      await expect(connector.discoverTools(context)).resolves.toContainEqual(
+        expect.objectContaining({ name: "GITHUB_GET_REPOS" }),
+      );
+      expect(composioSdkState.created.at(-1)?.config.toolkits).toEqual(["GITHUB"]);
+    } finally {
+      composioSdkState.directoryFails = false;
+      composioToolkitDirectory.invalidate();
+    }
   });
 
   it("merges live Composio slugs onto pending DB plugin rows", () => {
@@ -130,6 +607,21 @@ describe("composio tool mapping", () => {
       { provider: "github", displayName: "GitHub" },
       { provider: "gmail", displayName: "Gmail" },
     ]);
+  });
+
+  it("reconciles Composio slugs without case sensitivity", () => {
+    expect(
+      mergeConnectedPlugins(
+        [{ provider: "github", displayName: "GitHub", status: "pending" }],
+        ["GITHUB"],
+      ),
+    ).toEqual([{ provider: "github", displayName: "GitHub" }]);
+    expect(
+      planLiveConnectionSync(
+        [{ id: "row-gh", provider: "github", status: "pending", displayName: "GitHub" }],
+        ["GITHUB"],
+      ),
+    ).toEqual({ connectIds: ["row-gh"], revokeIds: [] });
   });
 
   it("only fetches live Composio slugs when an OtterBot row is still pending or errored", () => {
@@ -204,6 +696,39 @@ describe("composio tool mapping", () => {
     });
   });
 
+  it("clears failed additional-account error rows while keeping in-flight pendings", () => {
+    expect(
+      planLiveConnectionSync(
+        [
+          { id: "row-gmail", provider: "gmail", status: "connected", displayName: "Personal" },
+          { id: "row-work", provider: "gmail", status: "pending", displayName: "Work" },
+          { id: "row-fail", provider: "gmail", status: "error", displayName: "Gmail" },
+          { id: "row-err", provider: "slack", status: "error", displayName: "Slack" },
+        ],
+        ["gmail"],
+      ),
+    ).toEqual({
+      connectIds: [],
+      revokeIds: ["row-fail", "row-err"],
+    });
+  });
+
+  it("keeps an in-flight additional account when the provider is already connected", () => {
+    expect(
+      planLiveConnectionSync(
+        [
+          { id: "row-gmail", provider: "gmail", status: "connected", displayName: "Personal" },
+          { id: "row-work", provider: "gmail", status: "pending", displayName: "Work" },
+          { id: "row-err", provider: "slack", status: "error", displayName: "Slack" },
+        ],
+        ["gmail"],
+      ),
+    ).toEqual({
+      connectIds: [],
+      revokeIds: ["row-err"],
+    });
+  });
+
   it("filters the catalog by name or slug", () => {
     const items = [
       { slug: "github", name: "GitHub", logo: null, connected: false, noAuth: false },
@@ -217,5 +742,11 @@ describe("Composio during pnpm test", () => {
   it("does not construct a live Platform client under Vitest", () => {
     expect(process.env.VITEST).toBeTruthy();
     expect(isComposioEnabled("ck_must_not_call_live")).toBe(false);
+  });
+
+  it.each(["0", "false"])("does not treat VITEST=%s as an active test runner", (value) => {
+    vi.stubEnv("VITEST", value);
+    expect(isComposioEnabled("ck_configured")).toBe(true);
+    vi.unstubAllEnvs();
   });
 });

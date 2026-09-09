@@ -7,7 +7,9 @@ import {
   writeFile as writeFileCb,
 } from "node:fs";
 import { promisify } from "node:util";
-import koffi from "koffi";
+import koffi, { type LibraryHandle } from "koffi";
+
+type KoffiFunction = ReturnType<LibraryHandle["func"]>;
 
 const closeFd = promisify(closeCb);
 const fchmodFd = promisify(fchmodCb);
@@ -44,12 +46,12 @@ function escapeWorkspace(): never {
 }
 
 type NtFns = {
-  NtCreateFile: koffi.KoffiFunction;
-  RtlInitUnicodeString: koffi.KoffiFunction;
-  getOsFhandle: koffi.KoffiFunction;
-  openOsFhandle: koffi.KoffiFunction;
-  CloseHandle: koffi.KoffiFunction;
-  GetFinalPathNameByHandleW: koffi.KoffiFunction;
+  NtCreateFile: KoffiFunction;
+  RtlInitUnicodeString: KoffiFunction;
+  getOsFhandle: KoffiFunction;
+  openOsFhandle: KoffiFunction;
+  CloseHandle: KoffiFunction;
+  GetFinalPathNameByHandleW: KoffiFunction;
   objectAttributesSize: number;
 };
 
@@ -116,8 +118,11 @@ function nt(): NtFns {
  * path of the held inode.
  */
 export function pathFromDirectoryFd(fd: number): string {
+  return pathFromWindowsHandle(nt().getOsFhandle(fd) as number | bigint);
+}
+
+export function pathFromWindowsHandle(handle: number | bigint): string {
   const api = nt();
-  const handle = api.getOsFhandle(fd) as number | bigint;
   if (handle === -1n || handle === -1) escapeWorkspace();
 
   const flags = 0; // VOLUME_NAME_DOS

@@ -4,7 +4,7 @@
     "slug": "rakazo",
     "owner": "inbox-zero",
     "scheme": "rakazo",
-    "version": "1.0.0",
+    "version": "1.0.2",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
     "icon": "./assets/icon.png",
@@ -19,7 +19,7 @@
       ],
       "expo-router",
       "expo-secure-store",
-      "expo-audio",
+      ["expo-audio", { "enableBackgroundPlayback": false }],
       "expo-localization",
       "@react-native-vector-icons/ionicons",
       "@react-native-vector-icons/material-design-icons",
@@ -45,7 +45,7 @@
       "bundleIdentifier": "com.rakazo.app",
       "buildNumber": "1",
       "supportsTablet": false,
-      "icon": "./assets/icon.png",
+      "icon": "../../packages/ui-tokens/assets/OtterBot.icon",
       "config": {
         "usesNonExemptEncryption": false
       },
@@ -60,11 +60,13 @@
     },
     "android": {
       "package": "com.rakazo.app",
+      "versionCode": 10,
+      "softwareKeyboardLayoutMode": "resize",
       "icon": "./assets/icon.png",
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "monochromeImage": "./assets/monochrome-icon.png",
-        "backgroundColor": "#2965EC"
+        "backgroundImage": "./assets/icon-background.png"
       }
     },
     "web": {
@@ -76,6 +78,12 @@
       "eas": {
         "projectId": "07f7eb04-45e3-47fe-9374-99a2f991131e"
       }
+    },
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/07f7eb04-45e3-47fe-9374-99a2f991131e"
     }
   }
 }

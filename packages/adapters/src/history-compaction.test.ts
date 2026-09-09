@@ -7,6 +7,7 @@ import type {
 import { historyCompactJob } from "@rakazo/adapter-kit";
 import type { MessageBlock } from "@rakazo/contracts";
 import type { PrismaClient } from "@rakazo/db";
+import { createLogger, createTestSink, installLogger } from "@rakazo/logging";
 import { describe, expect, it, vi } from "vitest";
 import {
   compactHistory,
@@ -217,7 +218,7 @@ function compactionHarness(
     wasCleared?: boolean;
     resolveModel?: (scope: {
       userId: string;
-      workspaceId: string;
+      spaceId: string;
       botId?: string;
     }) => Promise<AgentRunRequest["model"]>;
     withMemoryProvider?: boolean;
@@ -236,7 +237,7 @@ function compactionHarness(
   const thread = {
     id: "thread-1",
     botId: "bot-1",
-    workspaceId: "workspace-1",
+    spaceId: "workspace-1",
     userId: "user-1",
     nextEventSeq: 0,
     nextMessageSeq: options.nextMessageSeq ?? messages.length,
@@ -378,7 +379,7 @@ describe("compactHistory", () => {
     expect(request.tools).toEqual([]);
     expect(request.model).toEqual({
       provider: "openrouter",
-      id: "deepseek/deepseek-v4-flash-0731",
+      id: "openai/gpt-5.6-luna",
       apiKey: "openrouter-key",
     });
     expect(request.prompt).toContain("message 0");
@@ -391,12 +392,12 @@ describe("compactHistory", () => {
         botId: "bot-1",
         source: { kind: "history", generation: 0 },
       },
-      expect.objectContaining({ workspaceId: "workspace-1", botId: "bot-1" }),
+      expect.objectContaining({ spaceId: "workspace-1", botId: "bot-1" }),
     );
 
     const context = harness.runtime.run.mock.calls[0]![1];
     expect(context).toBeDefined();
-    expect(context!.workspaceId).toBe("workspace-1");
+    expect(context!.spaceId).toBe("workspace-1");
     expect(context!.userId).toBe("user-1");
 
     expect(harness.prisma.thread.updateMany).toHaveBeenCalledWith({
@@ -504,7 +505,7 @@ describe("compactHistory", () => {
 
     expect(resolveModel).toHaveBeenCalledWith({
       userId: "user-1",
-      workspaceId: "workspace-1",
+      spaceId: "workspace-1",
       botId: "bot-1",
     });
     expect(harness.runtime.run.mock.calls[0]![0].model).toEqual({
@@ -741,16 +742,18 @@ describe("compactHistory", () => {
       return { ok: true, value: undefined };
     });
     harness.purgeHistory.mockRejectedValueOnce(new Error("provider unavailable"));
-    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const sink = createTestSink();
+    installLogger(createLogger({ service: "rakazo-worker", sinks: [sink] }));
 
     await expect(compactHistory(harness.deps, "thread-1")).resolves.toBeUndefined();
 
     expect(harness.jobs.enqueue).toHaveBeenCalledWith(historyCompactJob("thread-1"));
-    expect(consoleError).toHaveBeenCalledWith(
-      "history.compact could not purge stale semantic memory",
-      expect.any(Error),
-    );
-    consoleError.mockRestore();
+    expect(
+      sink.events.some(
+        (event) => event.message === "history.compact could not purge stale semantic memory",
+      ),
+    ).toBe(true);
+    installLogger(createLogger({ service: "rakazo-worker", level: "off", sinks: [] }));
   });
 
   it("falls back to the deployment's configured default model when no deployment key is available", async () => {

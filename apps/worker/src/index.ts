@@ -1,16 +1,21 @@
 import type { JobPublisher, JobWorkerHost } from "@rakazo/adapter-kit";
+import { ComposioConnector, IntegrationProviderSettings } from "@rakazo/adapters";
 import { loadRootEnv } from "@rakazo/core/node/load-root-env";
 
 loadRootEnv();
 
 import {
+  ChatSdkMessagingSurface,
   createBackgroundJobHandlers,
+  createCloudAgentConnection,
   createConnectorStack,
   createJobReconciler,
+  createMessagingContextLoader,
   createPostgresReconciliationLeadership,
   createRunExecutor,
   createRunSandbox,
   createRunSecretWriter,
+  createWebProvider,
   EncryptedSecretStore,
   ExpoPushProvider,
   GraphileJobPublisher,
@@ -18,25 +23,35 @@ import {
   InMemoryJobQueue,
   InstalledConnectorProvider,
   isComposioEnabled,
+  isMessagingSurfaceEnabled,
   isPipedreamEnabled,
   LocalAgentHomeStore,
   LocalArtifactStore,
   McpConnector,
   McpOAuthBroker,
+  messagingEnvFromProcess,
+  messagingPlatformsFromEnv,
   PiAgentRuntime,
   PipedreamConnector,
   PostgresRealtimeFanout,
   pipedreamConfigFromEnv,
+  reconcileCloudAgents,
+  reconcileComputerUpdates,
   resolveDeploymentModel,
+  resolvePiSessionRoot,
+  resolveSandboxProvider,
   ScriptedAgentRuntime,
-  WorkspaceMemoryProviderResolver,
+  SpaceMemoryProviderResolver,
 } from "@rakazo/adapters";
-import { createLogger, resolveEncryptionKey } from "@rakazo/core";
+import { resolveEncryptionKey, resolveSupervisorToken } from "@rakazo/core";
 import { createDb, createThreadEvents } from "@rakazo/db";
+import { SERVICE_NAMES } from "@rakazo/logging";
+import { createRootLogger } from "@rakazo/logging/axiom";
 import { MarkdownMemoryStore } from "@rakazo/memory";
 
+const logger = createRootLogger(SERVICE_NAMES.worker);
+
 async function main() {
-  const logger = createLogger("worker");
   const databaseUrl = process.env.DATABASE_URL;
   if (!databaseUrl) throw new Error("DATABASE_URL is required");
   const { prisma, pool } = createDb(databaseUrl);
@@ -48,13 +63,17 @@ async function main() {
   const events = createThreadEvents(prisma, realtime, {
     runSecretWriter: createRunSecretWriter(secrets),
   });
-  const runtime =
-    process.env.AGENT_RUNTIME === "scripted" ? new ScriptedAgentRuntime() : new PiAgentRuntime();
   const dataDir = process.env.DATA_DIR ?? "./data";
+  const runtime =
+    process.env.AGENT_RUNTIME === "scripted"
+      ? new ScriptedAgentRuntime()
+      : new PiAgentRuntime({ sessionRoot: resolvePiSessionRoot(dataDir) });
   // Same resolver the API uses, so both processes agree on provider, model and key.
   const { key: deploymentModelKey } = resolveDeploymentModel();
-  const sandbox = createRunSandbox(process.env.SANDBOX_PROVIDER ?? "docker", {
+  const sandboxProvider = resolveSandboxProvider(process.env);
+  const sandbox = createRunSandbox(sandboxProvider, {
     supervisorUrl: process.env.SANDBOX_SUPERVISOR_URL ?? "http://127.0.0.1:7091",
+    supervisorToken: sandboxProvider === "docker" ? resolveSupervisorToken(process.env) : undefined,
     e2bApiKey: process.env.E2B_API_KEY,
     daytonaApiKey: process.env.DAYTONA_API_KEY,
     daytonaApiUrl: process.env.DAYTONA_API_URL,
@@ -87,19 +106,44 @@ async function main() {
   const pipedream = isPipedreamEnabled(pipedreamConfig)
     ? new PipedreamConnector(pipedreamConfig)
     : undefined;
-  const stack = createConnectorStack(isComposioEnabled(process.env.COMPOSIO_API_KEY), undefined, [
+  // pollInboundMessages stays false (the default) here: this process
+  // only ever sends outbound (messaging.deliver jobs). It must never poll
+  // Telegram — that would steal the single getUpdates slot away from the
+  // API process, which is the one with the inbound sink actually wired up.
+  const messagingPlatforms = messagingPlatformsFromEnv(messagingEnvFromProcess(process.env));
+  const messaging = isMessagingSurfaceEnabled(messagingPlatforms, {
+    deploymentModelKey,
+    openSignup: process.env.MESSAGING_OPEN_SIGNUP === "true",
+  })
+    ? new ChatSdkMessagingSurface(messagingPlatforms)
+    : undefined;
+  const integrationSettings = new IntegrationProviderSettings(
+    prisma,
+    secrets,
+    resolveEncryptionKey(process.env),
+    {
+      composio: isComposioEnabled(process.env.COMPOSIO_API_KEY)
+        ? new ComposioConnector(process.env.COMPOSIO_API_KEY)
+        : undefined,
+      pipedream,
+    },
+  );
+  const stack = createConnectorStack(false, undefined, [
     new InstalledConnectorProvider(prisma, secrets),
-    ...(pipedream ? [pipedream] : []),
+    ...integrationSettings.providers(),
     mcp,
   ]);
   const connector = stack.destination;
   await connector.start();
-  const memoryProviders = new WorkspaceMemoryProviderResolver(prisma, secrets);
+  integrationSettings.warmDirectories();
+  const memoryProviders = new SpaceMemoryProviderResolver(prisma, secrets);
   const home = new LocalAgentHomeStore(dataDir);
   const artifacts = new LocalArtifactStore(dataDir);
   const inMemoryJobs = process.env.WAKEUP_DRIVER === "memory" ? new InMemoryJobQueue() : undefined;
   const jobs: JobPublisher = inMemoryJobs ?? new GraphileJobPublisher(databaseUrl);
   const jobHost: JobWorkerHost = inMemoryJobs ?? new GraphileJobWorkerHost(databaseUrl);
+  // One provider instance so emulator launches and polls share the same Map.
+  const cloudAgent = createCloudAgentConnection();
   const executor = createRunExecutor({
     prisma,
     runtime,
@@ -110,14 +154,31 @@ async function main() {
     artifacts,
     connector: stack.connector,
     connectors: stack.connector,
-    listConnectedPluginSlugs: stack.composio?.listConnectedSlugs.bind(stack.composio),
-    secrets: [deploymentModelKey ?? "", process.env.COMPOSIO_API_KEY ?? ""].filter(Boolean),
+    listConnectedPluginSlugs: async (userId) => {
+      const provider = await integrationSettings.resolve("composio");
+      if (!provider) return [];
+      return provider.listConnectedExternalIds({
+        userId,
+        spaceId: "",
+        operationId: "connections.sync",
+        traceId: "connections.sync",
+        signal: AbortSignal.timeout(15_000),
+      });
+    },
+    secrets: [
+      deploymentModelKey ?? "",
+      process.env.COMPOSIO_API_KEY ?? "",
+      process.env.CURSOR_API_KEY ?? "",
+    ].filter(Boolean),
     secretStore: secrets,
     deploymentModelKey,
     dataDir,
     notifications: new ExpoPushProvider(dataDir),
     jobs,
     events,
+    messaging: messaging ? createMessagingContextLoader(prisma) : undefined,
+    web: createWebProvider(),
+    cloudAgent,
   });
 
   const jobHandlers = createBackgroundJobHandlers({
@@ -132,12 +193,17 @@ async function main() {
     secretStore: secrets,
     memoryProviders,
     deploymentModelKey,
+    messaging,
+    cloudAgent,
   });
   await jobHost.start(jobHandlers);
   const reconciler = createJobReconciler({
     prisma,
     jobs,
+    events,
     leadership: createPostgresReconciliationLeadership(pool),
+    reconcileCloudAgents: () => reconcileCloudAgents({ prisma, jobs, cloudAgent }),
+    reconcileComputerUpdates: () => reconcileComputerUpdates({ prisma, jobs }),
   });
   reconciler.start();
 
@@ -145,29 +211,27 @@ async function main() {
   const stop = async () => {
     if (stopping) return;
     stopping = true;
-    await reconciler.stop();
-    await jobHost.stop();
-    await jobs.close();
-    await realtime.close();
-    await connector.stop();
-    await mcp.close();
-    await prisma.$disconnect().catch(() => undefined);
-    await pool.end().catch(() => undefined);
+    try {
+      await reconciler.stop();
+      await jobHost.stop();
+      await jobs.close();
+      await realtime.close();
+      await connector.stop();
+      await mcp.close();
+      await prisma.$disconnect().catch(() => undefined);
+      await pool.end().catch(() => undefined);
+    } finally {
+      await logger.flush({ timeoutMs: 2_000 });
+    }
   };
   process.once("SIGTERM", () => void stop());
   process.once("SIGINT", () => void stop());
 
-  logger.info(
-    {
-      pid: process.pid,
-      wakeup: process.env.WAKEUP_DRIVER ?? "graphile",
-      sandbox: process.env.SANDBOX_PROVIDER ?? "docker",
-    },
-    "rakazo worker ready",
-  );
+  logger.info("worker ready");
 }
 
-main().catch((error) => {
-  createLogger("worker").error({ err: error }, "worker crashed");
+main().catch(async (error) => {
+  logger.error("worker startup failed", error);
+  await logger.flush({ timeoutMs: 2_000 });
   process.exit(1);
 });

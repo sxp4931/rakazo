@@ -19,10 +19,25 @@
       "development": "./src/approval-effect-key.ts",
       "default": "./src/approval-effect-key.ts"
     },
+    "./node/screen-proxy-response": {
+      "types": "./src/node/screen-proxy-response.ts",
+      "development": "./src/node/screen-proxy-response.ts",
+      "default": "./src/node/screen-proxy-response.ts"
+    },
     "./plot": {
       "types": "./src/plot/plot-spec.ts",
       "development": "./src/plot/plot-spec.ts",
       "default": "./src/plot/plot-spec.ts"
+    },
+    "./node/desktop-runtime": {
+      "types": "./src/node/desktop-runtime.ts",
+      "development": "./src/node/desktop-runtime.ts",
+      "default": "./src/node/desktop-runtime.ts"
+    },
+    "./node/screen-capability": {
+      "types": "./src/node/screen-capability.ts",
+      "development": "./src/node/screen-capability.ts",
+      "default": "./src/node/screen-capability.ts"
     }
   },
   "scripts": {
@@ -31,16 +46,16 @@
   },
   "dependencies": {
     "@rakazo/contracts": "workspace:*",
-    "dotenv": "^17.2.1",
+    "dotenv": "17.4.2",
     "pino": "^9.9.0",
-    "@observablehq/plot": "^0.6.17",
-    "d3-dsv": "^3.0.1",
-    "croner": "^10.0.1"
+    "@observablehq/plot": "0.6.17",
+    "d3-dsv": "3.0.1",
+    "croner": "10.0.1"
   },
   "devDependencies": {
-    "fast-check": "^4.3.0",
-    "typescript": "^5.9.2",
-    "vitest": "^4.1.10",
-    "@types/d3-dsv": "^3.0.7"
+    "fast-check": "4.9.0",
+    "typescript": "7.0.2",
+    "vitest": "4.1.11",
+    "@types/d3-dsv": "3.0.7"
   }
 }

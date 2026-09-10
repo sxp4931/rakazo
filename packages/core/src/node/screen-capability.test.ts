@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
 import {
   openScreenCapability,
@@ -23,6 +25,50 @@ const path = (url: string, interactive = false) =>
     ),
   ).pathname;
 describe("sealed screen capabilities", () => {
+  it.each([false, true])(
+    "connects the shipped embed through one capability prefix (control=%s)",
+    (interactive) => {
+      const provider = new URL("http://127.0.0.1:49152/embed.html");
+      provider.searchParams.set("view_only", String(!interactive));
+      provider.searchParams.set("path", "websockify?token=fake-socket-token");
+      const url = new URL(
+        sealScreenCapability(provider.toString(), "fake-secret", "https://app.example", scope, 100),
+      );
+      const html = readFileSync(
+        new URL("../../../../infra/sandboxes/computer/embed.html", import.meta.url),
+        "utf8",
+      );
+      const script = html
+        .match(/<script type="module">([\s\S]*?)<\/script>/)![1]!
+        .replace(/^\s*import[\s\S]*?;\s*$/gm, "");
+      let socketUrl = "";
+      runInNewContext(script, {
+        document: { location: url, getElementById: () => ({}) },
+        window: { location: url },
+        RFB: class {
+          constructor(_element: unknown, value: string) {
+            socketUrl = value;
+          }
+        },
+        attachHostClipboardPaste: () => {},
+        // Embed imports are stripped for this smoke; stub the touch-keyboard
+        // and trackpad bridges the same way as clipboard. Returning false
+        // skips Keyboard / KeyTable / keysyms, which this harness does not provide.
+        isTouchBrowser: () => false,
+        attachMobileKeyboard: () => {},
+        attachMobileTrackpad: () => {},
+      });
+      const socket = new URL(socketUrl);
+      expect(socket.protocol).toBe("wss:");
+      expect(socket.host).toBe(url.host);
+      expect(socket.pathname).toBe(url.pathname.replace("/embed.html", "/websockify"));
+      expect(socketUrl).not.toContain("fake-socket-token");
+      expect(openScreenCapability(socket.pathname, "fake-secret", 101)?.target).toMatchObject({
+        path: "/websockify?token=fake-socket-token",
+        interactive,
+      });
+    },
+  );
   it("hides provider credentials and binds scope and destination", () => {
     const value = path("https://screen.example/vnc.html");
     expect(value).not.toContain("fake-provider-token");

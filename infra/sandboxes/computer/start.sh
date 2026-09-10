@@ -81,6 +81,10 @@ if [[ ! -f "$NOVNC_ROOT/clipboard-bridge.js" ]]; then
   echo "noVNC clipboard-bridge.js is missing from the computer image" >&2
   exit 1
 fi
+if [[ ! -f "$NOVNC_ROOT/mobile-keyboard.js" ]]; then
+  echo "noVNC mobile-keyboard.js is missing from the computer image" >&2
+  exit 1
+fi
 websockify --heartbeat=30 --web="$NOVNC_ROOT" --token-plugin=TokenFile --token-source=/tmp/rakazo/view-target-1 0.0.0.0:6080 >/tmp/rakazo/novnc.log 2>&1 &
 
 while kill -0 "$XVFB_PID" 2>/dev/null; do

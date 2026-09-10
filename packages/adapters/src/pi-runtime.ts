@@ -694,6 +694,25 @@ function withoutSteeringMessages(
   return result;
 }
 
+/**
+ * Normalize `request_secret` arguments.
+ *
+ * `credential` and `replace` must survive: the executor stores a submitted value
+ * only when `credential` is present, and it validates the destination shape
+ * itself. An earlier version of this function listed only label/purpose/
+ * connectionId, so every credential the model supplied was dropped here and the
+ * saved value had nowhere to go.
+ */
+export function prepareRequestSecretArguments(raw: Record<string, unknown>) {
+  return {
+    label: String(raw.label ?? "Code"),
+    purpose: String(raw.purpose ?? "otp"),
+    ...(raw.connectionId ? { connectionId: String(raw.connectionId) } : {}),
+    ...(raw.credential ? { credential: raw.credential } : {}),
+    ...(raw.replace === true ? { replace: true } : {}),
+  };
+}
+
 function toAgentTool(tool: ConnectorTool, host: ToolHost, exposedName: string): AgentTool {
   return {
     name: exposedName,
@@ -725,11 +744,7 @@ function toAgentTool(tool: ConnectorTool, host: ToolHost, exposedName: string): 
         };
       }
       if (tool.name === "request_secret") {
-        return {
-          label: String(raw.label ?? "Code"),
-          purpose: String(raw.purpose ?? "otp"),
-          ...(raw.connectionId ? { connectionId: String(raw.connectionId) } : {}),
-        };
+        return prepareRequestSecretArguments(raw);
       }
       if (tool.name === "write_file") {
         return {
@@ -1124,13 +1139,6 @@ function builtinParameters(tool: ConnectorTool) {
   if (tool.name === "request_takeover") {
     return Type.Object({ reason: Type.String() });
   }
-  if (tool.name === "request_secret") {
-    return Type.Object({
-      label: Type.String(),
-      purpose: Type.Union([Type.Literal("otp"), Type.Literal("password"), Type.Literal("api_key")]),
-      connectionId: Type.Optional(Type.String()),
-    });
-  }
   if (tool.name === "ask_user") {
     return Type.Object({
       question: Type.String({ maxLength: 240 }),
@@ -1240,7 +1248,22 @@ function isAgentToolExecutionResult(result: unknown): result is AgentToolExecuti
   );
 }
 
-export function jsonSchemaParameters(schema: Record<string, unknown>) {
+export function jsonSchemaParameters(
+  schema: Record<string, unknown>,
+): ReturnType<typeof Type.Object> {
+  // Top-level oneOf/anyOf (e.g. request_secret's credential XOR connectionId)
+  // must stay a union. Falling through to properties would drop the exclusivity
+  // and re-expose both destinations as optional siblings.
+  const alternatives = Array.isArray(schema.oneOf)
+    ? schema.oneOf
+    : Array.isArray(schema.anyOf)
+      ? schema.anyOf
+      : undefined;
+  if (alternatives && alternatives.length > 0 && schema.properties == null) {
+    return Type.Union(
+      alternatives.map((variant) => jsonSchemaParameters(variant as Record<string, unknown>)),
+    ) as unknown as ReturnType<typeof Type.Object>;
+  }
   const properties = (schema.properties ?? {}) as Record<string, unknown>;
   const required = new Set(Array.isArray(schema.required) ? schema.required.map(String) : []);
   const fields: Record<string, ReturnType<typeof Type.Optional>> = {};
@@ -1250,7 +1273,12 @@ export function jsonSchemaParameters(schema: Record<string, unknown>) {
       typeof Type.Optional
     >;
   }
-  return Type.Object(fields);
+  // Preserve closed objects (e.g. request_secret destination oneOf branches).
+  // Type.Object defaults to open, which would let connectionId+replace match both
+  // anyOf variants after conversion.
+  return schema.additionalProperties === false
+    ? Type.Object(fields, { additionalProperties: false })
+    : Type.Object(fields);
 }
 
 /** TypeBox only builds literals from primitives; anything else throws while the tool list is
@@ -1266,11 +1294,29 @@ function enumUnion(values: readonly unknown[]) {
   return members.every((member) => member !== undefined) ? Type.Union(members) : undefined;
 }
 
-function jsonField(spec: unknown): ReturnType<typeof Type.String> {
+export function jsonField(spec: unknown): ReturnType<typeof Type.String> {
   const definition = spec && typeof spec === "object" ? (spec as Record<string, unknown>) : {};
   if (Array.isArray(definition.enum) && definition.enum.length > 0) {
     const union = enumUnion(definition.enum);
     if (union) return union as never;
+  }
+  // A `const` names the only accepted value. Without this it degraded to a bare
+  // string, so a discriminator like {type: {const: "bearer"}} told the model
+  // nothing about which value to send -- and it guessed, twice.
+  if ("const" in definition) {
+    const literal = enumUnion([definition.const]);
+    if (literal) return literal as never;
+  }
+  // A discriminated union arrives as oneOf/anyOf with no sibling `type`. Without
+  // this branch it fell through to the string default, so a model was told to
+  // send an object-valued field as a bare string -- which is exactly what it did.
+  const variants = Array.isArray(definition.oneOf)
+    ? definition.oneOf
+    : Array.isArray(definition.anyOf)
+      ? definition.anyOf
+      : undefined;
+  if (variants && variants.length > 0) {
+    return Type.Union(variants.map((variant) => jsonField(variant))) as never;
   }
   const type = "type" in definition ? String(definition.type) : "string";
   if (type === "number" || type === "integer") return Type.Number() as never;

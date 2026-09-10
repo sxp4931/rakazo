@@ -81,7 +81,7 @@ supervisor at startup naming the variable, rather than surfacing later as a fail
 
 ## Docker Compose (single machine)
 
-1. Copy `.env.example` to `.env` and set `BETTER_AUTH_SECRET`, `ENCRYPTION_KEY`, and `SCREEN_PROXY_SECRET` to independent long random strings (32+ characters; 64 hex for `ENCRYPTION_KEY`). Docker sandboxes also need a dedicated `SANDBOX_SUPERVISOR_TOKEN`. Keep existing `ENCRYPTION_KEY` values so stored credentials stay decryptable.
+1. Copy `.env.example` to `.env` and set `POSTGRES_PASSWORD` (`openssl rand -hex 16`), plus `BETTER_AUTH_SECRET`, `ENCRYPTION_KEY`, and `SCREEN_PROXY_SECRET` to independent long random strings (32+ characters; 64 hex for `ENCRYPTION_KEY`). Docker sandboxes also need a dedicated `SANDBOX_SUPERVISOR_TOKEN`. Keep existing `ENCRYPTION_KEY` values so stored credentials stay decryptable.
 2. Set `OPENROUTER_API_KEY` (and `COMPOSIO_API_KEY` if you want Plugins).
 3. Build the computer image: `pnpm sandbox:build` (Compose also builds it via the `computer` service).
 4. `docker compose --env-file .env -f infra/compose/docker-compose.yml up --build`
@@ -91,7 +91,18 @@ On Windows, if an older clone with `core.autocrlf=true` leaves the computer pane
 
 Compose runs Postgres, the sandbox supervisor (Docker socket), API, worker, and a Vite preview of the web app. Bot computers are sibling containers (`rakazo/computer:local`) on separate per-bot networks; only the supervisor and screen proxy join each one. The API process does not get an unrestricted Docker socket; the supervisor owns the lifecycle.
 
-Postgres is published on **loopback only** (`127.0.0.1:5433` on the host). Do not expose that port on a public VPS. Change `POSTGRES_PASSWORD` and keep Postgres on an internal network when you deploy remotely.
+Postgres stays on the Compose network only (not published on the host), matching the images
+compose. Credentials come from `.env` (`POSTGRES_PASSWORD` is required). Prefer a URI-safe value
+(`openssl rand -hex 16`); characters such as `@ : / ? # %` break the interpolated `DATABASE_URL`
+inside Compose. Official Postgres images set user, password, and database only on first volume
+init, so an existing `pgdata` volume keeps its original identity: keep those values in `.env`, or
+change them in place with `ALTER ROLE` / rename. Recreate the volume only after a backup (or when
+the data is disposable); `docker compose down -v` deletes all Postgres state. For host-side clients
+(`pnpm db:migrate`, GUI tools),
+add `infra/compose/docker-compose.postgres-host.yml` so Postgres is published on loopback
+`127.0.0.1:5433`, or use
+`docker compose --env-file .env -f infra/compose/docker-compose.yml exec postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'`.
+Do not publish Postgres on a public interface.
 
 The Docker supervisor is not published as its own image and is not exposed on the host. It runs from
 the app image, stays on the internal Compose network, and holds the Docker socket because access to
@@ -194,6 +205,10 @@ RAKAZO_LOCAL_VISION_MODELS=qwen3-vl
 The loopback default is suitable when running OtterBot from a source checkout. From containers,
 prefer a stable LAN RFC1918 address (not Compose service DNS alone). On Docker Desktop,
 `host.docker.internal` also works.
+On Docker Desktop, a bot computer shell can often reach services bound to host `127.0.0.1`
+through that same hostname. Do not run sensitive unauthenticated services on loopback while
+bots run, or firewall / block that path. Linux does not get `host.docker.internal` the same
+way by default.
 Only configure an endpoint you control: prompts, attachments, and tool results sent to that model
 leave OtterBot through this URL. Leave `RAKAZO_LOCAL_MODELS` blank to disable the provider.
 

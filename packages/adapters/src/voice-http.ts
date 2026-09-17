@@ -94,6 +94,10 @@ function detail(body: unknown): string {
   return "";
 }
 
+export function voiceUnreachable(provider: string): string {
+  return `Couldn't reach ${provider} to check that key. Check your connection.`;
+}
+
 export function voiceHttpError(
   status: number,
   provider: string,
@@ -105,7 +109,7 @@ export function voiceHttpError(
     return `${provider} rejected that key. Check the key and that it has speech permissions.`;
   }
   if (status === 429)
-    return theirs || `${provider} is rate-limiting this account — wait a moment and try again.`;
+    return theirs || `${provider} is rate-limiting this account. Wait a moment and try again.`;
   if (status === 402) return theirs || `${provider} says this account is out of credit.`;
   return theirs ? `${what} failed: ${theirs}` : `${what} failed (${status})`;
 }

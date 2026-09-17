@@ -29,6 +29,10 @@ import { getLogger } from "@rakazo/logging";
 import { isToolPauseResult } from "./approval-effect.js";
 import { builtinAgentTools, DELEGATION_TOOL_NAMES } from "./builtin-tools.js";
 import { DEFAULT_OPENROUTER_MODEL_ID } from "./deployment-model.js";
+import {
+  normalizeOpenAiToolParameters,
+  openAiToolParametersNeedNormalization,
+} from "./openai-tool-parameters.js";
 import { PiRuntimeCredentialStore, toOAuthCredential } from "./pi-credentials.js";
 import { registerLocalProvider } from "./pi-local-provider.js";
 import {
@@ -37,6 +41,14 @@ import {
   registerOpenAiCompatibleRuntime,
 } from "./pi-openai-compatible-provider.js";
 import {
+  billedPromptTokens,
+  clipToolResultContent,
+  clipToolResultText,
+  MODEL_STREAM_MAX_RETRIES,
+  MODEL_STREAM_TIMEOUT_MS,
+  resolveCompletionMaxTokens,
+} from "./pi-runtime-limits.js";
+import {
   PiJsonlSessionRecorder,
   type PiSessionHandle,
   type PiSessionRecorder,
@@ -44,6 +56,14 @@ import {
 import { textContentArg } from "./tool-text.js";
 
 const running = new Map<string, { controller: AbortController; work: Promise<void> }>();
+interface ToolCallBudget {
+  count: number;
+  exceeded: boolean;
+  limit: number;
+  inFlight: number;
+}
+// Optional fuse is process-local. continueRun on another worker starts at zero.
+const toolCallBudgetsByRun = new Map<string, ToolCallBudget>();
 // Built on first use, not at module load: entry points call loadRootEnv() after
 // their imports, and ESM hoists those imports, so module-level env reads here
 // would run before .env is loaded and miss the local provider entirely.
@@ -61,6 +81,7 @@ const SILENT_TOOL_CONTINUATION_PROMPT =
   "Continue the original task from the latest tool result. Do not stop after a tool call; use any remaining tools needed, then give the user the final answer.";
 const TOOL_FINAL_RESPONSE_FALLBACK =
   "I completed the tool step but could not produce a final response. Please ask me to continue.";
+const DEFAULT_COMPUTER_SCREENSHOTS_TO_KEEP = 2;
 // Reasoning-capable models must not start at "off": for OpenRouter, pi-ai maps
 // that to reasoning.effort "none", which 400s on endpoints that mandate
 // reasoning (e.g. google/gemini-3.7-flash). Keep a real level when model.reasoning
@@ -153,6 +174,8 @@ export class PiAgentRuntime implements AgentRuntime {
     const queue = createQueue();
 
     const work = (async () => {
+      let trackedBudget: ToolCallBudget | undefined;
+      let resumeHost: ToolHost | undefined;
       try {
         const selectedModel = resolveRuntimeModel(request.model);
         if (!selectedModel.model) {
@@ -166,21 +189,24 @@ export class PiAgentRuntime implements AgentRuntime {
         const { models, model, apiKey } = selectedModel;
         const toolDefs = request.tools.length ? request.tools : builtinAgentTools;
         const nestedAgents = new Set<Agent>();
+        const completionModel = modelForCompletion(model, request.model.maxTokens);
+        trackedBudget = toolCallBudgetFor(request.runId);
         const host: ToolHost = {
           queue,
           request,
           models,
-          model,
+          model: completionModel,
           apiKey,
           nestedAgents,
           subagentGate: createGate(MAX_PARALLEL_SUBAGENTS),
-          toolCallBudget: { count: 0, exceeded: false, limit: maxToolCallsPerTurn() },
+          toolCallBudget: trackedBudget,
           toolCallSeq: { value: 0 },
           abortTurn: () => undefined,
           signal,
           depth: 0,
           pausePending: false,
         };
+        resumeHost = host;
         const tools = toAgentTools(toolDefs, host);
         const seenSteeringIds: string[] = [];
         const initialSteering = request.claimSteering ? await request.claimSteering([]) : [];
@@ -231,9 +257,10 @@ export class PiAgentRuntime implements AgentRuntime {
           sessionId: conversationSessionId(request.threadId, request.botId),
           steeringMode: "all",
           streamFn: (m, ctx, options) =>
-            models.streamSimple(m, ctx, reliableStreamOptions(m, options)),
+            models.streamSimple(m, ctx, reliableStreamOptions(m, options, request.model.maxTokens)),
           getApiKey: async () => apiKey,
-          transformContext: async (messages) => pruneComputerScreenshotContext(messages),
+          transformContext: async (messages) =>
+            pruneComputerScreenshotContext(messages, request.model.maxImagesPerPrompt),
           prepareNextTurnWithContext: async () => {
             if (!request.claimSteering) return undefined;
             const steering = await request.claimSteering([...seenSteeringIds]);
@@ -251,7 +278,7 @@ export class PiAgentRuntime implements AgentRuntime {
           },
           initialState: {
             systemPrompt,
-            model,
+            model: completionModel,
             thinkingLevel,
             tools,
             messages: history,
@@ -279,7 +306,7 @@ export class PiAgentRuntime implements AgentRuntime {
             await piSession?.appendMessage(event.message);
           }
           if (event.type === "tool_execution_start") {
-            if (!consumeToolCall(host)) return;
+            if (host.toolCallBudget.exceeded) return;
             toolCalls += 1;
             // Live activity feedback: without this the thread shows a bare
             // "working…" for the whole tool call with nothing actionable.
@@ -344,8 +371,7 @@ export class PiAgentRuntime implements AgentRuntime {
             if ("usage" in event.message && event.message.usage) {
               queue.push({
                 type: "usage",
-                inputTokens: event.message.usage.input ?? 0,
-                outputTokens: event.message.usage.output ?? 0,
+                ...billedPromptTokens(event.message.usage),
                 provider: model.provider,
                 model: model.id,
               });
@@ -414,6 +440,11 @@ export class PiAgentRuntime implements AgentRuntime {
         queue.fail(new Error(message));
       } finally {
         queue.close();
+        if (trackedBudget) {
+          const keepForResume =
+            (signal.aborted || Boolean(resumeHost?.pausePending)) && !trackedBudget.exceeded;
+          releaseToolCallBudget(request.runId, keepForResume);
+        }
       }
     })();
     const active = { controller, work };
@@ -523,6 +554,9 @@ export function modelsForRequest(
       modelId: request.model.id,
       baseUrl: request.model.baseUrl,
       reasoning: request.model.reasoning,
+      acceptsImages: request.model.acceptsImages,
+      maxTokens: request.model.maxTokens,
+      contextWindow: request.model.contextWindow,
     });
   }
   return catalogModels();
@@ -810,6 +844,12 @@ function toAgentTool(tool: ConnectorTool, host: ToolHost, exposedName: string): 
       const args = (params ?? {}) as Record<string, unknown>;
       const executionId =
         toolCallId || `${host.request.runId}:${tool.name}:${host.toolCallSeq.value++}`;
+      if (!beginToolCall(host)) {
+        return {
+          content: [{ type: "text", text: "Skipped: tool-call limit reached." }],
+          details: { skipped: true },
+        };
+      }
       host.queue.push({ type: "tool", name: tool.name, args, executionId });
       const startedAt = Date.now();
       let result: unknown;
@@ -887,7 +927,7 @@ function toAgentTool(tool: ConnectorTool, host: ToolHost, exposedName: string): 
               : await host.request.executeTool(tool.name, args, executionId);
             if (isAgentToolExecutionResult(result)) {
               if (isToolPauseResult(result)) host.pausePending = true;
-              return result;
+              return boundAgentToolResult(result);
             }
             return {
               content: [{ type: "text", text: summarizeToolResult(result) }],
@@ -899,11 +939,12 @@ function toAgentTool(tool: ConnectorTool, host: ToolHost, exposedName: string): 
             details: { error: "no executor" },
           };
         })();
-        return result as AgentToolResult<unknown>;
+        return boundAgentToolResult(result as AgentToolResult<unknown>);
       } catch (error) {
         failure = error;
         throw error;
       } finally {
+        endToolCall(host);
         const completion: AgentToolCompletion = {
           name: tool.name,
           executionId,
@@ -968,7 +1009,7 @@ async function executeSubagent(host: ToolHost, executionId: string, args: Record
     host.subagentGate.release();
     return `Subagent failed: ${message}`;
   }
-  const subagentModel = selectedModel.model;
+  const subagentModel = modelForCompletion(selectedModel.model, requestModel.maxTokens);
 
   const childDefs = (host.request.tools.length ? host.request.tools : builtinAgentTools).filter(
     (tool) => !DELEGATION_TOOL_NAMES.has(tool.name),
@@ -983,9 +1024,14 @@ async function executeSubagent(host: ToolHost, executionId: string, args: Record
   const nested = new Agent({
     sessionId: conversationSessionId(host.request.threadId, host.request.botId, agentId),
     streamFn: (m, ctx, options) =>
-      selectedModel.models.streamSimple(m, ctx, reliableStreamOptions(m, options)),
+      selectedModel.models.streamSimple(
+        m,
+        ctx,
+        reliableStreamOptions(m, options, requestModel.maxTokens),
+      ),
     getApiKey: async () => selectedModel.apiKey,
-    transformContext: async (messages) => pruneComputerScreenshotContext(messages),
+    transformContext: async (messages) =>
+      pruneComputerScreenshotContext(messages, requestModel.maxImagesPerPrompt),
     initialState: {
       systemPrompt: [
         `You are an OtterBot subagent named "${name}".`,
@@ -1007,7 +1053,7 @@ async function executeSubagent(host: ToolHost, executionId: string, args: Record
   let lastPush = 0;
   nested.subscribe((event) => {
     if (event.type === "tool_execution_start") {
-      if (!consumeToolCall(host)) return;
+      if (host.toolCallBudget.exceeded) return;
       const toolName = "toolName" in event && event.toolName ? String(event.toolName) : "a tool";
       host.queue.push({
         type: "subagent",
@@ -1042,8 +1088,7 @@ async function executeSubagent(host: ToolHost, executionId: string, args: Record
       if ("usage" in event.message && event.message.usage) {
         host.queue.push({
           type: "usage",
-          inputTokens: event.message.usage.input ?? 0,
-          outputTokens: event.message.usage.output ?? 0,
+          ...billedPromptTokens(event.message.usage),
           provider: subagentModel.provider,
           model: subagentModel.id,
         });
@@ -1072,6 +1117,9 @@ async function executeSubagent(host: ToolHost, executionId: string, args: Record
         await nested.waitForIdle();
       } finally {
         host.signal.removeEventListener("abort", onAbort);
+        // nestedHost is a shallow copy; ask_user / request_takeover set pause
+        // only on the child. Copy it up before the parent releases the budget.
+        if (nestedHost.pausePending) host.pausePending = true;
       }
     }
     // Shared-budget abort leaves errorMessage on the nested agent; surface it as a
@@ -1090,7 +1138,7 @@ async function executeSubagent(host: ToolHost, executionId: string, args: Record
       budgetMessage && streamed.trim()
         ? `${streamed.trim()}\n\n${budgetMessage}`
         : budgetMessage || streamed || assistantText(nested.state.messages.at(-1)) || "done.";
-    const clipped = result.length > 12_000 ? `${result.slice(0, 12_000)}…` : result;
+    const clipped = clipToolResultText(result, 12_000);
     host.queue.push({
       type: "subagent",
       agentId,
@@ -1110,8 +1158,15 @@ async function executeSubagent(host: ToolHost, executionId: string, args: Record
   }
 }
 
-function parametersFor(tool: ConnectorTool) {
-  return builtinParameters(tool) ?? safeJsonSchemaParameters(tool);
+/** Build AgentTool.parameters for a connector tool, including OpenAI wire fidelity. */
+export function parametersFor(tool: ConnectorTool) {
+  const schema = builtinParameters(tool) ?? safeJsonSchemaParameters(tool);
+  // Type.Union (top-level oneOf/anyOf) serializes without type/properties.
+  // Re-wrap only when needed so Type.Object schemas keep TypeBox Kind metadata.
+  if (!openAiToolParametersNeedNormalization(schema)) return schema;
+  return Type.Unsafe(
+    normalizeOpenAiToolParameters(JSON.parse(JSON.stringify(schema))),
+  ) as unknown as ReturnType<typeof Type.Object>;
 }
 
 /** A remote MCP server controls its own schemas, so a shape TypeBox cannot express must
@@ -1188,18 +1243,38 @@ function builtinParameters(tool: ConnectorTool) {
   return undefined;
 }
 
-/** Keep recent visual state without repeatedly resending every earlier full screenshot. */
+/** Keep recent visual state while respecting an optional model image budget. */
 export function pruneComputerScreenshotContext(
   messages: AgentMessage[],
-  screenshotsToKeep = 2,
+  maxImagesPerPrompt?: number,
 ): AgentMessage[] {
-  let remaining = Math.max(0, screenshotsToKeep);
+  const imageLimit =
+    maxImagesPerPrompt === undefined
+      ? undefined
+      : Number.isFinite(maxImagesPerPrompt)
+        ? Math.max(0, Math.floor(maxImagesPerPrompt))
+        : DEFAULT_COMPUTER_SCREENSHOTS_TO_KEEP;
+  let remaining = imageLimit ?? DEFAULT_COMPUTER_SCREENSHOTS_TO_KEEP;
+  if (imageLimit !== undefined) {
+    const nonScreenshotImages = messages.reduce(
+      (count, message) =>
+        isComputerScreenshotMessage(message) ? count : count + imagePartCount(message),
+      0,
+    );
+    if (nonScreenshotImages > imageLimit) {
+      throw new Error(
+        `The configured model image limit is ${imageLimit}, but the prompt contains ${nonScreenshotImages} non-screenshot images.`,
+      );
+    }
+    remaining = imageLimit - nonScreenshotImages;
+  }
   let transformed: AgentMessage[] | undefined;
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
     if (!isComputerScreenshotMessage(message)) continue;
-    if (remaining > 0) {
-      remaining -= 1;
+    const images = imagePartCount(message);
+    if (remaining >= images) {
+      remaining -= images;
       continue;
     }
     transformed ??= [...messages];
@@ -1209,6 +1284,14 @@ export function pruneComputerScreenshotContext(
     };
   }
   return transformed ?? messages;
+}
+
+function imagePartCount(message: AgentMessage): number {
+  if (!("content" in message) || !Array.isArray(message.content)) return 0;
+  return message.content.filter(
+    (part: unknown) =>
+      part !== null && typeof part === "object" && "type" in part && part.type === "image",
+  ).length;
 }
 
 function isComputerScreenshotMessage(
@@ -1318,7 +1401,11 @@ export function jsonField(spec: unknown): ReturnType<typeof Type.String> {
   if (variants && variants.length > 0) {
     return Type.Union(variants.map((variant) => jsonField(variant))) as never;
   }
+  if (Array.isArray(definition.type) && definition.type.length > 0) {
+    return Type.Union(definition.type.map((type) => jsonField({ ...definition, type }))) as never;
+  }
   const type = "type" in definition ? String(definition.type) : "string";
+  if (type === "null") return Type.Null() as never;
   if (type === "number" || type === "integer") return Type.Number() as never;
   if (type === "boolean") return Type.Boolean() as never;
   if (type === "array") {
@@ -1340,10 +1427,18 @@ function summarizeToolResult(result: unknown) {
   try {
     const text = JSON.stringify(result);
     if (!text) return "ok";
-    return text.length > 12_000 ? `${text.slice(0, 12_000)}…` : text;
+    return clipToolResultText(text);
   } catch {
     return "ok";
   }
+}
+
+function boundAgentToolResult<T>(result: AgentToolResult<T>): AgentToolResult<T> {
+  if (!result || !Array.isArray(result.content)) return result;
+  return {
+    ...result,
+    content: clipToolResultContent(result.content),
+  };
 }
 
 function assistantText(message: unknown): string {
@@ -1437,7 +1532,7 @@ interface ToolHost {
   apiKey: string | undefined;
   nestedAgents: Set<Agent>;
   subagentGate: { acquire(): Promise<void>; release(): void };
-  toolCallBudget: { count: number; exceeded: boolean; limit: number };
+  toolCallBudget: ToolCallBudget;
   /** Shared fallback uniqueness when the model omits toolCallId (nested hosts reuse this). */
   toolCallSeq: { value: number };
   abortTurn(): void;
@@ -1450,20 +1545,68 @@ function toolCallBudgetExceededMessage(limit: number) {
   return `I stopped after reaching the limit of ${limit} tool calls in this turn. Send another message to continue.`;
 }
 
-function consumeToolCall(host: ToolHost): boolean {
-  host.toolCallBudget.count += 1;
-  const limit = host.toolCallBudget.limit;
-  // limit <= 0 means unlimited — do not abort.
-  if (limit <= 0 || host.toolCallBudget.count <= limit) return true;
-  if (!host.toolCallBudget.exceeded) {
-    host.toolCallBudget.exceeded = true;
+function toolCallBudgetFor(runId: string): ToolCallBudget {
+  const existing = toolCallBudgetsByRun.get(runId);
+  if (existing) {
+    existing.inFlight = 0;
+    existing.limit = maxToolCallsPerTurn();
+    return existing;
+  }
+  const budget: ToolCallBudget = {
+    count: 0,
+    exceeded: false,
+    limit: maxToolCallsPerTurn(),
+    inFlight: 0,
+  };
+  if (budget.limit > 0) toolCallBudgetsByRun.set(runId, budget);
+  return budget;
+}
+
+function releaseToolCallBudget(runId: string, keepForResume: boolean) {
+  if (!keepForResume) toolCallBudgetsByRun.delete(runId);
+}
+
+function maybeAbortToolCallBudget(host: ToolHost) {
+  if (host.toolCallBudget.exceeded && host.toolCallBudget.inFlight === 0) {
+    host.abortTurn();
+  }
+}
+
+function beginToolCall(host: ToolHost): boolean {
+  const budget = host.toolCallBudget;
+  if (budget.limit <= 0) {
+    budget.count += 1;
+    return true;
+  }
+  if (budget.exceeded) {
+    maybeAbortToolCallBudget(host);
+    return false;
+  }
+  budget.count += 1;
+  if (budget.count <= budget.limit) {
+    budget.inFlight += 1;
+    return true;
+  }
+  if (!budget.exceeded) {
+    budget.exceeded = true;
     host.queue.push({
       type: "progress",
-      text: `Stopped: more than ${limit} tool calls in one turn.`,
+      text: `Stopped: more than ${budget.limit} tool calls in one turn.`,
     });
   }
-  host.abortTurn();
+  maybeAbortToolCallBudget(host);
   return false;
+}
+
+function endToolCall(host: ToolHost) {
+  host.toolCallBudget.inFlight = Math.max(0, host.toolCallBudget.inFlight - 1);
+  maybeAbortToolCallBudget(host);
+}
+
+function modelForCompletion(model: Model<Api>, configuredMaxTokens?: number): Model<Api> {
+  const maxTokens = resolveCompletionMaxTokens(model.maxTokens, configuredMaxTokens);
+  if (maxTokens === model.maxTokens) return model;
+  return { ...model, maxTokens };
 }
 
 function createGate(max: number) {
@@ -1521,10 +1664,16 @@ function createQueue(): EventQueue {
 }
 
 export function reliableStreamOptions(
-  model: Pick<Model<Api>, "api" | "provider">,
+  model: Pick<Model<Api>, "api" | "provider" | "maxTokens">,
   options?: SimpleStreamOptions,
-): SimpleStreamOptions | undefined {
-  let next = options;
+  configuredMaxTokens?: number,
+): SimpleStreamOptions {
+  let next: SimpleStreamOptions = {
+    ...options,
+    timeoutMs: options?.timeoutMs ?? MODEL_STREAM_TIMEOUT_MS,
+    maxRetries: options?.maxRetries ?? MODEL_STREAM_MAX_RETRIES,
+    maxTokens: resolveCompletionMaxTokens(model.maxTokens, configuredMaxTokens, options?.maxTokens),
+  };
 
   if (model.provider === "openai-codex" || model.api === "openai-codex-responses") {
     // Pi cannot fall back after a WebSocket has emitted its start event. Long tool
@@ -1536,14 +1685,14 @@ export function reliableStreamOptions(
   // OpenCode Go/Zen require a sticky x-opencode-session header (affinity + some
   // models 400 without it). Pi 0.85.1 does not attach that header on its own.
   if (isOpenCodeProvider(model.provider)) {
-    const sessionId = next?.sessionId?.trim() || randomUUID();
+    const sessionId = next.sessionId?.trim() || randomUUID();
     next = {
       ...next,
       sessionId,
       headers: {
         "x-opencode-session": sessionId,
         "x-opencode-client": "rakazo",
-        ...next?.headers,
+        ...next.headers,
       },
     };
   }

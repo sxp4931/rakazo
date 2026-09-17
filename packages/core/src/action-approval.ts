@@ -28,6 +28,7 @@ const APPROVAL_REQUIRED_BUILTIN_TOOLS = new Set([
   "archive_bot",
   "secret_request",
   "forget_secret",
+  "forget_memory",
   "cloud_agent_launch",
   "cloud_agent_reply",
   "cloud_agent_cancel",

@@ -1,5 +1,6 @@
 import type { SpaceMemoryConfig } from "@rakazo/contracts";
 import type { ComponentType } from "react";
+import { SerenitySettingsForm } from "./SerenitySettingsForm";
 import { SupermemorySettingsForm } from "./SupermemorySettingsForm";
 
 export interface MemoryProviderConnectionDraft {
@@ -28,6 +29,18 @@ export const MEMORY_PROVIDER_SETTINGS: readonly MemoryProviderSettingsRegistrati
     SettingsForm: SupermemorySettingsForm,
     connectedLabel: (config) =>
       config.settings.mode === "cloud" ? "Supermemory Cloud" : `Local · ${config.settings.baseUrl}`,
+  },
+  {
+    id: "serenity",
+    name: "Serenity",
+    description: "Self-hosted Serenity brain for durable memory.",
+    SettingsForm: SerenitySettingsForm,
+    connectedLabel: (config) => {
+      const label = config.settings.brainLabel?.trim();
+      const endpoint = config.settings.endpoint ?? "Serenity";
+      const mode = config.settings.allowWrites === "true" ? "read/write" : "recall only";
+      return label ? `Serenity · ${label} · ${mode}` : `Serenity · ${endpoint} · ${mode}`;
+    },
   },
 ];
 

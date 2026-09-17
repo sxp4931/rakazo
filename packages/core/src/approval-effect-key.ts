@@ -52,3 +52,37 @@ export function approvalEffectKey(
   const digest = createHash("sha256").update(stableJsonValue(args)).digest("hex");
   return `${runId}:${toolName}:${digest}`;
 }
+
+/**
+ * Stable mutating-tool key for a run, tool, args, and live occurrence.
+ * Model tool-call ids change on replay, so they must not be part of the key.
+ * Occurrence 0 keeps the unsuffixed form so existing rows still match.
+ * Later identical-args calls in the same live attempt use 1, 2, …
+ */
+export function toolEffectIdempotencyKey(
+  runId: string,
+  toolName: string,
+  args: Record<string, unknown>,
+  occurrence = 0,
+): string {
+  const base = approvalEffectKey(runId, toolName, args);
+  return occurrence > 0 ? `${base}:${occurrence}` : base;
+}
+
+/** True when `key` is a current-style run/tool/args key (any occurrence). */
+export function isToolEffectIdempotencyKey(key: string, runId: string, toolName: string): boolean {
+  const prefix = `${runId}:${toolName}:`;
+  if (!key.startsWith(prefix)) return false;
+  return /^[a-f0-9]{64}(?::\d+)?$/.test(key.slice(prefix.length));
+}
+
+/** Pre-fix rows that included the ephemeral provider tool-call id. */
+export function legacyScopedToolEffectIdempotencyKey(
+  runId: string,
+  toolName: string,
+  executionId: string,
+  args: Record<string, unknown>,
+): string {
+  const digest = createHash("sha256").update(stableJsonValue(args)).digest("hex");
+  return `${runId}:${toolName}:${executionId}:${digest}`;
+}

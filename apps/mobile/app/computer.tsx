@@ -223,11 +223,12 @@ export default function Computer() {
           <ScreenWebView
             url={embeddedScreenUrl}
             interactive={false}
-            onError={() =>
+            onError={() => {
+              refreshController.invalidateScreen();
               setScreenError(
                 t("Could not load the desktop. This device cannot reach the screen URL."),
-              )
-            }
+              );
+            }}
           />
         ) : (
           <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: 16 }}>
@@ -429,11 +430,12 @@ export default function Computer() {
                   <ScreenWebView
                     url={embeddedScreenUrl}
                     interactive={hasControl}
-                    onError={() =>
+                    onError={() => {
+                      refreshController.invalidateScreen();
                       setScreenError(
                         t("Could not load the desktop. This device cannot reach the screen URL."),
-                      )
-                    }
+                      );
+                    }}
                   />
                 ) : (
                   <View
@@ -515,6 +517,7 @@ function ScreenWebView({
       pointerEvents={interactive ? "auto" : "none"}
       javaScriptEnabled
       domStorageEnabled
+      keyboardDisplayRequiresUserAction={false}
       allowsInlineMediaPlayback
       mediaPlaybackRequiresUserAction={false}
       originWhitelist={["*"]}

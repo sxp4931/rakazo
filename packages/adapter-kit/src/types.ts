@@ -285,6 +285,19 @@ export interface SemanticMemoryResult {
   memory: string;
   score: number;
   updatedAt?: string;
+  /** Stable provider id when the backend supports citation / forget. */
+  id?: string;
+  /** Attribution string preserved from the memory backend. */
+  provenance?: string;
+  /** Provider entity/namespace the fact was recalled from, when scoped. */
+  entity?: string;
+}
+
+export interface SemanticMemoryForgetRequest {
+  id: string;
+  reason?: string;
+  /** Entity/namespace from a prior recall citation, when the backend scopes deletes. */
+  entity?: string;
 }
 
 export type SemanticMemoryResponse<T = void> =
@@ -312,6 +325,12 @@ export interface SemanticMemoryPurgeHistoryRequest {
   generations: number[];
 }
 
+export type SemanticMemoryForgetResponse = SemanticMemoryResponse<{
+  id: string;
+  expired: boolean;
+  reason: string | null;
+}>;
+
 export interface AgentInputImage {
   name: string;
   mimeType: "image/jpeg" | "image/png" | "image/webp" | "image/gif";
@@ -334,6 +353,14 @@ export interface AgentRunModel {
   baseUrl?: string;
   /** Whether this custom connection accepts standard reasoning_effort. */
   reasoning?: boolean;
+  /** Whether this custom connection accepts image input. */
+  acceptsImages?: boolean;
+  /** Maximum number of image inputs the model connection accepts in one request. */
+  maxImagesPerPrompt?: number;
+  /** Maximum completion tokens sent to the model endpoint. */
+  maxTokens?: number;
+  /** Context-window limit used when sizing prompts and completions. */
+  contextWindow?: number;
   /** Preferred thinking effort for reasoning models; clamped to the model’s supported set. */
   thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | null;
   /** In-process OAuth credential from the encrypted store for this run. */

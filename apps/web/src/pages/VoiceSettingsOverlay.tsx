@@ -37,7 +37,7 @@ export function VoiceSettingsOverlay({
   const [apiKey, setApiKey] = useState("");
   const [voiceId, setVoiceId] = useState("");
   const [loading, setLoading] = useState(true);
-  const [pending, setPending] = useState<"connect" | "voice" | "test" | null>(null);
+  const [pending, setPending] = useState<"connect" | "disconnect" | "voice" | "test" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -47,7 +47,7 @@ export function VoiceSettingsOverlay({
     return () => onBusyChange?.(false);
   }, [onBusyChange]);
 
-  function markPending(next: "connect" | "voice" | "test" | null) {
+  function markPending(next: "connect" | "disconnect" | "voice" | "test" | null) {
     setPending(next);
     onBusyChange?.(next !== null);
   }
@@ -106,6 +106,22 @@ export function VoiceSettingsOverlay({
       setNotice(t`Connected ${selected.name}.`);
     } catch (err) {
       setError(err instanceof Error ? err.message : t`Could not connect this voice provider`);
+    } finally {
+      markPending(null);
+    }
+  }
+
+  async function disconnectProvider() {
+    if (!credential) return;
+    setError(null);
+    setNotice(null);
+    markPending("disconnect");
+    try {
+      await rpc.voice.disconnect({ provider: credential.provider });
+      setApiKey("");
+      await refresh(credential.provider);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t`Could not disconnect this voice provider`);
     } finally {
       markPending(null);
     }
@@ -176,14 +192,22 @@ export function VoiceSettingsOverlay({
                 <button
                   key={entry.id}
                   type="button"
+                  disabled={busy}
                   onClick={() => {
                     setProvider(entry.id);
                     setApiKey("");
                     setError(null);
                     setNotice(null);
-                    void refresh(entry.id);
+                    markPending("voice");
+                    void refresh(entry.id)
+                      .catch((err: unknown) =>
+                        setError(
+                          err instanceof Error ? err.message : t`Could not load voice settings`,
+                        ),
+                      )
+                      .finally(() => markPending(null));
                   }}
-                  className={`flex w-full items-center gap-3 border-b border-border px-3.5 py-3 text-start transition-colors last:border-0 ${
+                  className={`flex w-full items-center gap-3 border-b border-border px-3.5 py-3 text-start transition-colors last:border-0 disabled:pointer-events-none disabled:opacity-50 ${
                     entry.id === provider ? "bg-muted" : "hover:bg-accent"
                   }`}
                 >
@@ -245,6 +269,22 @@ export function VoiceSettingsOverlay({
                   <Trans>Connect</Trans>
                 )}
               </Button>
+              {credential ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="mt-3"
+                  disabled={busy}
+                  onClick={() => void disconnectProvider()}
+                >
+                  {pending === "disconnect" ? (
+                    <Trans>Disconnecting…</Trans>
+                  ) : (
+                    <Trans>Disconnect</Trans>
+                  )}
+                </Button>
+              ) : null}
 
               {credential ? (
                 <>
@@ -256,6 +296,7 @@ export function VoiceSettingsOverlay({
                       id={voiceSelectId}
                       className="w-full"
                       value={voiceId}
+                      disabled={busy}
                       onChange={(event) => void chooseVoice(event.target.value)}
                     >
                       {voiceOptions.map((voice) => (

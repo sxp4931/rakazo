@@ -64,7 +64,6 @@
   "Answered: {answer}": "Yanıtlandı: {answer}",
   "API key": "API anahtarı",
   "API key header": "API anahtarı üstbilgisi",
-  "Applies when you click Add server. Use the agent chips on each server card to change access at any time — the agent picks it up on its next message.": "Sunucu ekle'ye tıkladığında uygulanır. Erişimi istediğin zaman değiştirmek için her sunucu kartındaki agent çiplerini kullan — agent bunu bir sonraki mesajında algılar.",
   "Approval boundaries": "Onay sınırları",
   "Approve": "Onayla",
   "Approve this server to let your agent use its tools.": "Agent'ının bu sunucunun araçlarını kullanabilmesi için sunucuyu onayla.",
@@ -582,5 +581,7 @@
   "Authorize this server so agents can use its tools. A popup opens.": "Agent'ların araçlarını kullanabilmesi için bu sunucuyu yetkilendir. Bir açılır pencere açılır.",
   "Make sure nothing is still running on this computer.": "Bu bilgisayarda hâlâ çalışan bir şey olmadığından emin ol.",
   "Nothing is still running": "Hâlâ çalışan bir şey yok",
-  "Credentials are encrypted and never sent to the model.": "Kimlik bilgileri şifrelenir ve modele asla gönderilmez."
+  "Credentials are encrypted and never sent to the model.": "Kimlik bilgileri şifrelenir ve modele asla gönderilmez.",
+  "Rename section": "Bölümü yeniden adlandır",
+  "Could not rename section": "Bölüm yeniden adlandırılamadı"
 }

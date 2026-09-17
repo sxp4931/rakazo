@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { approvalEffectKey, stableJsonValue } from "./approval-effect-key.js";
+import {
+  approvalEffectKey,
+  isToolEffectIdempotencyKey,
+  legacyScopedToolEffectIdempotencyKey,
+  stableJsonValue,
+  toolEffectIdempotencyKey,
+} from "./approval-effect-key.js";
 
 describe("stableJsonValue", () => {
   it("sorts object keys", () => {
@@ -31,5 +37,58 @@ describe("approvalEffectKey", () => {
 
     expect(key).toMatch(/^run-1:destination\.write:[a-f0-9]{64}$/);
     expect(key).not.toContain("private draft");
+  });
+});
+
+describe("toolEffectIdempotencyKey", () => {
+  it("scopes effects to run, tool, and args without the model tool-call id", () => {
+    const write = { path: "a.txt", content: "one" };
+    expect(toolEffectIdempotencyKey("run-1", "write_file", write)).toMatch(
+      /^run-1:write_file:[a-f0-9]{64}$/,
+    );
+    expect(toolEffectIdempotencyKey("run-1", "write_file", write)).toBe(
+      approvalEffectKey("run-1", "write_file", write),
+    );
+    expect(toolEffectIdempotencyKey("run-1", "write_file", write)).not.toBe(
+      toolEffectIdempotencyKey("run-2", "write_file", write),
+    );
+    expect(toolEffectIdempotencyKey("run-1", "write_file", write)).not.toBe(
+      toolEffectIdempotencyKey("run-1", "shell", write),
+    );
+    expect(toolEffectIdempotencyKey("run-1", "write_file", write)).not.toBe(
+      toolEffectIdempotencyKey("run-1", "write_file", {
+        path: "a.txt",
+        content: "two",
+      }),
+    );
+    expect(toolEffectIdempotencyKey("run-1", "write_file", write)).not.toContain("call_0");
+  });
+
+  it("is stable across replay when the model assigns a new tool-call id", () => {
+    const args = { path: "MEMORY.md", content: "fact" };
+    expect(toolEffectIdempotencyKey("run-1", "remember", args)).toBe(
+      toolEffectIdempotencyKey("run-1", "remember", args),
+    );
+    expect(legacyScopedToolEffectIdempotencyKey("run-1", "remember", "call_0", args)).not.toBe(
+      toolEffectIdempotencyKey("run-1", "remember", args),
+    );
+  });
+
+  it("distinguishes identical-args calls in one run via occurrence", () => {
+    const args = { actions: [{ kind: "click", x: 12, y: 40 }] };
+    const first = toolEffectIdempotencyKey("run-1", "computer_act", args);
+    const second = toolEffectIdempotencyKey("run-1", "computer_act", args, 1);
+    expect(first).toBe(approvalEffectKey("run-1", "computer_act", args));
+    expect(second).not.toBe(first);
+    expect(second).toBe(`${first}:1`);
+    expect(isToolEffectIdempotencyKey(first, "run-1", "computer_act")).toBe(true);
+    expect(isToolEffectIdempotencyKey(second, "run-1", "computer_act")).toBe(true);
+    expect(
+      isToolEffectIdempotencyKey(
+        legacyScopedToolEffectIdempotencyKey("run-1", "computer_act", "call_0", args),
+        "run-1",
+        "computer_act",
+      ),
+    ).toBe(false);
   });
 });

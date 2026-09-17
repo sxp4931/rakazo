@@ -1,6 +1,8 @@
 import { ORPCError } from "@orpc/server";
 import type { SecretStore } from "@rakazo/adapter-kit";
 import {
+  classifyMemoryProviderSettings,
+  MemoryProviderDeploymentOwnerRequiredError,
   memoryProviderRequiresDeploymentOwner,
   prepareMemoryProviderConnection,
   toStringRecord,
@@ -12,6 +14,15 @@ import { withSerializableRetry } from "./serializable-retry.js";
 export interface MemoryProviderConfigDeps {
   prisma: PrismaClient;
   secrets: Pick<SecretStore, "put">;
+  /** Test seam: override DNS/trust classification without probing. */
+  classifySettings?: (
+    provider: string,
+    settings: Record<string, string>,
+  ) => Promise<Record<string, string>>;
+  /** Test seam: override prepare/probe. */
+  prepareConnection?: (
+    input: Parameters<typeof prepareMemoryProviderConnection>[0],
+  ) => ReturnType<typeof prepareMemoryProviderConnection>;
 }
 
 async function requireSpaceOwner(prisma: PrismaClient, actor: Actor): Promise<void> {
@@ -36,15 +47,40 @@ export async function persistMemoryProviderConfig(
   await requireSpaceOwner(deps.prisma, actor);
   let prepared: Awaited<ReturnType<typeof prepareMemoryProviderConnection>>;
   try {
+    // Fast-path known private endpoints before probing.
     if (
       memoryProviderRequiresDeploymentOwner(input.provider, input.settings) &&
       !actor.isDeploymentOwner
     ) {
       throw new ORPCError("FORBIDDEN");
     }
-    prepared = await prepareMemoryProviderConnection(input);
+    const classify = deps.classifySettings ?? classifyMemoryProviderSettings;
+    const prepare = deps.prepareConnection ?? prepareMemoryProviderConnection;
+    // Classify DNS/trust before any credentialed probe so LAN endpoints stay owner-gated.
+    const classifiedSettings = await classify(input.provider, input.settings);
+    if (
+      memoryProviderRequiresDeploymentOwner(input.provider, classifiedSettings) &&
+      !actor.isDeploymentOwner
+    ) {
+      throw new ORPCError("FORBIDDEN");
+    }
+    prepared = await prepare({
+      ...input,
+      settings: classifiedSettings,
+      allowPrivateEndpoint: actor.isDeploymentOwner,
+    });
+    // Defense in depth if prepare reclassified further.
+    if (
+      memoryProviderRequiresDeploymentOwner(prepared.provider, prepared.settings) &&
+      !actor.isDeploymentOwner
+    ) {
+      throw new ORPCError("FORBIDDEN");
+    }
   } catch (error) {
     if (error instanceof ORPCError) throw error;
+    if (error instanceof MemoryProviderDeploymentOwnerRequiredError) {
+      throw new ORPCError("FORBIDDEN");
+    }
     throw new ORPCError("BAD_REQUEST", {
       message: error instanceof Error ? error.message : "Memory provider connection failed",
     });

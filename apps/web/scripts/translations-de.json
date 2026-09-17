@@ -70,7 +70,6 @@
   "Answered: {answer}": "Beantwortet: {answer}",
   "API key": "API-Schlüssel",
   "API key header": "API-Schlüssel-Header",
-  "Applies when you click Add server. Use the agent chips on each server card to change access at any time — the agent picks it up on its next message.": "Gilt beim Hinzufügen des Servers. Mit den Agent-Chips auf jeder Serverkarte kannst du den Zugriff jederzeit ändern. Der Agent übernimmt die Änderung mit seiner nächsten Nachricht.",
   "Approval boundaries": "Bestätigungsgrenzen",
   "Approve": "Genehmigen",
   "Approve this server to let your agent use its tools.": "Genehmige diesen Server, damit dein Agent seine Tools verwenden kann.",
@@ -585,5 +584,7 @@
   "Authorize this server so agents can use its tools. A popup opens.": "Autorisiere diesen Server, damit Agents seine Tools nutzen können. Ein Pop-up öffnet sich.",
   "Make sure nothing is still running on this computer.": "Stelle sicher, dass auf diesem Computer nichts mehr läuft.",
   "Nothing is still running": "Nichts läuft mehr",
-  "Credentials are encrypted and never sent to the model.": "Zugangsdaten werden verschlüsselt und dem Modell nie gesendet."
+  "Credentials are encrypted and never sent to the model.": "Zugangsdaten werden verschlüsselt und dem Modell nie gesendet.",
+  "Rename section": "Abschnitt umbenennen",
+  "Could not rename section": "Abschnitt konnte nicht umbenannt werden"
 }

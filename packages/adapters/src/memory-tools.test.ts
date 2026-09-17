@@ -6,7 +6,13 @@ function tool(name: string): ConnectorTool {
   return { name, description: name, inputSchema: { type: "object", properties: {} } };
 }
 
-const allThree = [tool("remember"), tool("recall_memory"), tool("save_memory"), tool("shell")];
+const allThree = [
+  tool("remember"),
+  tool("recall_memory"),
+  tool("save_memory"),
+  tool("forget_memory"),
+  tool("shell"),
+];
 
 describe("selectMemoryTools", () => {
   it("keeps native remember and drops semantic memory tools when unconfigured", () => {
@@ -16,7 +22,7 @@ describe("selectMemoryTools", () => {
 
   it("keeps semantic memory tools and drops native remember when configured", () => {
     const names = selectMemoryTools(allThree, true).map((t) => t.name);
-    expect(names).toEqual(["recall_memory", "save_memory", "shell"]);
+    expect(names).toEqual(["recall_memory", "save_memory", "forget_memory", "shell"]);
   });
 
   it("is a no-op for tool lists with no memory tools at all", () => {

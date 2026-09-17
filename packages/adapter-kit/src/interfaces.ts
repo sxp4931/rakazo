@@ -54,6 +54,7 @@ import type {
   ScreenSession,
   SecretRecord,
   SemanticMemoryCapabilities,
+  SemanticMemoryForgetRequest,
   SemanticMemoryPurgeHistoryRequest,
   SemanticMemoryRecallRequest,
   SemanticMemoryResponse,
@@ -218,6 +219,11 @@ export interface SemanticMemoryProvider {
     request: SemanticMemoryPurgeHistoryRequest,
     context: AdapterContext,
   ): Promise<SemanticMemoryResponse>;
+  /** Optional durable forget. Providers without a forget verb omit this. */
+  forget?(
+    request: SemanticMemoryForgetRequest,
+    context: AdapterContext,
+  ): Promise<SemanticMemoryResponse<{ id: string; expired: boolean; reason: string | null }>>;
 }
 
 export interface AgentRuntime {

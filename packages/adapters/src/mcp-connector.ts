@@ -8,6 +8,7 @@ import type {
 import { isLocalMcpHost } from "@rakazo/contracts";
 import type { McpServer, PrismaClient } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
+import { catalogToolPrefix } from "./approval-effect.js";
 import { redactConnectorPayload, sanitizeConnectorError } from "./connector-safety.js";
 import {
   CATALOG_EXECUTE,
@@ -92,7 +93,11 @@ export class McpConnector implements ConnectorProvider {
   async discoverTools(context: AdapterContext): Promise<ConnectorTool[]> {
     const tools = await this.authorizedTools(context);
     if (tools.length <= DIRECT_TOOL_LIMIT) return tools;
-    return lazyCatalogTools("mcp", "mcp", "MCP", catalogEntries(tools));
+    // The catalog wrappers must not be named `mcp_*`: Anthropic rejects Claude Code OAuth
+    // requests that carry a tool whose name starts with "mcp_" (single underscore) with a
+    // misleading "You're out of extra usage" 400, on every model. Direct MCP tools are
+    // `mcp__server__tool` (double underscore) and are accepted; keep the wrappers off "mcp_".
+    return lazyCatalogTools(catalogToolPrefix("mcp"), "mcp", "MCP", catalogEntries(tools));
   }
 
   async resolveCall(

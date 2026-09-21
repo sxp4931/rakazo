@@ -151,6 +151,10 @@ msgstr "{workingBotName} arbeitet"
 msgid "@{0}"
 msgstr "@{0}"
 
+#: src/pages/shell/message-cards.tsx:124
+msgid "A bit of everything"
+msgstr ""
+
 #: src/pages/shell/bot-picker.tsx:105
 #: src/pages/shell/bot-picker.tsx:106
 msgid "About groups"
@@ -1484,6 +1488,10 @@ msgstr "Bot-Avatar anpassen"
 msgid "Dark"
 msgstr "Dunkel"
 
+#: src/pages/shell/message-cards.tsx:118
+msgid "Day-to-day work"
+msgstr ""
+
 #: src/pages/RoutineSchedule.tsx:72
 msgid "day"
 msgstr "Tag"
@@ -1988,6 +1996,10 @@ msgstr "Bild-Upload-Bereich"
 #: src/pages/PluginsOverlay.tsx:1006
 msgid "Import OpenAPI JSON"
 msgstr "OpenAPI-JSON importieren"
+
+#: src/pages/shell/message-cards.tsx:120
+msgid "Inbox & email"
+msgstr ""
 
 #: src/pages/shell/bot-panel.tsx:515
 msgid "Inherit default"
@@ -2981,6 +2993,10 @@ msgstr "Antworten"
 msgid "Replying to {replyName}"
 msgstr "Antwort an {replyName}"
 
+#: src/pages/shell/message-cards.tsx:122
+msgid "Research & writing"
+msgstr ""
+
 #: src/components/ComputerMaintenanceActions.tsx:100
 #: src/pages/shell/avatar-studio-popover.tsx:183
 msgid "Reset"
@@ -3771,6 +3787,10 @@ msgstr "Wochentage"
 #: src/pages/shell/dialogs.tsx:293
 msgid "What about its memories?"
 msgstr "Was soll mit seinen Erinnerungen geschehen?"
+
+#: src/pages/shell/message-cards.tsx:110
+msgid "What do you want me on first?"
+msgstr ""
 
 #: src/components/teach/TeachComputerOverlay.tsx:227
 msgid "What result will you demonstrate?"

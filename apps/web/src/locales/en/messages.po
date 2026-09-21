@@ -151,6 +151,10 @@ msgstr "{workingBotName} is working"
 msgid "@{0}"
 msgstr "@{0}"
 
+#: src/pages/shell/message-cards.tsx:124
+msgid "A bit of everything"
+msgstr "A bit of everything"
+
 #: src/pages/shell/bot-picker.tsx:105
 #: src/pages/shell/bot-picker.tsx:106
 msgid "About groups"
@@ -1484,6 +1488,10 @@ msgstr "Customize bot avatar"
 msgid "Dark"
 msgstr "Dark"
 
+#: src/pages/shell/message-cards.tsx:118
+msgid "Day-to-day work"
+msgstr "Day-to-day work"
+
 #: src/pages/RoutineSchedule.tsx:72
 msgid "day"
 msgstr "day"
@@ -1988,6 +1996,10 @@ msgstr "Image upload area"
 #: src/pages/PluginsOverlay.tsx:1006
 msgid "Import OpenAPI JSON"
 msgstr "Import OpenAPI JSON"
+
+#: src/pages/shell/message-cards.tsx:120
+msgid "Inbox & email"
+msgstr "Inbox & email"
 
 #: src/pages/shell/bot-panel.tsx:515
 msgid "Inherit default"
@@ -2981,6 +2993,10 @@ msgstr "Reply"
 msgid "Replying to {replyName}"
 msgstr "Replying to {replyName}"
 
+#: src/pages/shell/message-cards.tsx:122
+msgid "Research & writing"
+msgstr "Research & writing"
+
 #: src/components/ComputerMaintenanceActions.tsx:100
 #: src/pages/shell/avatar-studio-popover.tsx:183
 msgid "Reset"
@@ -3771,6 +3787,10 @@ msgstr "Weekdays"
 #: src/pages/shell/dialogs.tsx:293
 msgid "What about its memories?"
 msgstr "What about its memories?"
+
+#: src/pages/shell/message-cards.tsx:110
+msgid "What do you want me on first?"
+msgstr "What do you want me on first?"
 
 #: src/components/teach/TeachComputerOverlay.tsx:227
 msgid "What result will you demonstrate?"

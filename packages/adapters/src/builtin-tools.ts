@@ -780,7 +780,7 @@ export const builtinAgentTools: ConnectorTool[] = [
   {
     name: "update_bot",
     description:
-      "Update this bot's own profile fields that the user sees in chat: name (header and list label), title (short role line), and description. Call this when the user asks you to rename yourself or change your title/description. Do not claim you updated the profile without calling this tool.",
+      "Update this bot's own name (header and list label), title, description, avatar (profile picture or color/shape), or notifyOnFinish. Call this when the user asks you to rename yourself, change your title/description, change your profile picture, or turn finish notifications on or off. Do not claim you updated the profile without calling this tool.",
     inputSchema: {
       type: "object",
       properties: {
@@ -795,6 +795,25 @@ export const builtinAgentTools: ConnectorTool[] = [
         description: {
           type: "string",
           description: "Longer blurb describing what this bot does.",
+        },
+        color: {
+          type: "string",
+          description:
+            "Avatar color or encoded shape, e.g. #8B5CF6 or #8B5CF6::shape_3. Do not pass http URLs.",
+        },
+        artifact_id: {
+          type: "string",
+          description:
+            "Image artifact in this space to use as the profile picture. Prefer an image the user attached in this chat.",
+        },
+        use_attached_image: {
+          type: "boolean",
+          description:
+            "If true, use the latest image attached on this user message as the profile picture.",
+        },
+        notifyOnFinish: {
+          type: "boolean",
+          description: "true notifies the user when this bot finishes a run; false silences that.",
         },
       },
     },

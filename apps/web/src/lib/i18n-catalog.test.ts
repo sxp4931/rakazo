@@ -212,6 +212,36 @@ describe("lingui catalogs", () => {
     expect(i18n._({ id: "Cancel", message: "Cancel" })).toBe("Cancelar");
   });
 
+  it("ships Simplified Chinese translations for the Chief onboarding focus card", () => {
+    const catalog = readFileSync(
+      fileURLToPath(new URL("../locales/zh-CN/messages.po", import.meta.url)),
+      "utf8",
+    );
+
+    expect(catalog).toContain('msgid "What do you want me on first?"\nmsgstr "你想让我先做什么？"');
+    expect(catalog).toContain('msgid "Day-to-day work"\nmsgstr "日常工作"');
+    expect(catalog).toContain('msgid "Inbox & email"\nmsgstr "收件箱和邮件"');
+    expect(catalog).toContain('msgid "Research & writing"\nmsgstr "调研和写作"');
+    expect(catalog).toContain('msgid "A bit of everything"\nmsgstr "什么都做一点"');
+
+    i18n.load("zh-CN", {
+      "What do you want me on first?": "你想让我先做什么？",
+      "Day-to-day work": "日常工作",
+      "Inbox & email": "收件箱和邮件",
+      "Research & writing": "调研和写作",
+      "A bit of everything": "什么都做一点",
+    });
+    i18n.activate("zh-CN");
+    expect(
+      i18n._({
+        id: "What do you want me on first?",
+        message: "What do you want me on first?",
+      }),
+    ).toBe("你想让我先做什么？");
+    expect(i18n._({ id: "Day-to-day work", message: "Day-to-day work" })).toBe("日常工作");
+    expect(i18n._({ id: "Inbox & email", message: "Inbox & email" })).toBe("收件箱和邮件");
+  });
+
   it("ships the Russian runtime catalog with translated chrome and Russian plurals", () => {
     const catalog = readFileSync(
       fileURLToPath(new URL("../locales/ru/messages.po", import.meta.url)),

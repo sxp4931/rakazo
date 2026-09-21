@@ -3,9 +3,11 @@ import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   attachHostClipboardPaste,
+  attachMobilePaste,
   clipboardTextFromPaste,
   isPasteChord,
   pasteHostText,
+  readHostClipboardText,
   releaseModifierKeys,
   sendRemotePaste,
 } from "../../computer/clipboard-bridge.js";
@@ -205,8 +207,123 @@ describe("host clipboard paste bridge", () => {
     const supervisor = readFileSync(path.join(import.meta.dirname, "index.ts"), "utf8");
     expect(dockerfile).toMatch(/clipboard-bridge\.js/);
     expect(embed).toMatch(/attachHostClipboardPaste/);
+    expect(embed).toMatch(/attachMobilePaste/);
+    expect(embed).toMatch(/id="mobile-paste"/);
     expect(embed).toMatch(/clipboard-bridge\.js/);
     expect(start).toMatch(/clipboard-bridge\.js/);
     expect(supervisor).toMatch(/"clipboard-bridge\.js"/);
+  });
+});
+
+describe("mobile paste control", () => {
+  const connectedRfb = () => ({
+    viewOnly: false,
+    _rfbConnectionState: "connected",
+    clipboardPasteFrom: vi.fn(),
+    sendKey: vi.fn(),
+  });
+
+  const pasteButton = () => {
+    const listeners = new Map<string, (event: object) => void>();
+    const button = {
+      hidden: true,
+      addEventListener: (type: string, listener: (event: object) => void) => {
+        listeners.set(type, listener);
+      },
+      removeEventListener: (type: string, _listener: (event: object) => void) => {
+        listeners.delete(type);
+      },
+    };
+    return { button, listeners };
+  };
+
+  const pasteTarget = (value = "_________") => ({
+    value,
+    focus: vi.fn(),
+    blur: vi.fn(),
+    setSelectionRange: vi.fn(),
+  });
+
+  it("reads host clipboard text and treats denial as unavailable", async () => {
+    expect(await readHostClipboardText({ readText: async () => "from-phone" })).toBe("from-phone");
+    expect(await readHostClipboardText({ readText: async () => "" })).toBe("");
+    expect(
+      await readHostClipboardText({
+        readText: async () => {
+          throw new Error("denied");
+        },
+      }),
+    ).toBe(null);
+    expect(await readHostClipboardText({})).toBe(null);
+    expect(await readHostClipboardText(null)).toBe(null);
+  });
+
+  it("pastes clipboard text from a Paste tap", async () => {
+    const { button, listeners } = pasteButton();
+    const rfb = connectedRfb();
+    const fallbackFocus = pasteTarget();
+    const detach = attachMobilePaste(rfb, {
+      button,
+      clipboard: { readText: async () => "from-phone" },
+      fallbackFocus,
+    });
+    expect(button.hidden).toBe(false);
+    await listeners.get("click")?.({});
+    expect(rfb.clipboardPasteFrom).toHaveBeenCalledWith("from-phone");
+    expect(fallbackFocus.blur).toHaveBeenCalledOnce();
+    detach();
+    expect(listeners.size).toBe(0);
+  });
+
+  it("focuses the paste target before the clipboard read settles", async () => {
+    const { button, listeners } = pasteButton();
+    const rfb = connectedRfb();
+    const fallbackFocus = pasteTarget("___");
+    let settle: ((value: string) => void) | undefined;
+    attachMobilePaste(rfb, {
+      button,
+      clipboard: {
+        readText: () =>
+          new Promise((resolve) => {
+            settle = resolve;
+          }),
+      },
+      fallbackFocus,
+    });
+    const pending = listeners.get("click")?.({});
+    expect(fallbackFocus.focus).toHaveBeenCalledOnce();
+    expect(fallbackFocus.setSelectionRange).toHaveBeenCalledWith(3, 3);
+    expect(rfb.clipboardPasteFrom).not.toHaveBeenCalled();
+    settle?.("from-phone");
+    await pending;
+    expect(rfb.clipboardPasteFrom).toHaveBeenCalledWith("from-phone");
+    expect(fallbackFocus.blur).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the prepared paste target focused when the clipboard API is unavailable", async () => {
+    const { button, listeners } = pasteButton();
+    const rfb = connectedRfb();
+    const fallbackFocus = pasteTarget("___");
+    attachMobilePaste(rfb, {
+      button,
+      clipboard: {
+        readText: async () => {
+          throw new Error("denied");
+        },
+      },
+      fallbackFocus,
+    });
+    await listeners.get("click")?.({});
+    expect(rfb.clipboardPasteFrom).not.toHaveBeenCalled();
+    expect(fallbackFocus.focus).toHaveBeenCalledOnce();
+    expect(fallbackFocus.setSelectionRange).toHaveBeenCalledWith(3, 3);
+    expect(fallbackFocus.blur).not.toHaveBeenCalled();
+  });
+
+  it("does not show Paste in view-only sessions", () => {
+    const button = { hidden: true, addEventListener: vi.fn(), removeEventListener: vi.fn() };
+    attachMobilePaste({ viewOnly: true }, { button });
+    expect(button.hidden).toBe(true);
+    expect(button.addEventListener).not.toHaveBeenCalled();
   });
 });

@@ -151,6 +151,10 @@ msgstr "{workingBotName} 작업 중"
 msgid "@{0}"
 msgstr "@{0}"
 
+#: src/pages/shell/message-cards.tsx:124
+msgid "A bit of everything"
+msgstr ""
+
 #: src/pages/shell/bot-picker.tsx:105
 #: src/pages/shell/bot-picker.tsx:106
 msgid "About groups"
@@ -1484,6 +1488,10 @@ msgstr "봇 아바타 맞춤설정"
 msgid "Dark"
 msgstr "다크"
 
+#: src/pages/shell/message-cards.tsx:118
+msgid "Day-to-day work"
+msgstr ""
+
 #: src/pages/RoutineSchedule.tsx:72
 msgid "day"
 msgstr "일"
@@ -1988,6 +1996,10 @@ msgstr "이미지 업로드 영역"
 #: src/pages/PluginsOverlay.tsx:1006
 msgid "Import OpenAPI JSON"
 msgstr "OpenAPI JSON 가져오기"
+
+#: src/pages/shell/message-cards.tsx:120
+msgid "Inbox & email"
+msgstr ""
 
 #: src/pages/shell/bot-panel.tsx:515
 msgid "Inherit default"
@@ -2981,6 +2993,10 @@ msgstr "답장"
 msgid "Replying to {replyName}"
 msgstr "{replyName}에게 답장"
 
+#: src/pages/shell/message-cards.tsx:122
+msgid "Research & writing"
+msgstr ""
+
 #: src/components/ComputerMaintenanceActions.tsx:100
 #: src/pages/shell/avatar-studio-popover.tsx:183
 msgid "Reset"
@@ -3771,6 +3787,10 @@ msgstr "주중"
 #: src/pages/shell/dialogs.tsx:293
 msgid "What about its memories?"
 msgstr "이 Bot의 기억은 어떻게 할까요?"
+
+#: src/pages/shell/message-cards.tsx:110
+msgid "What do you want me on first?"
+msgstr ""
 
 #: src/components/teach/TeachComputerOverlay.tsx:227
 msgid "What result will you demonstrate?"

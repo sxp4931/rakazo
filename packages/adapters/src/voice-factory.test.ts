@@ -160,6 +160,96 @@ describe("CartesiaVoiceProvider", () => {
     expect(voices).toEqual([{ id: "sonic", label: "Katie", description: undefined }]);
   });
 
+  // An unbounded /voices request returns the whole catalog, overruns the voice JSON read cap
+  // and fails connecting the provider outright.
+  it("bounds the voices request so the catalog cannot overrun the read cap", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ data: [] })));
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = new CartesiaVoiceProvider();
+
+    await provider.verify("sk-test", ctx);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("limit=1");
+
+    await provider.listVoices("sk-test", ctx);
+    expect(String(fetchMock.mock.calls[1]?.[0])).toMatch(/\/voices\?limit=\d+$/);
+
+    // `limit` is ignored by the version synthesis is pinned to, so both reads must ask for a
+    // version that paginates.
+    for (const call of fetchMock.mock.calls) {
+      const headers = (call[1] as { headers: Record<string, string> }).headers;
+      expect(headers["Cartesia-Version"]).toBe("2026-08-14");
+    }
+  });
+
+  it("follows the catalog cursor so voices past the first page are listed", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ data: [{ id: "a", name: "A" }], has_more: true, next_page: "a" }),
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ data: [{ id: "b", name: "B" }], has_more: false })),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const voices = await new CartesiaVoiceProvider().listVoices("sk-test", ctx);
+
+    expect(voices.map((voice) => voice.id)).toEqual(["a", "b"]);
+    expect(String(fetchMock.mock.calls[1]?.[0])).toContain("starting_after=a");
+    // The walk stops on the page that reports no more, rather than requesting forever.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const firstSignal = (fetchMock.mock.calls[0]?.[1] as { signal?: AbortSignal } | undefined)
+      ?.signal;
+    const secondSignal = (fetchMock.mock.calls[1]?.[1] as { signal?: AbortSignal } | undefined)
+      ?.signal;
+    expect(firstSignal).toBeInstanceOf(AbortSignal);
+    expect(secondSignal).toBe(firstSignal);
+  });
+
+  it("stops catalog walks at the page ceiling when has_more stays true", async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => {
+      const page = fetchMock.mock.calls.length;
+      return new Response(
+        JSON.stringify({
+          data: [{ id: `v${page}`, name: `Voice ${page}` }],
+          has_more: true,
+          next_page: `v${page}`,
+        }),
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const voices = await new CartesiaVoiceProvider().listVoices("sk-test", ctx);
+
+    expect(fetchMock).toHaveBeenCalledTimes(20);
+    expect(voices.map((voice) => voice.id)).toEqual(
+      Array.from({ length: 20 }, (_, index) => `v${index + 1}`),
+    );
+    const signals = fetchMock.mock.calls.map(
+      (call) => (call[1] as { signal?: AbortSignal } | undefined)?.signal,
+    );
+    expect(signals[0]).toBeInstanceOf(AbortSignal);
+    expect(signals.every((signal) => signal === signals[0])).toBe(true);
+  });
+
+  it("keeps synthesis on the pinned API version", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => new Uint8Array([1]).buffer,
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await new CartesiaVoiceProvider().synthesize(
+      { text: "Hi", voiceId: "sonic", apiKey: "sk-test" },
+      ctx,
+    );
+
+    const init = fetchMock.mock.calls[0]?.[1] as { headers: Record<string, string> } | undefined;
+    expect(init?.headers["Cartesia-Version"]).toBe("2024-06-10");
+  });
+
   it("posts bytes to /tts/bytes", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,

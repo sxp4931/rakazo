@@ -540,6 +540,11 @@ export function ShellPage() {
   const [routineError, setRoutineError] = useState<string | null>(null);
   const [screenUrl, setScreenUrl] = useState<string | null>(null);
   const [computerOpen, setComputerOpen] = useState(false);
+  const [computerBotId, setComputerBotId] = useState<string | undefined>();
+  const computerOpenRef = useRef(false);
+  const computerBotIdRef = useRef<string | undefined>(undefined);
+  const computerBootEpoch = useRef(0);
+  const openComputerRef = useRef<(botId?: string) => Promise<void>>(async () => {});
   const [computerViewport, setComputerViewport] = useState<{
     height: number;
     offsetTop: number;
@@ -626,6 +631,10 @@ export function ShellPage() {
 
   const inGroup = Boolean(groupId);
   const active = inGroup ? undefined : (bots.find((b) => b.id === botId) ?? bots[0]);
+  const computerBot =
+    (computerBotId ? bots.find((bot) => bot.id === computerBotId) : undefined) ?? active;
+  computerOpenRef.current = computerOpen;
+  computerBotIdRef.current = computerBotId ?? active?.id;
   const activeGroup = groups.find((group) => group.id === groupId);
   const activePendingAttachments = useMemo(
     () => attachmentsForThread(pendingAttachments, inGroup ? groupId : active?.id),
@@ -852,7 +861,7 @@ export function ShellPage() {
       expandedHistoryThread.current === snap.threadId,
     );
     commitSnapshot(reconciled.snapshot);
-    commitComputer(null);
+    if (!computerOpenRef.current) commitComputer(null);
     setRoutines([]);
     setRoutinesBotId(null);
     // Keep the search-jump viewport; expandedHistoryThread merge still accepts live messages.
@@ -929,7 +938,9 @@ export function ShellPage() {
     return loadComputerScreen({
       load: () => rpc.computer.screenUrl({ botId: id }),
       isCurrent: () =>
-        request === screenRequest.current && activeBotId.current === id && computerVisible.current,
+        request === screenRequest.current &&
+        (activeBotId.current === id || computerBotIdRef.current === id) &&
+        computerVisible.current,
       commit: (screen) => {
         setScreenUrl(screen.url);
         setComputerError(screen.error);
@@ -1222,6 +1233,7 @@ export function ShellPage() {
         } else if (
           event.type === "bot.spawned" ||
           event.type === "bot.deleted" ||
+          event.type === "bot.updated" ||
           event.type === "run.started" ||
           isRunTerminalEvent(event) ||
           event.type === "thread.cleared"
@@ -1300,7 +1312,16 @@ export function ShellPage() {
       currentSnapshot: () => snapshotRef.current,
       subscribe: (cursor) => rpc.threads.subscribe({ groupId, cursor }, { signal: abort.signal }),
       applyEvent: (event) =>
-        applyThreadEvent(event, commitSnapshot, commitComputer, snapshotRef, computerRef),
+        applyThreadEvent(
+          event,
+          commitSnapshot,
+          (next) => {
+            if (isComputerStatusEvent(event) && event.botId !== computerBotIdRef.current) return;
+            commitComputer(next);
+          },
+          snapshotRef,
+          computerRef,
+        ),
       onEvent: (event, initial) => {
         const eventBot = botsRef.current.find((bot) => bot.id === event.botId);
         notifyBrowserForEvent(
@@ -1316,7 +1337,11 @@ export function ShellPage() {
           readVisibleGroups.current.delete(groupId);
           markVisibleGroupRead();
         }
-        if (event.type === "run.started" || isRunTerminalEvent(event)) {
+        if (
+          event.type === "run.started" ||
+          event.type === "bot.updated" ||
+          isRunTerminalEvent(event)
+        ) {
           void refreshBots().catch(() => undefined);
         }
         if (isRunTerminalEvent(event) || event.type === "run.waiting_input") {
@@ -2268,30 +2293,60 @@ export function ShellPage() {
   }
 
   async function bootComputer({
+    botId: targetBotId,
     takeControl,
     overlay,
     force = false,
   }: {
+    botId: string;
     takeControl: boolean;
     overlay: boolean;
     force?: boolean;
   }) {
-    if (!active) return;
-    const needsBoot = force || computer?.state !== "running" || !screenUrl;
+    const epoch = ++computerBootEpoch.current;
+    const stillThisBoot = () => computerBootEpoch.current === epoch;
+    const stillThisBot = () =>
+      computerBotIdRef.current === targetBotId || activeBotId.current === targetBotId;
+    const cached = computerCacheRef.current.get(targetBotId);
+    const targetComputer = computer?.botId === targetBotId ? computer : (cached?.computer ?? null);
+    const targetScreen = computer?.botId === targetBotId ? screenUrl : (cached?.screenUrl ?? null);
+    const needsBoot = force || targetComputer?.state !== "running" || !targetScreen;
     if (overlay && needsBoot) setBooting(true);
     setComputerError(null);
     setComputerErrorFromScreen(false);
     try {
-      if (needsBoot) await rpc.computer.boot({ botId: active.id });
-      if (takeControl) await rpc.computer.takeover({ botId: active.id });
-      await refreshThread(active.id);
+      if (needsBoot) {
+        const status = await rpc.computer.boot({ botId: targetBotId });
+        if (!stillThisBoot() || !stillThisBot()) return;
+        commitComputer(status);
+        cacheComputerFor(targetBotId, { computer: status });
+      }
+      if (takeControl) {
+        await rpc.computer.takeover({ botId: targetBotId });
+        if (!stillThisBoot() || !stillThisBot()) return;
+      }
+      await refreshComputerFor(targetBotId);
     } catch (error) {
+      if (!stillThisBoot() || !stillThisBot()) return;
       setComputerError(error instanceof Error ? error.message : t`Could not take control`);
       setComputerErrorFromScreen(false);
       throw error;
     } finally {
-      setBooting(false);
+      if (stillThisBoot()) setBooting(false);
     }
+  }
+
+  async function refreshComputerFor(targetBotId: string) {
+    if (activeBotId.current === targetBotId) {
+      await refreshThread(targetBotId);
+      return;
+    }
+    if (computerBotIdRef.current !== targetBotId) return;
+    const status = await rpc.computer.status({ botId: targetBotId });
+    if (computerBotIdRef.current !== targetBotId) return;
+    commitComputer(status);
+    cacheComputerFor(targetBotId, { computer: status });
+    await refreshComputerScreen(targetBotId);
   }
 
   useEffect(() => {
@@ -2319,6 +2374,7 @@ export function ShellPage() {
       autoBooted.current = botId;
       if (!computerPanelAutoUsesBoot(action)) return;
       await bootComputer({
+        botId,
         takeControl: false,
         overlay: action === "boot",
         force: true,
@@ -2333,6 +2389,7 @@ export function ShellPage() {
     setComputerOpen(false);
     setComputerError(null);
     setComputerErrorFromScreen(false);
+    setComputerBotId(active?.id);
   }, [active?.id]);
 
   useEffect(() => {
@@ -2398,40 +2455,66 @@ export function ShellPage() {
   }, []);
 
   useEffect(() => {
-    if ((panel !== "computer" && !computerOpen) || !active || computer?.state !== "running") return;
-    const ping = () => void rpc.computer.heartbeat({ botId: active.id }).catch(() => undefined);
+    const heartbeatBotId = computerBot?.id ?? active?.id;
+    if ((panel !== "computer" && !computerOpen) || !heartbeatBotId || computer?.state !== "running")
+      return;
+    const ping = () =>
+      void rpc.computer.heartbeat({ botId: heartbeatBotId }).catch(() => undefined);
     ping();
     const timer = window.setInterval(ping, 60_000);
     return () => window.clearInterval(timer);
-  }, [panel, computerOpen, active?.id, computer?.state]);
+  }, [panel, computerOpen, computerBot?.id, active?.id, computer?.state]);
 
-  async function openComputer() {
-    if (!active) return;
-    const needsTakeover = !userHoldsComputerControl(computer, active.id);
-    const blocked = computerTakeoverBlocked(computer, snapshot?.run?.status);
+  async function openComputer(botId?: string) {
+    const id = botId ?? active?.id;
+    if (!id) return;
+    const bot = botsRef.current.find((candidate) => candidate.id === id);
+    if (!bot) return;
+    computerBotIdRef.current = id;
+    setComputerBotId(id);
+    const cached = computerCacheRef.current.get(id);
+    const targetComputer = computer?.botId === id ? computer : (cached?.computer ?? null);
+    const targetScreen = computer?.botId === id ? screenUrl : (cached?.screenUrl ?? null);
+    if (computer?.botId !== id) {
+      commitComputer(targetComputer);
+      setScreenUrl(targetScreen);
+    }
+    setComputerOpen(true);
+    computerVisible.current = true;
+    const needsTakeover = !userHoldsComputerControl(targetComputer, id);
+    const blocked = computerTakeoverBlocked(targetComputer, snapshot?.run?.status);
     try {
       await bootComputer({
+        botId: id,
         takeControl: needsTakeover && !blocked,
-        overlay: (needsTakeover && !blocked) || computer?.state !== "running",
-        force: computer?.state !== "running",
+        overlay: (needsTakeover && !blocked) || targetComputer?.state !== "running",
+        force: targetComputer?.state !== "running",
       });
-      setComputerOpen(true);
     } catch {
       // computerError already set in bootComputer
     }
   }
+  openComputerRef.current = openComputer;
+  const onOpenComputer = useCallback((botId?: string) => {
+    void openComputerRef.current(botId);
+  }, []);
 
   const releaseComputer = useCallback(
     async (reason?: ComputerReleaseReason) => {
-      const botId = activeBotId.current;
+      const botId = computerBotIdRef.current ?? activeBotId.current;
       if (!botId) return;
       try {
         await rpc.computer.release({ botId, reason });
-        if (activeBotId.current !== botId) return;
+        if (computerBotIdRef.current !== botId && activeBotId.current !== botId) return;
         setComputerOpen(false);
-        await refreshThreadRef.current(botId).catch(() => undefined);
+        const groupId = activeGroupId.current;
+        if (groupId) {
+          await refreshGroupThreadRef.current(groupId).catch(() => undefined);
+        } else {
+          await refreshThreadRef.current(botId).catch(() => undefined);
+        }
       } catch {
-        if (activeBotId.current !== botId) return;
+        if (computerBotIdRef.current !== botId && activeBotId.current !== botId) return;
         setComputerError(t`Could not continue`);
         setComputerErrorFromScreen(false);
       }
@@ -2451,7 +2534,7 @@ export function ShellPage() {
   }
 
   const embeddedScreenUrl = embeddableScreenUrl(screenUrl);
-  const hasControl = userHoldsComputerControl(computer, active?.id);
+  const hasControl = userHoldsComputerControl(computer, computerBot?.id);
   const hideScreenLoadError = computerErrorFromScreen && Boolean(embeddedScreenUrl);
   const computerScreenError =
     computerError && !hideScreenLoadError ? (
@@ -2460,7 +2543,7 @@ export function ShellPage() {
         <Button
           variant="outline"
           size="sm"
-          onClick={() => active && void refreshComputerScreen(active.id)}
+          onClick={() => computerBot && void refreshComputerScreen(computerBot.id)}
         >
           <Trans>Retry screen</Trans>
         </Button>
@@ -2874,17 +2957,12 @@ export function ShellPage() {
                                 <span
                                   dir="auto"
                                   data-roster-bot-name={item.kind === "bot" ? "" : undefined}
-                                  className={`truncate text-[14px] text-foreground ${
+                                  className={`min-w-0 truncate text-[14px] text-foreground ${
                                     item.chat.unread ? "font-semibold" : "font-medium"
                                   }`}
                                 >
                                   {item.chat.name}
                                 </span>
-                                {item.kind === "bot" && item.chat.title ? (
-                                  <span className="max-w-[130px] shrink-0 truncate rounded-md border border-border bg-muted px-2 py-0.5 text-[11px] font-normal text-muted-foreground">
-                                    {item.chat.title}
-                                  </span>
-                                ) : null}
                                 {item.chat.unread ? (
                                   <span className="sr-only">
                                     <Trans> (unread)</Trans>
@@ -2903,9 +2981,16 @@ export function ShellPage() {
                                 ) : null}
                               </div>
                             </div>
+                            {item.kind === "bot" && item.chat.title ? (
+                              <div className="mt-1 flex">
+                                <span className="max-w-full truncate rounded-md border border-border bg-muted px-2 py-0.5 text-[11px] font-normal text-muted-foreground">
+                                  {item.chat.title}
+                                </span>
+                              </div>
+                            ) : null}
                             <div
                               dir="auto"
-                              className={`mt-0.5 truncate text-[12.5px] ${
+                              className={`mt-1 line-clamp-2 text-[12.5px] break-words whitespace-normal ${
                                 item.chat.unread
                                   ? "font-medium text-foreground/75"
                                   : "text-muted-foreground/60"
@@ -3247,6 +3332,7 @@ export function ShellPage() {
             voiceReady={Boolean(voiceStatus?.ready)}
             speakingMessageId={speakingMessageId}
             onSpeak={speakMessage}
+            onOpenComputer={onOpenComputer}
           />
         )}
         {recordingSkill ? (
@@ -4109,13 +4195,13 @@ export function ShellPage() {
       {booting ? (
         <div className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-[22px] bg-background/95">
           <div className="text-[19px] font-medium text-foreground">
-            <Trans>Booting up {active?.name}’s computer</Trans>
+            <Trans>Booting up {computerBot?.name ?? active?.name}’s computer</Trans>
           </div>
           <div className="h-[5px] w-[min(420px,70%)] overflow-hidden rounded-full bg-accent">
             <div className="h-full w-2/3 rounded-full bg-primary" />
           </div>
         </div>
-      ) : computerOpen && active ? (
+      ) : computerOpen && computerBot ? (
         <div className="fixed inset-0 z-30 bg-background">
           <div
             data-testid="computer-viewport"
@@ -4131,10 +4217,10 @@ export function ShellPage() {
             >
               <div className="flex min-w-0 flex-1 items-center gap-3">
                 <BotAvatar
-                  color={active.color}
-                  identity={active.id}
+                  color={computerBot.color}
+                  identity={computerBot.id}
                   size={28}
-                  status={active.status}
+                  status={computerBot.status}
                 />
                 {recordingSkill ? (
                   <TeachRecordingChrome
@@ -4145,7 +4231,7 @@ export function ShellPage() {
                   />
                 ) : (
                   <span className="truncate text-[15.5px] font-medium text-foreground" dir="auto">
-                    {computerLabel(computer?.mode, active.name)}
+                    {computerLabel(computer?.mode, computerBot.name)}
                   </span>
                 )}
                 {!recordingSkill && hasControl ? (
@@ -4182,21 +4268,21 @@ export function ShellPage() {
                     onRelease={releaseComputer}
                   />
                 ) : null}
-                {active && !recordingSkill ? (
+                {computerBot && !recordingSkill ? (
                   <TeachComputerOverlayControl
-                    key={active.id}
-                    botId={active.id}
+                    key={computerBot.id}
+                    botId={computerBot.id}
                     computer={computer}
                     busy={teachBusy}
                     onRefresh={refreshActiveTeaching}
                   />
                 ) : null}
-                {active && !recordingSkill ? (
+                {computerBot && !recordingSkill ? (
                   <ComputerMaintenanceActions
-                    botId={active.id}
+                    botId={computerBot.id}
                     computer={computer}
                     onChanged={async () => {
-                      await refreshThread(active.id);
+                      await refreshComputerFor(computerBot.id);
                     }}
                   />
                 ) : null}
@@ -4234,9 +4320,9 @@ export function ShellPage() {
                       pointerEvents: recordingSkill || !hasControl ? "none" : "auto",
                     }}
                   />
-                  {active ? (
+                  {computerBot ? (
                     <TeachCaptureOverlay
-                      botId={active.id}
+                      botId={computerBot.id}
                       skill={recordingSkill}
                       enabled={Boolean(recordingSkill)}
                       screenWidth={computer?.screenWidth}
@@ -4249,7 +4335,7 @@ export function ShellPage() {
                   {computerScreenError ??
                     (computer?.state === "suspended"
                       ? t`Computer is asleep`
-                      : computerLabel(computer?.mode, active.name))}
+                      : computerLabel(computer?.mode, computerBot.name))}
                 </div>
               )}
             </div>
@@ -4287,6 +4373,7 @@ const Transcript = memo(function Transcript({
   voiceReady,
   speakingMessageId,
   onSpeak,
+  onOpenComputer,
 }: {
   scrollRef: RefObject<HTMLDivElement | null>;
   artifactTarget: ArtifactTarget;
@@ -4312,6 +4399,7 @@ const Transcript = memo(function Transcript({
   voiceReady: boolean;
   speakingMessageId: string | null;
   onSpeak: (message: ThreadMessage) => void;
+  onOpenComputer: (botId?: string) => void;
 }) {
   const { t } = useLingui();
   const [atEnd, setAtEnd] = useState(true);
@@ -4344,14 +4432,14 @@ const Transcript = memo(function Transcript({
       return;
     }
     const range = selection.getRangeAt(0);
-    const rowOf = (node: Node) =>
+    const contentOf = (node: Node) =>
       (node instanceof Element ? node : node.parentElement)?.closest<HTMLElement>(
-        "[data-message-id]",
+        "[data-quote-message-id]",
       ) ?? null;
     const draft = quoteDraftForSelection(
       {
-        startRow: rowOf(range.startContainer),
-        endRow: rowOf(range.endContainer),
+        startContent: contentOf(range.startContainer),
+        endContent: contentOf(range.endContainer),
         text: selection.toString(),
       },
       messageById,
@@ -4514,9 +4602,6 @@ const Transcript = memo(function Transcript({
             <div
               key={message.id}
               data-message-id={message.id}
-              // Only persisted messages can be reply targets; synthetic rows
-              // (progress:, subagent:) carry a `prefix:` id.
-              data-quotable={message.id.includes(":") ? undefined : ""}
               className={peerReceipt ? "relative py-0.5" : "group/message relative hover:z-20"}
             >
               {!peerReceipt && !message.id.startsWith("progress:") ? (
@@ -4590,6 +4675,7 @@ const Transcript = memo(function Transcript({
                     voiceReady={voiceReady}
                     speaking={speakingMessageId === message.id}
                     onSpeak={() => onSpeak(message)}
+                    onOpenComputer={onOpenComputer}
                   />
                 </div>
               </div>
@@ -5661,6 +5747,7 @@ const MessageView = memo(function MessageView({
   voiceReady,
   speaking,
   onSpeak,
+  onOpenComputer,
 }: {
   artifactTarget: ArtifactTarget;
   canAnswer: boolean;
@@ -5680,6 +5767,7 @@ const MessageView = memo(function MessageView({
   voiceReady: boolean;
   speaking: boolean;
   onSpeak: () => void;
+  onOpenComputer: (botId?: string) => void;
 }) {
   const { t } = useLingui();
   const isNarration =
@@ -5689,6 +5777,7 @@ const MessageView = memo(function MessageView({
       (block) => block.kind === "text" || block.kind === "progress" || block.kind === "steps",
     );
   const isLive = message.id.startsWith("progress:");
+  const quoteMessageId = message.id.includes(":") ? undefined : message.id;
   const visibleNarrationBlocks = message.blocks.filter((block) => !isToolActivityBlock(block));
   const parentJumpId = replyPreview?.id ?? replyToMessageId;
   const speakerBot = message.botId ? peerBot?.(message.botId) : undefined;
@@ -5744,7 +5833,10 @@ const MessageView = memo(function MessageView({
             {visibleNarrationBlocks.map((block, i) => {
               if (block.kind === "text" || block.kind === "progress") {
                 return (
-                  <div key={i}>
+                  <div
+                    key={i}
+                    data-quote-message-id={block.kind === "text" ? quoteMessageId : undefined}
+                  >
                     <ChatMarkdown streaming={block.kind === "progress"}>{block.text}</ChatMarkdown>
                   </div>
                 );
@@ -5985,6 +6077,7 @@ const MessageView = memo(function MessageView({
             <div key={i} className="flex w-fit max-w-full justify-end">
               <div
                 data-testid="message-user-bubble"
+                data-quote-message-id={quoteMessageId}
                 className="max-w-full whitespace-pre-wrap wrap-anywhere rounded-[20px] bg-chat-user px-[18px] py-3 text-[15.5px] leading-[1.45] text-chat-user-foreground"
                 dir="auto"
               >
@@ -6001,7 +6094,9 @@ const MessageView = memo(function MessageView({
                 className="max-w-full rounded-[20px] bg-muted px-[18px] py-3 text-[15.5px] leading-[1.5] text-foreground/90"
                 dir="auto"
               >
-                <ChatMarkdown>{block.text}</ChatMarkdown>
+                <div data-quote-message-id={quoteMessageId}>
+                  <ChatMarkdown>{block.text}</ChatMarkdown>
+                </div>
                 {voiceReady ? (
                   <button
                     type="button"
@@ -6054,6 +6149,7 @@ const MessageView = memo(function MessageView({
           return (
             <div
               key={i}
+              data-testid="computer-card"
               className="w-[340px] rounded-[18px] border border-border bg-muted px-[18px] py-4"
             >
               <div className="flex items-center justify-between">
@@ -6073,6 +6169,14 @@ const MessageView = memo(function MessageView({
               <div className="my-2.5 text-[14.5px] leading-[1.5] text-foreground/75">
                 <ChatMarkdown>{block.text}</ChatMarkdown>
               </div>
+              <Button
+                type="button"
+                size="sm"
+                data-testid="computer-card-open"
+                onClick={() => onOpenComputer(message.botId)}
+              >
+                <Trans>Open</Trans>
+              </Button>
             </div>
           );
         }

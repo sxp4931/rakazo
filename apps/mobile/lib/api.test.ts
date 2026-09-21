@@ -246,6 +246,83 @@ describe("mobile API authentication", () => {
     expect(SecureStore.setItemAsync).not.toHaveBeenCalled();
   });
 
+  it("reports an rpc that hit its timeout as a timeout, not as a canceled fetch", async () => {
+    vi.useFakeTimers();
+    vi.mocked(SecureStore.getItemAsync).mockResolvedValue("session-token");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        (_input: unknown, init?: { signal?: AbortSignal }) =>
+          new Promise((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () =>
+              reject(new Error("fetch failed: FetchRequestCanceledException")),
+            );
+          }),
+      ),
+    );
+
+    const pending = rpc("computer/status", { botId: "bot" });
+    const rejection = expect(pending).rejects.toThrow("Request timed out");
+    await vi.advanceTimersByTimeAsync(8_000);
+    await rejection;
+  });
+
+  it("reports a stalled rpc response body as a timeout", async () => {
+    vi.useFakeTimers();
+    vi.mocked(SecureStore.getItemAsync).mockResolvedValue("session-token");
+    const cancel = vi.fn();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(new ReadableStream({ cancel }))),
+    );
+
+    const pending = rpc("computer/status", { botId: "bot" });
+    const rejection = expect(pending).rejects.toThrow("Request timed out");
+    await vi.advanceTimersByTimeAsync(8_000);
+    await rejection;
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it("reports a caller's cancellation with the caller's reason", async () => {
+    vi.useFakeTimers();
+    vi.mocked(SecureStore.getItemAsync).mockResolvedValue("session-token");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        (_input: unknown, init?: { signal?: AbortSignal }) =>
+          new Promise((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () =>
+              reject(new Error("fetch failed: FetchRequestCanceledException")),
+            );
+          }),
+      ),
+    );
+
+    const external = new AbortController();
+    const pending = rpc("computer/status", { botId: "bot" }, { signal: external.signal });
+    const rejection = expect(pending).rejects.toThrow("screen closed");
+    await vi.advanceTimersByTimeAsync(0);
+    external.abort(new Error("screen closed"));
+    await rejection;
+  });
+
+  it("lets a call opt into a longer timeout", async () => {
+    vi.useFakeTimers();
+    vi.mocked(SecureStore.getItemAsync).mockResolvedValue("session-token");
+    const fetchMock = vi.fn(
+      (_input: unknown, init?: { signal?: AbortSignal }) =>
+        new Promise<Response>((resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+          setTimeout(() => resolve(new Response(JSON.stringify({ json: { ok: true } }))), 20_000);
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const pending = rpc<{ ok: boolean }>("computer/boot", { botId: "bot" }, { timeoutMs: 120_000 });
+    await vi.advanceTimersByTimeAsync(20_000);
+    await expect(pending).resolves.toEqual({ ok: true });
+  });
+
   it("clears the local session even when the sign-out request fails", async () => {
     vi.mocked(SecureStore.getItemAsync).mockResolvedValue("session-token");
     vi.stubGlobal(

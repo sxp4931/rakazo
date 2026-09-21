@@ -79,6 +79,66 @@ export function pasteHostText(rfb, text) {
 }
 
 /**
+ * Read plain text from the host clipboard API.
+ * Returns null when the API is missing or denied so callers can fall back to a
+ * focusable paste target. An empty clipboard is "".
+ * @param {{ readText?: () => Promise<string> } | null | undefined} [clipboard]
+ */
+export async function readHostClipboardText(clipboard = globalThis.navigator?.clipboard) {
+  if (!clipboard || typeof clipboard.readText !== "function") return null;
+  try {
+    return (await clipboard.readText()) || "";
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Focus a paste fallback during the tap and park the caret after any sentinel
+ * so OS paste cannot treat those characters as clipboard text.
+ * @param {{ focus?: () => void, value?: string, setSelectionRange?: (start: number, end: number) => void } | null | undefined} target
+ */
+function focusPasteTarget(target) {
+  if (!target || typeof target.focus !== "function") return;
+  target.focus();
+  if (typeof target.value !== "string") return;
+  const length = target.value.length;
+  target.setSelectionRange?.(length, length);
+}
+
+/**
+ * Touch Paste control: one tap reads the host clipboard and pastes through the
+ * RFB bridge. When the clipboard API is unavailable, focus a paste target so
+ * the existing `paste` listener can fire without a modifier chord.
+ * @param {{ viewOnly?: boolean, clipboardPasteFrom?: (text: string) => void, sendKey?: Function, _rfbConnectionState?: string }} rfb
+ * @param {{ button?: HTMLElement | null, clipboard?: { readText?: () => Promise<string> }, fallbackFocus?: { focus?: () => void, blur?: () => void, value?: string, setSelectionRange?: (start: number, end: number) => void } | null }} [options]
+ * @returns {() => void} detach
+ */
+export function attachMobilePaste(rfb, options = {}) {
+  const button = options.button;
+  if (!button || rfb.viewOnly) return () => {};
+  button.hidden = false;
+  const onClick = async () => {
+    const clipboard = options.clipboard ?? globalThis.navigator?.clipboard;
+    const fallback = options.fallbackFocus;
+    // Focus during the tap, before any await, so a denial still has a software
+    // keyboard and a caret parked after the sentinel.
+    focusPasteTarget(fallback);
+    const text = await readHostClipboardText(clipboard);
+    if (text) {
+      pasteHostText(rfb, text);
+      fallback?.blur?.();
+      return;
+    }
+    if (text === "") fallback?.blur?.();
+  };
+  button.addEventListener("click", onClick);
+  return () => {
+    button.removeEventListener("click", onClick);
+  };
+}
+
+/**
  * @param {{ viewOnly?: boolean, clipboardPasteFrom?: (text: string) => void, sendKey?: Function, _rfbConnectionState?: string }} rfb
  * @param {{ target?: EventTarget }} [options]
  * @returns {() => void} detach

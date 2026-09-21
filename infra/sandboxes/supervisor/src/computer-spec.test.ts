@@ -669,6 +669,17 @@ describe("computer resource limits", () => {
     expect(HostConfig.PidsLimit).toBe(2048);
   });
 
+  it("falls back to the defaults when a variable is blank", () => {
+    // .env.example ships these keys blank; a blank value must read as "unset".
+    process.env.RAKAZO_COMPUTER_MEMORY = "";
+    process.env.RAKAZO_COMPUTER_CPUS = "  ";
+    process.env.RAKAZO_COMPUTER_PIDS_LIMIT = "";
+    const { HostConfig } = containerCreateOptions(createInput);
+    expect(HostConfig.Memory).toBe(2 * 1024 ** 3);
+    expect(HostConfig.NanoCpus).toBe(2e9);
+    expect(HostConfig.PidsLimit).toBe(2048);
+  });
+
   it("pins MemorySwap to Memory so the ceiling cannot be swapped past", () => {
     process.env.RAKAZO_COMPUTER_MEMORY = "1536m";
     const { HostConfig } = containerCreateOptions(createInput);
@@ -804,5 +815,27 @@ describe("computer home storage", () => {
       expect(() => assertVolumeSubpathSupport(version)).toThrow(/Docker Engine 26/);
     for (const version of ["1.45", "1.46", "2.0"])
       expect(() => assertVolumeSubpathSupport(version)).not.toThrow();
+  });
+
+  it("stops promptly when Docker sends SIGTERM to the start script", () => {
+    const root = path.resolve(import.meta.dirname, "../../computer");
+    const start = readFileSync(path.join(root, "start.sh"), "utf8");
+    expect(start).toMatch(/trap shutdown TERM INT/);
+    expect(start).toMatch(/kill -TERM "\$XVFB_PID"/);
+    expect(start).not.toMatch(/while kill -0 "\$XVFB_PID"/);
+    // The handler must be in place before the first child process starts, so a stop that
+    // arrives during startup is honoured instead of waiting for Docker's grace period.
+    const trapAt = start.indexOf("trap shutdown TERM INT");
+    const firstChildAt = start.search(/^[^#\n]*&\s*$/m);
+    expect(trapAt).toBeGreaterThan(-1);
+    expect(firstChildAt).toBeGreaterThan(-1);
+    expect(trapAt).toBeLessThan(firstChildAt);
+    // A stop before Xvfb exists must not try to signal or wait on an empty PID.
+    expect(start).toMatch(/^XVFB_PID=""$/m);
+    expect(start.match(/if \[\[ -n "\$XVFB_PID" \]\]; then/g)?.length ?? 0).toBeGreaterThanOrEqual(
+      2,
+    );
+    // Steady state waits on Xvfb instead of polling, so the trap runs immediately.
+    expect(start).toMatch(/^wait "\$XVFB_PID"$/m);
   });
 });

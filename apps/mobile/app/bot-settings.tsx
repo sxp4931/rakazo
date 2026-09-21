@@ -19,6 +19,7 @@ import {
   type MobileModelCredential,
   rpc,
 } from "../lib/api";
+import { COMPUTER_LIFECYCLE_TIMEOUT_MS } from "../lib/computer";
 import { useI18n } from "../lib/i18n";
 import { presentMessageActionSheet } from "../lib/message-action-sheet";
 import { useMobileTokens, useResolvedAppearance } from "../lib/native";
@@ -263,7 +264,11 @@ export default function BotSettingsScreen() {
           : null;
       }
       if (computerMode !== bot.computerMode) {
-        await rpc("bots/setComputer", { botId, mode: computerMode });
+        await rpc(
+          "bots/setComputer",
+          { botId, mode: computerMode },
+          { timeoutMs: COMPUTER_LIFECYCLE_TIMEOUT_MS },
+        );
       }
       // Use key presence so clearing title/description to "" still persists.
       if (Object.keys(input).length > 1) {

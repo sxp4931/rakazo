@@ -3,6 +3,7 @@ import {
   completionMarksUnread,
   completionMessageSegments,
   completionNotificationBody,
+  completionNotificationPreview,
   subagentMarksUnread,
 } from "./executor.js";
 
@@ -68,6 +69,29 @@ describe("completionNotificationBody", () => {
 
   it("uses the empty-run text when that is all the run produced", () => {
     expect(completionNotificationBody("", completionMessageSegments([]))).toBe("done.");
+  });
+});
+
+describe("completionNotificationPreview", () => {
+  it("preserves the actual address in an autolink notification", () => {
+    expect(completionNotificationPreview("Contact <_ops_@example.test> **today**")).toBe(
+      "Contact _ops_@example.test today",
+    );
+  });
+  it("preserves filenames in completion notifications", () => {
+    expect(completionNotificationPreview("Saved **monthly_sales_report.csv**")).toBe(
+      "Saved monthly_sales_report.csv",
+    );
+  });
+  it("strips Markdown and truncates the plain text", () => {
+    expect(completionNotificationPreview("Created **Projects-CoS** as a **Project**")).toBe(
+      "Created Projects-CoS as a Project",
+    );
+    const preview = completionNotificationPreview(`${"word ".repeat(50)}**end**`);
+    expect(preview).toHaveLength(180);
+    expect(preview).not.toContain("*");
+    expect(preview.startsWith("word word")).toBe(true);
+    expect(completionNotificationPreview("**  **")).toBe("");
   });
 });
 

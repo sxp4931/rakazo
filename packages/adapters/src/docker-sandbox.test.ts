@@ -6,6 +6,7 @@ import {
   MAX_SANDBOX_SUCCESS_RESPONSE_BYTES,
   SCREEN_RELEASE_TIMEOUT_MS,
 } from "./docker-sandbox.js";
+import { isSandboxGoneError } from "./e2b-sandbox.js";
 
 const context = {
   operationId: "docker-test",
@@ -347,5 +348,128 @@ describe("Docker page browser", () => {
         }),
       }),
     );
+  });
+});
+
+describe("Docker sandbox stopped containers", () => {
+  const computer = {
+    id: "computer",
+    botId: "bot",
+    kind: "docker" as const,
+    providerRef: "computer",
+  };
+
+  function supervisorWith(status: Response | (() => Response)) {
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/screen-mode")) {
+        return Response.json(
+          { error: "(HTTP code 409) container stopped/paused - container computer is not running" },
+          { status: 400 },
+        );
+      }
+      if (url.endsWith("/computers/computer") && (init?.method ?? "GET") === "GET") {
+        return typeof status === "function" ? status() : status;
+      }
+      throw new Error(`unexpected request ${init?.method ?? "GET"} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("treats a control revoke on a stopped container as already released", async () => {
+    const fetchMock = supervisorWith(() => Response.json({ id: "computer", running: false }));
+    const provider = new DockerSandboxProvider("http://supervisor.test", "test-token");
+
+    await expect(provider.setScreenControl(computer, false, context, "lease-1")).resolves.toBe(
+      undefined,
+    );
+
+    expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
+      "http://supervisor.test/computers/computer/screen-mode",
+      "http://supervisor.test/computers/computer",
+    ]);
+  });
+
+  it("reports a stopped container gone when granting interactive control", async () => {
+    supervisorWith(() => Response.json({ id: "computer", running: false }));
+    const provider = new DockerSandboxProvider("http://supervisor.test", "test-token");
+
+    const error = await provider.setScreenControl(computer, true, context, "lease-1").then(
+      () => null,
+      (error: unknown) => error,
+    );
+
+    expect(error).toBeInstanceOf(Error);
+    expect(isSandboxGoneError(error)).toBe(true);
+  });
+
+  it("reports a stopped container gone instead of a blank screen", async () => {
+    supervisorWith(() => Response.json({ id: "computer", running: false }));
+    const provider = new DockerSandboxProvider("http://supervisor.test", "test-token");
+
+    const error = await provider
+      .connectScreen(computer, { view: "stream", interactive: false }, context)
+      .then(
+        () => null,
+        (error: unknown) => error,
+      );
+
+    expect(isSandboxGoneError(error)).toBe(true);
+  });
+
+  it("does not treat a supervisor lookup failure as a stopped container", async () => {
+    // The supervisor answers 404 for any inspection error, not only a missing container.
+    supervisorWith(() => Response.json({ error: "computer not found" }, { status: 404 }));
+    const provider = new DockerSandboxProvider("http://supervisor.test", "test-token");
+
+    await expect(provider.setScreenControl(computer, false, context, "lease-1")).rejects.toThrow(
+      /sandbox screen mode failed: 400/,
+    );
+    await expect(
+      provider.connectScreen(computer, { view: "stream", interactive: false }, context),
+    ).resolves.toMatchObject({ url: null });
+  });
+
+  it("propagates cancellation raised while checking the container", async () => {
+    const controller = new AbortController();
+    supervisorWith(() => {
+      controller.abort();
+      throw controller.signal.reason;
+    });
+    const provider = new DockerSandboxProvider("http://supervisor.test", "test-token");
+    const cancelable = { ...context, signal: controller.signal };
+
+    await expect(
+      provider.setScreenControl(computer, false, cancelable, "lease-1"),
+    ).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("keeps a screen-mode failure on a live container an error", async () => {
+    supervisorWith(() => Response.json({ id: "computer", running: true }));
+    const provider = new DockerSandboxProvider("http://supervisor.test", "test-token");
+
+    await expect(provider.setScreenControl(computer, false, context, "lease-1")).rejects.toThrow(
+      /sandbox screen mode failed: 400 .*is not running/,
+    );
+    await expect(
+      provider.connectScreen(computer, { view: "stream", interactive: false }, context),
+    ).resolves.toMatchObject({ url: null });
+  });
+
+  it("does not guess when the supervisor cannot describe the container", async () => {
+    supervisorWith(() => new Response("upstream unavailable", { status: 502 }));
+    const provider = new DockerSandboxProvider("http://supervisor.test", "test-token");
+
+    await expect(provider.setScreenControl(computer, false, context, "lease-1")).rejects.toThrow(
+      /sandbox screen mode failed: 400/,
+    );
+    await expect(
+      provider.connectScreen(computer, { view: "stream", interactive: false }, context),
+    ).resolves.toMatchObject({ url: null });
   });
 });

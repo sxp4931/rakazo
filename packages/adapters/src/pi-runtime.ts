@@ -731,16 +731,22 @@ function withoutSteeringMessages(
 /**
  * Normalize `request_secret` arguments.
  *
- * `credential` and `replace` must survive: the executor stores a submitted value
- * only when `credential` is present, and it validates the destination shape
- * itself. An earlier version of this function listed only label/purpose/
- * connectionId, so every credential the model supplied was dropped here and the
- * saved value had nowhere to go.
+ * Missing label/purpose must fail rather than filling Code/otp placeholders.
+ * `credential` and `replace` must survive: the executor stores a submitted
+ * value only when `credential` is present, and it validates the destination
+ * shape itself. An earlier version of this function listed only
+ * label/purpose/connectionId, so every credential the model supplied was
+ * dropped here and the saved value had nowhere to go.
  */
 export function prepareRequestSecretArguments(raw: Record<string, unknown>) {
+  const label = raw.label == null ? "" : String(raw.label);
+  const purpose = raw.purpose == null ? "" : String(raw.purpose);
+  if (!label.trim() || !purpose.trim()) {
+    throw new Error("request_secret requires a non-empty label and purpose");
+  }
   return {
-    label: String(raw.label ?? "Code"),
-    purpose: String(raw.purpose ?? "otp"),
+    label,
+    purpose,
     ...(raw.connectionId ? { connectionId: String(raw.connectionId) } : {}),
     ...(raw.credential ? { credential: raw.credential } : {}),
     ...(raw.replace === true ? { replace: true } : {}),
@@ -826,6 +832,20 @@ function toAgentTool(tool: ConnectorTool, host: ToolHost, exposedName: string): 
           instructions: raw.instructions ? String(raw.instructions) : "",
           prompt: raw.prompt ? String(raw.prompt) : "",
           computer_mode: raw.computer_mode ? String(raw.computer_mode) : "",
+        };
+      }
+      if (tool.name === "update_bot") {
+        const notifyRaw = raw.notifyOnFinish ?? raw.notify_on_finish;
+        return {
+          ...(raw.name !== undefined ? { name: String(raw.name) } : {}),
+          ...(raw.title !== undefined ? { title: String(raw.title) } : {}),
+          ...(raw.description !== undefined ? { description: String(raw.description) } : {}),
+          ...(raw.color !== undefined ? { color: String(raw.color) } : {}),
+          ...(raw.artifact_id !== undefined ? { artifact_id: String(raw.artifact_id) } : {}),
+          ...(raw.use_attached_image !== undefined
+            ? { use_attached_image: raw.use_attached_image }
+            : {}),
+          ...(notifyRaw !== undefined ? { notifyOnFinish: notifyRaw } : {}),
         };
       }
       if (tool.name === "create_space") {
@@ -1229,6 +1249,17 @@ function builtinParameters(tool: ConnectorTool) {
       instructions: Type.Optional(Type.String()),
       prompt: Type.Optional(Type.String()),
       computer_mode: Type.Optional(Type.Union([Type.Literal("team"), Type.Literal("dedicated")])),
+    });
+  }
+  if (tool.name === "update_bot") {
+    return Type.Object({
+      name: Type.Optional(Type.String()),
+      title: Type.Optional(Type.String()),
+      description: Type.Optional(Type.String()),
+      color: Type.Optional(Type.String()),
+      artifact_id: Type.Optional(Type.String()),
+      use_attached_image: Type.Optional(Type.Boolean()),
+      notifyOnFinish: Type.Optional(Type.Boolean()),
     });
   }
   if (tool.name === "create_space") {

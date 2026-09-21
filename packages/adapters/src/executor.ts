@@ -7,6 +7,7 @@ import type {
   AgentRuntime,
   AgentToolCompletion,
   ArtifactStore,
+  AutoReviewProvider,
   BrowserProvider,
   ComputerRef,
   ConnectorCall,
@@ -70,6 +71,7 @@ import {
   type ToolCallStreak,
   toolRequiresApproval,
   toolRequiresExplicitApproval,
+  truncatedPlainText,
   unattendedTriggerToolRequiresApproval,
   userTurnBlocksForRun,
 } from "@rakazo/core";
@@ -139,13 +141,14 @@ import {
 } from "./approval-effect.js";
 import {
   autoReviewTimeoutMs,
-  buildAutoReviewPrompt,
   deploymentAutoReviewDefault,
   isAutoReviewCheckerConfigured,
   redactToolArgsForReview,
   resolveAutoReviewChecker,
-  runAutoReviewJudge,
+  resolveAutoReviewProviderKind,
 } from "./auto-review.js";
+import { createAutoReviewProvider } from "./auto-review-factory.js";
+import { attachedImageArtifactIds, resolveUpdateBotAvatar } from "./bot-avatar.js";
 import { loadBotMessageContext, messageBot, returnBotMessageOutcome } from "./bot-messages.js";
 import {
   findBotSecret,
@@ -195,6 +198,7 @@ import {
 import { observationToolResult, parseComputerActions } from "./computer-tools.js";
 import { checkpointRunComputerWorkspace } from "./computer-workspace.js";
 import { sanitizeConnectorError } from "./connector-safety.js";
+import { formatCurrentTimeInstruction } from "./current-time.js";
 import { resolveDeploymentModel } from "./deployment-model.js";
 import { handoffToGroupBot, loadGroupContext } from "./group-handoff.js";
 import {
@@ -566,6 +570,8 @@ export interface ExecutorDeps {
   secretHttp?: RemoteTransportDependencies;
   /** Remote cloud coding agents. Null/omit means tools stay uninjected. */
   cloudAgent?: CloudAgentConnection | null;
+  /** Optional Auto Review verifier. When omitted, the factory selects from env (llm | jev | scripted). */
+  autoReview?: AutoReviewProvider;
   /** Aborted when createApp stop() begins so in-flight continueRun boot waits exit promptly. */
   shutdownSignal?: AbortSignal;
 }
@@ -589,6 +595,30 @@ function isFailedToolResult(value: unknown): value is { error: unknown } {
   return error !== undefined && error !== null;
 }
 
+/**
+ * Tools can return an `error` or MCP `isError: true` instead of throwing. Pi keeps that
+ * result in `details` without populating `completion.error`. Read the failure for auditing
+ * without changing the result that reaches the model and lets it react to the failure.
+ */
+function toolResultError(result: unknown): unknown {
+  const payload = (result as { details?: unknown } | null)?.details ?? result;
+  if (isFailedToolResult(payload)) {
+    const message = (payload.error as { message?: unknown })?.message;
+    return typeof message === "string" ? message : payload.error;
+  }
+  if (!payload || typeof payload !== "object") return undefined;
+  if ((payload as { isError?: unknown }).isError !== true) return undefined;
+  const content = (payload as { content?: unknown }).content;
+  const text = Array.isArray(content)
+    ? content
+        .map((part) => (part as { text?: unknown } | null)?.text)
+        .filter((value): value is string => typeof value === "string")
+        .join("\n")
+        .trim()
+    : "";
+  return text || "tool reported an error result";
+}
+
 export function toolCompletionFromResult(
   base: Pick<AgentToolCompletion, "name" | "executionId" | "durationMs">,
   result: unknown,
@@ -605,14 +635,16 @@ export function toolCompletionAuditPayload(
   const durationMs = Number.isFinite(completion.durationMs)
     ? Math.max(0, Math.round(completion.durationMs))
     : 0;
+  const error =
+    completion.error === undefined ? toolResultError(completion.result) : completion.error;
   const payload: Record<string, unknown> = {
     name: redactSecrets(completion.name, secrets),
     executionId: redactSecrets(completion.executionId, secrets),
     durationMs,
-    outcome: completion.paused ? "paused" : completion.error === undefined ? "succeeded" : "error",
+    outcome: completion.paused ? "paused" : error === undefined ? "succeeded" : "error",
   };
-  if (completion.error !== undefined) {
-    payload.error = sanitizeConnectorError(completion.error, secrets);
+  if (error !== undefined) {
+    payload.error = sanitizeConnectorError(error, secrets);
   }
   if (!isAuditableToolResult(completion.result)) return payload;
 
@@ -747,8 +779,16 @@ export function buildApprovalContinuation(
       const catalog = catalogApprovalDetails(effect.request, CATALOG_APPROVAL_TOOL);
       if (catalog) {
         const exposed = options?.exposedToolNames;
-        if (!exposed || exposed.has(catalog.toolName)) {
-          return `${catalog.toolName}: ${formatRequest(catalog.args)}`;
+        const renamedMcpWrapper = catalogExecuteToolName("mcp");
+        const wrapper =
+          exposed &&
+          catalog.toolName === "mcp_execute_tool" &&
+          !exposed.has(catalog.toolName) &&
+          exposed.has(renamedMcpWrapper)
+            ? renamedMcpWrapper
+            : catalog.toolName;
+        if (!exposed || exposed.has(wrapper)) {
+          return `${wrapper}: ${formatRequest(catalog.args)}`;
         }
         // Catalog shrank: wrapper is gone — resume as the matching direct tool.
         const innerArgs = catalogApprovalInnerArgs(catalog) ?? {};
@@ -1911,18 +1951,21 @@ export function createRunExecutor(deps: ExecutorDeps) {
           const autoReviewPref = requiresMandatoryApproval
             ? false
             : await loadAutoReviewPreference();
+          const injectedReview = requiresMandatoryApproval ? undefined : deps.autoReview;
           const checker = requiresMandatoryApproval ? undefined : resolveAutoReviewChecker();
           const checkerConfigured =
-            autoReviewPref && checker
-              ? isAutoReviewCheckerConfigured({}) ||
-                Boolean(
-                  await findModelCredential(
-                    deps.prisma,
-                    { userId: run.userId, spaceId: run.spaceId },
-                    checker.provider,
-                  ),
-                )
-              : false;
+            autoReviewPref &&
+            (Boolean(injectedReview) ||
+              (checker
+                ? isAutoReviewCheckerConfigured({}) ||
+                  Boolean(
+                    await findModelCredential(
+                      deps.prisma,
+                      { userId: run.userId, spaceId: run.spaceId },
+                      checker.provider,
+                    ),
+                  )
+                : false));
           const plan = requiresMandatoryApproval
             ? "ask"
             : planActionGate({
@@ -1965,49 +2008,74 @@ export function createRunExecutor(deps: ExecutorDeps) {
               );
 
           const runAutoReview = async () => {
-            if (!checker) return;
+            if (!injectedReview && !checker) return;
             try {
-              const reviewCredential =
-                checker.provider === credential?.provider
-                  ? credential
-                  : await findModelCredential(
-                      deps.prisma,
-                      { userId: run.userId, spaceId: run.spaceId },
-                      checker.provider,
-                    );
-              const judgeKey = await resolveModelKey(
-                deps,
-                run.userId,
-                run.spaceId,
-                reviewCredential,
-                checker.provider,
-                checker.model,
-                (values) => runSecrets.push(...values),
-              );
-              const judge = await runAutoReviewJudge({
-                runtime: deps.runtime,
-                checker,
-                apiKey: judgeKey.oauth ? undefined : judgeKey.apiKey,
-                baseUrl: judgeKey.baseUrl,
-                reasoning: judgeKey.reasoning,
-                oauth: judgeKey.oauth
-                  ? { credential: judgeKey.oauth, persist: judgeKey.persistOAuth }
-                  : undefined,
-                prompt: buildAutoReviewPrompt({
-                  toolName: name,
-                  connectorKind,
-                  args: redactToolArgsForReview(args, runSecrets),
-                  userTask: task.prompt,
-                  botDescription: `${bot.name}: ${bot.title}\n${bot.description}`,
-                  matchingRules: approvalResolved.matchingRules,
-                }),
-                runId,
+              const reviewRequest = {
+                toolName: name,
+                connectorKind,
+                args: redactToolArgsForReview(args, runSecrets),
+                userTask: redactSecrets(task.prompt, runSecrets),
+                botDescription: redactSecrets(
+                  `${bot.name}: ${bot.title}\n${bot.description}`,
+                  runSecrets,
+                ),
+                matchingRules: approvalResolved.matchingRules,
+              };
+              const reviewContext: AdapterContext = {
+                operationId: `auto-review:${runId}`,
+                traceId: `auto-review:${runId}`,
                 spaceId: run.spaceId,
                 userId: run.userId,
                 botId: bot.id,
-                threadId: thread.id,
-                timeoutMs: autoReviewTimeoutMs(),
-              });
+                runId,
+                signal: AbortSignal.any([
+                  context.signal,
+                  AbortSignal.timeout(autoReviewTimeoutMs()),
+                ]),
+              };
+              let provider = injectedReview;
+              if (!provider) {
+                const kind = resolveAutoReviewProviderKind();
+                if (kind === "jev" || kind === "scripted") {
+                  provider = createAutoReviewProvider(kind);
+                } else {
+                  const reviewCredential = await findModelCredential(
+                    deps.prisma,
+                    { userId: run.userId, spaceId: run.spaceId },
+                    checker!.provider,
+                    checker!.model,
+                  );
+                  const judgeKey = await resolveModelKey(
+                    deps,
+                    run.userId,
+                    run.spaceId,
+                    reviewCredential,
+                    checker!.provider,
+                    checker!.model,
+                    (values) => runSecrets.push(...values),
+                  );
+                  provider = createAutoReviewProvider("llm", {
+                    llm: {
+                      runtime: deps.runtime,
+                      checker: checker!,
+                      apiKey: judgeKey.oauth ? undefined : judgeKey.apiKey,
+                      baseUrl: judgeKey.baseUrl,
+                      reasoning: judgeKey.reasoning,
+                      oauth: judgeKey.oauth
+                        ? { credential: judgeKey.oauth, persist: judgeKey.persistOAuth }
+                        : undefined,
+                      runId,
+                      spaceId: run.spaceId,
+                      userId: run.userId,
+                      botId: bot.id,
+                      threadId: thread.id,
+                      timeoutMs: autoReviewTimeoutMs(),
+                    },
+                  });
+                }
+              }
+              const judge = await provider.review(reviewRequest, reviewContext);
+              if (context.signal.aborted) return;
               reviewReason = judge.reason;
               gateDecision = applyJudgeDecision({
                 decision: judge.decision,
@@ -2024,6 +2092,8 @@ export function createRunExecutor(deps: ExecutorDeps) {
                 });
               }
             } catch {
+              // Cancellation must not write a review the next attempt would reuse.
+              if (context.signal.aborted) return;
               // Auth/refresh failures must fail closed like a checker error, not fail the run.
               reviewReason = "Checker could not authenticate.";
               gateDecision = applyJudgeDecision({
@@ -2036,14 +2106,16 @@ export function createRunExecutor(deps: ExecutorDeps) {
                   data: {
                     reviewDecision: "error",
                     reviewReason,
-                    reviewModel: `${checker.provider}/${checker.model}`,
+                    reviewModel: checker
+                      ? `${checker.provider}/${checker.model}`
+                      : (injectedReview?.describe().id ?? "auto-review"),
                   },
                 });
               }
             }
           };
 
-          if (applied && plan === "judge" && checker) {
+          if (applied && plan === "judge" && (injectedReview || checker)) {
             if (!applied.duplicate) {
               await runAutoReview();
             } else {
@@ -2067,6 +2139,7 @@ export function createRunExecutor(deps: ExecutorDeps) {
           } else if (applied?.duplicate && plan === "ask") {
             gateDecision = "ask";
           }
+          if (context.signal.aborted) return pauseForApproval();
 
           const needsApproval = gateDecision === "ask";
           const bypassApproval = gateDecision === "allow" && requiresApprovalByDefault;
@@ -3204,54 +3277,60 @@ export function createRunExecutor(deps: ExecutorDeps) {
             return spawned;
           }
           if (name === "update_bot") {
-            const patch: { name?: string; title?: string; description?: string } = {};
-            if (args.name !== undefined) patch.name = String(args.name);
-            if (args.title !== undefined) patch.title = String(args.title);
-            if (args.description !== undefined) patch.description = String(args.description);
+            const parsed = parseUpdateBotPatch(args, bot.name);
+            if ("error" in parsed) return finish(parsed);
+            const patch = parsed.patch;
+            const wantsImage = args.artifact_id !== undefined || args.use_attached_image === true;
+            let sourceImageArtifactIds: string[] = [];
+            if (wantsImage && run.sourceMessageId) {
+              const source = await deps.prisma.message.findUnique({
+                where: { id: run.sourceMessageId },
+                select: { blocks: true, threadId: true },
+              });
+              if (source?.threadId === thread.id) {
+                sourceImageArtifactIds = attachedImageArtifactIds(source.blocks as MessageBlock[]);
+              }
+            }
+            const avatar = await resolveUpdateBotAvatar({
+              color: args.color,
+              artifactId: args.artifact_id,
+              useAttachedImage: args.use_attached_image,
+              sourceImageArtifactIds,
+              loadArtifact: async (id) => {
+                if (!deps.artifacts) return null;
+                const row = await deps.prisma.artifact.findFirst({
+                  where: { id, spaceId: run.spaceId, userId: run.userId },
+                  select: { mimeType: true, storageKey: true },
+                });
+                if (!row || !isAttachmentImageMimeType(row.mimeType)) return null;
+                try {
+                  return await deps.artifacts.get(row.storageKey, context);
+                } catch {
+                  return null;
+                }
+              },
+            });
+            if ("error" in avatar && avatar.error !== "missing") {
+              return finish({ error: avatar.error });
+            }
+            if ("color" in avatar) patch.color = avatar.color;
             if (Object.keys(patch).length === 0) {
               return finish({
-                error: "Provide at least one of name, title, or description.",
+                error:
+                  "Provide at least one of name, title, description, notifyOnFinish, color, artifact_id, or use_attached_image.",
               });
-            }
-            if (patch.name !== undefined) {
-              const nextName = patch.name.trim();
-              if (!nextName) return finish({ error: "name cannot be empty." });
-              if (nextName.length > BOT_NAME_MAX_LENGTH) {
-                return finish({ error: `name must be at most ${BOT_NAME_MAX_LENGTH} characters.` });
-              }
-              patch.name = nextName;
-            }
-            if (patch.title !== undefined) {
-              const nextTitle = patch.title.trim();
-              if (nextTitle.length > BOT_TITLE_MAX_LENGTH) {
-                return finish({
-                  error: `title must be at most ${BOT_TITLE_MAX_LENGTH} characters.`,
-                });
-              }
-              patch.title = nextTitle;
-            }
-            if (patch.description !== undefined) {
-              const nextDescription = patch.description.trim();
-              if (nextDescription.length > BOT_DESCRIPTION_MAX_LENGTH) {
-                return finish({
-                  error: `description must be at most ${BOT_DESCRIPTION_MAX_LENGTH} characters.`,
-                });
-              }
-              patch.description = nextDescription;
-            }
-            // Placeholder names stay invisible in the header if only title changes;
-            // promote the title into name so chat chrome matches the profile update.
-            if (
-              patch.name === undefined &&
-              patch.title &&
-              /^(New Bot|Bot|Untitled)$/i.test(bot.name)
-            ) {
-              patch.name = patch.title.slice(0, BOT_NAME_MAX_LENGTH);
             }
             const updated = await deps.prisma.bot.update({
               where: { id: bot.id },
               data: patch,
-              select: { id: true, name: true, title: true, description: true },
+              select: {
+                id: true,
+                name: true,
+                title: true,
+                description: true,
+                color: true,
+                notifyOnFinish: true,
+              },
             });
             try {
               await deps.events.append({
@@ -3276,6 +3355,8 @@ export function createRunExecutor(deps: ExecutorDeps) {
               name: updated.name,
               title: updated.title,
               description: updated.description,
+              avatar: updated.color.startsWith("data:image/") ? "image" : updated.color,
+              notifyOnFinish: updated.notifyOnFinish,
             });
           }
           if (name === "message_user") {
@@ -3549,6 +3630,7 @@ export function createRunExecutor(deps: ExecutorDeps) {
               prompt,
               instructions: [
                 bot.instructions || `${bot.name}: ${bot.title}\n${bot.description}`,
+                formatCurrentTimeInstruction(),
                 groupContext,
                 messagingContext,
                 memoryContext ? redactSecrets(memoryContext, runSecrets) : undefined,
@@ -3562,7 +3644,7 @@ export function createRunExecutor(deps: ExecutorDeps) {
                 "A bot and a subagent are different. Never use both for the same request.",
                 "create_space proposes a new privacy boundary inside the current organization. Use it when the user asks to create a space or separate data between teams or projects. It always pauses for explicit user approval; never claim the space exists before the tool succeeds.",
                 "spawn_bot creates a lasting regular bot (own chat, computer, memory) that appears in the user's bot list. If the user asked to create a bot, call spawn_bot once and stop. Do not run_subagent to demo it.",
-                "update_bot updates this bot's own name (chat header / list label), title, and description. When the user asks you to rename yourself or change your title or description, call update_bot — do not claim you changed them without the tool.",
+                "update_bot updates this bot's own name (chat header / list label), title, description, avatar, and notifyOnFinish. When the user asks you to rename yourself, change your title or description, change your profile picture, or turn finish notifications on or off, call update_bot — do not claim you changed them without the tool. Pass color for a hex or encoded shape, artifact_id for an image in this space, or use_attached_image when they attached a picture on this message.",
                 "run_subagent is a short helper inside this turn only. It is not a bot, has no thread, and does not show in the list. Use it for parallel work you will summarize here.",
                 botDirectory,
                 "archive_bot safely archives a bot this bot created, and only that bot. Use it when the user asks to remove that bot or when it is finished and unused. The user can restore it or permanently delete it later. confirm_name must exactly match its name.",
@@ -4109,11 +4191,12 @@ export function createRunExecutor(deps: ExecutorDeps) {
               botMessageOutcome.intent,
             ).catch((error) => getLogger().error("bot message result return", error));
           }
-          if (text && !completed.continuationRunId) {
+          const notifyBody = completionNotificationPreview(text);
+          if (notifyBody && !completed.continuationRunId) {
             await notifyRun(deps, run, {
               kind: "completion",
               title: `${bot.name} finished`,
-              body: text.slice(0, 180),
+              body: notifyBody,
               botId: bot.id,
               threadId: thread.id,
             });
@@ -4262,6 +4345,71 @@ async function computerScreenToolResult(
 ) {
   const result = await withComputerScreenAvailability(work);
   return finish ? finish(result) : result;
+}
+
+export type UpdateBotPatch = {
+  name?: string;
+  title?: string;
+  description?: string;
+  color?: string;
+  notifyOnFinish?: boolean;
+};
+
+function hasUpdateBotAvatarArgs(args: Record<string, unknown>): boolean {
+  return (
+    args.color !== undefined || args.artifact_id !== undefined || args.use_attached_image === true
+  );
+}
+
+export function parseUpdateBotPatch(
+  args: Record<string, unknown>,
+  currentName: string,
+): { error: string } | { patch: UpdateBotPatch } {
+  const patch: UpdateBotPatch = {};
+  if (args.name !== undefined) patch.name = String(args.name);
+  if (args.title !== undefined) patch.title = String(args.title);
+  if (args.description !== undefined) patch.description = String(args.description);
+  const notifyRaw = args.notifyOnFinish !== undefined ? args.notifyOnFinish : args.notify_on_finish;
+  if (notifyRaw !== undefined) {
+    if (typeof notifyRaw !== "boolean") {
+      return { error: "notifyOnFinish must be true or false." };
+    }
+    patch.notifyOnFinish = notifyRaw;
+  }
+  if (Object.keys(patch).length === 0 && !hasUpdateBotAvatarArgs(args)) {
+    return {
+      error:
+        "Provide at least one of name, title, description, notifyOnFinish, color, artifact_id, or use_attached_image.",
+    };
+  }
+  if (patch.name !== undefined) {
+    const nextName = patch.name.trim();
+    if (!nextName) return { error: "name cannot be empty." };
+    if (nextName.length > BOT_NAME_MAX_LENGTH) {
+      return { error: `name must be at most ${BOT_NAME_MAX_LENGTH} characters.` };
+    }
+    patch.name = nextName;
+  }
+  if (patch.title !== undefined) {
+    const nextTitle = patch.title.trim();
+    if (nextTitle.length > BOT_TITLE_MAX_LENGTH) {
+      return { error: `title must be at most ${BOT_TITLE_MAX_LENGTH} characters.` };
+    }
+    patch.title = nextTitle;
+  }
+  if (patch.description !== undefined) {
+    const nextDescription = patch.description.trim();
+    if (nextDescription.length > BOT_DESCRIPTION_MAX_LENGTH) {
+      return { error: `description must be at most ${BOT_DESCRIPTION_MAX_LENGTH} characters.` };
+    }
+    patch.description = nextDescription;
+  }
+  // Placeholder names stay invisible in the header if only title changes;
+  // promote the title into name so chat chrome matches the profile update.
+  if (patch.name === undefined && patch.title && /^(New Bot|Bot|Untitled)$/i.test(currentName)) {
+    patch.name = patch.title.slice(0, BOT_NAME_MAX_LENGTH);
+  }
+  return { patch };
 }
 
 export async function runNotificationsEnabled(
@@ -4425,6 +4573,13 @@ export function completionNotificationBody(assembled: string, blocks: MessageBlo
     .filter((block): block is Extract<MessageBlock, { kind: "text" }> => block.kind === "text")
     .map((block) => block.text)
     .join("");
+}
+
+const COMPLETION_NOTIFICATION_MAX_CHARS = 180;
+
+/** Push body: Markdown stripped, then truncated so a cut cannot land inside a marker. */
+export function completionNotificationPreview(text: string): string {
+  return truncatedPlainText(text, COMPLETION_NOTIFICATION_MAX_CHARS);
 }
 
 export function completionMarksUnread(trigger: string, text: string): boolean {

@@ -91,6 +91,13 @@ function encodedFileResponseLimit(maxBytes: number | undefined): number {
   return Math.ceil(maxBytes / 3) * 4 + 1024;
 }
 
+/** Named so the API's isSandboxGoneError recognizes it and clears the dead computer row. */
+function sandboxGoneError(computer: ComputerRef): Error {
+  return Object.assign(new Error(`sandbox ${computer.id} is not running`), {
+    name: "SandboxNotFoundError",
+  });
+}
+
 export class DockerSandboxProvider implements SandboxProvider {
   private readonly supervisorToken: string;
 
@@ -233,6 +240,11 @@ export class DockerSandboxProvider implements SandboxProvider {
       if (/cannot allocate another screen/i.test(detail)) {
         throw new Error("This Team Computer cannot allocate another screen.");
       }
+      // A container that stopped under a "running" row (host reboot, docker stop) has no
+      // screen to show; report it gone so the caller offers a boot instead of a blank error.
+      if ((await this.containerRunning(computer, context)) === false) {
+        throw sandboxGoneError(computer);
+      }
       return { url: null, mimeType: "text/html", close: async () => undefined };
     }
     const body = await readSandboxJson<{ screenUrl?: string }>(res, context.signal);
@@ -255,7 +267,43 @@ export class DockerSandboxProvider implements SandboxProvider {
       body: JSON.stringify({ interactive, controlToken }),
       signal: context.signal,
     });
-    if (!res.ok) throw new Error(`sandbox screen mode failed: ${res.status}`);
+    if (!res.ok) {
+      const detail = await safeBody(res, context.signal);
+      if ((await this.containerRunning(computer, context)) === false) {
+        // The screen died with its container: a revoke has nothing left to release, while
+        // an interactive grant needs the computer booted first.
+        if (!interactive) return;
+        throw sandboxGoneError(computer);
+      }
+      throw new Error(`sandbox screen mode failed: ${res.status} ${detail}`.trim());
+    }
+  }
+
+  /**
+   * The supervisor's view of the container, or null when it cannot say. Only a successful
+   * inspection counts: the supervisor answers 404 for any lookup failure, so that and transport
+   * errors leave the caller on its previous behaviour rather than starting a recovery.
+   */
+  private async containerRunning(
+    computer: ComputerRef,
+    context: AdapterContext,
+  ): Promise<boolean | null> {
+    try {
+      const res = await fetch(this.url(`/computers/${computer.id}`), {
+        method: "GET",
+        headers: this.headers(context, computer.botId),
+        signal: context.signal,
+      });
+      if (!res.ok) {
+        cancelResponseBody(res);
+        return null;
+      }
+      const body = await readSandboxJson<{ running?: boolean }>(res, context.signal);
+      return body.running === true;
+    } catch (error) {
+      if (context.signal.aborted) throw error;
+      return null;
+    }
   }
 
   async sendInput(

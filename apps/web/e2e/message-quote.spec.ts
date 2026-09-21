@@ -65,7 +65,7 @@ test("selecting a text span quotes it into a reply", async ({ page }, testInfo) 
   const composer = page.getByRole("combobox", { name: /Message/ });
   const quoteButton = page.getByTestId("quote-selection");
 
-  const sourceText = `quote-source-${stamp} shows forty two percent growth`;
+  const sourceText = `quote-source-${stamp} shows **forty two percent** growth`;
   await composer.fill(sourceText);
   await composer.press("Enter");
   const sourceRow = transcript
@@ -76,7 +76,7 @@ test("selecting a text span quotes it into a reply", async ({ page }, testInfo) 
   await expect(sourceRow).toBeVisible({ timeout: 20_000 });
 
   // Selection inside one message offers the Quote action; Escape dismisses it.
-  await selectAndRelease(page, sourceRow, "forty two percent");
+  await selectAndRelease(page, sourceRow, "**forty two percent**");
   await expect(quoteButton).toBeVisible();
   await captureScreenshot(page, testInfo, "message-quote-selection");
   await page.keyboard.press("Escape");
@@ -84,7 +84,7 @@ test("selecting a text span quotes it into a reply", async ({ page }, testInfo) 
 
   // A selection with no mouse release (keyboard, assistive tech) still offers
   // Quote — the affordance hangs off selectionchange, not mouseup.
-  await selectAndRelease(page, sourceRow, "forty two percent", "forty two percent", {
+  await selectAndRelease(page, sourceRow, "**forty two percent**", "**forty two percent**", {
     release: false,
   });
   await expect(quoteButton).toBeVisible();
@@ -92,13 +92,13 @@ test("selecting a text span quotes it into a reply", async ({ page }, testInfo) 
   await expect(quoteButton).toHaveCount(0);
 
   // Quoting arms the existing reply flow with the excerpt in the chip.
-  await selectAndRelease(page, sourceRow, "forty two percent");
+  await selectAndRelease(page, sourceRow, "**forty two percent**");
   await expect(quoteButton).toBeVisible();
   await quoteButton.click();
   const replyChip = page.getByTestId("reply-chip");
   await expect(replyChip).toBeVisible();
   await expect(replyChip).toContainText(/Replying to/);
-  await expect(replyChip).toContainText("forty two percent");
+  await expect(replyChip).toContainText("**forty two percent**");
 
   const replyText = `quote-reply-${stamp} why this number?`;
   await composer.fill(replyText);
@@ -114,7 +114,7 @@ test("selecting a text span quotes it into a reply", async ({ page }, testInfo) 
   await expect(replyRow).toBeVisible({ timeout: 20_000 });
   const parentPreview = replyRow.getByTestId("reply-parent-preview");
   await expect(parentPreview).toBeVisible();
-  await expect(parentPreview).toContainText("forty two percent");
+  await expect(parentPreview).toContainText("**forty two percent**");
   await expect(parentPreview).not.toContainText("quote-source");
   await captureScreenshot(page, testInfo, "message-quote-reply");
 
@@ -129,7 +129,53 @@ test("selecting a text span quotes it into a reply", async ({ page }, testInfo) 
     .filter({ hasText: replyText })
     .first();
   await expect(reloadedRow).toBeVisible({ timeout: 20_000 });
-  await expect(reloadedRow.getByTestId("reply-parent-preview")).toContainText("forty two percent");
+  await expect(reloadedRow.getByTestId("reply-parent-preview")).toContainText(
+    "**forty two percent**",
+  );
+});
+
+test("rendered markdown selections survive server quote derivation", async ({ page }) => {
+  const stamp = Date.now();
+  await signup(page, `quote-markdown-${stamp}@rakazo.test`, "password12", "Quote Tester");
+  await completeOnboarding(page);
+
+  const transcript = page.getByTestId("transcript");
+  const composer = page.getByRole("combobox", { name: /Message/ });
+  const sourceMarker = `md-${stamp}`;
+  await composer.fill(`quote markdown fixture ${sourceMarker}`);
+  await composer.press("Enter");
+
+  // Bot bubble: scripted fixture → ChatMarkdown + server markdown derivation.
+  const sourceRow = transcript
+    .locator("[data-message-id]")
+    .filter({ has: page.getByTestId("message-bot-bubble") })
+    .filter({ hasText: sourceMarker })
+    .first();
+  await expect(sourceRow).toBeVisible({ timeout: 20_000 });
+
+  const quoteAndSend = async (start: string, end: string, replyMarker: string) => {
+    await selectAndRelease(page, sourceRow, start, end);
+    await page.getByTestId("quote-selection").click();
+    await composer.fill(replyMarker);
+    await composer.press("Enter");
+    const replyRow = transcript
+      .locator("[data-message-id]")
+      .filter({ has: page.getByTestId("message-user-bubble") })
+      .filter({ hasText: replyMarker })
+      .first();
+    await expect(replyRow).toBeVisible({ timeout: 20_000 });
+    return replyRow.getByTestId("reply-parent-preview");
+  };
+
+  await expect(await quoteAndSend("list-a", "list-b", `reply-list-${stamp}`)).toContainText(
+    "list-a list-b",
+  );
+  await expect(await quoteAndSend("cell-a", "cell-b", `reply-table-${stamp}`)).toContainText(
+    "cell-a cell-b",
+  );
+  await expect(await quoteAndSend("code-a", "code-b", `reply-code-${stamp}`)).toContainText(
+    "code-a --- code-b",
+  );
 });
 
 test("a selection spanning two messages offers no quote action", async ({ page }) => {

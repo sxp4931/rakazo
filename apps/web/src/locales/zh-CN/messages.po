@@ -151,6 +151,10 @@ msgstr "{workingBotName} 正在工作"
 msgid "@{0}"
 msgstr "@{0}"
 
+#: src/pages/shell/message-cards.tsx:124
+msgid "A bit of everything"
+msgstr "什么都做一点"
+
 #: src/pages/shell/bot-picker.tsx:105
 #: src/pages/shell/bot-picker.tsx:106
 msgid "About groups"
@@ -1484,6 +1488,10 @@ msgstr "自定义机器人头像"
 msgid "Dark"
 msgstr "深色"
 
+#: src/pages/shell/message-cards.tsx:118
+msgid "Day-to-day work"
+msgstr "日常工作"
+
 #: src/pages/RoutineSchedule.tsx:72
 msgid "day"
 msgstr "天"
@@ -1988,6 +1996,10 @@ msgstr "图片上传区域"
 #: src/pages/PluginsOverlay.tsx:1006
 msgid "Import OpenAPI JSON"
 msgstr "导入 OpenAPI JSON"
+
+#: src/pages/shell/message-cards.tsx:120
+msgid "Inbox & email"
+msgstr "收件箱和邮件"
 
 #: src/pages/shell/bot-panel.tsx:515
 msgid "Inherit default"
@@ -2981,6 +2993,10 @@ msgstr "回复"
 msgid "Replying to {replyName}"
 msgstr "正在回复 {replyName}"
 
+#: src/pages/shell/message-cards.tsx:122
+msgid "Research & writing"
+msgstr "调研和写作"
+
 #: src/components/ComputerMaintenanceActions.tsx:100
 #: src/pages/shell/avatar-studio-popover.tsx:183
 msgid "Reset"
@@ -3771,6 +3787,10 @@ msgstr "工作日"
 #: src/pages/shell/dialogs.tsx:293
 msgid "What about its memories?"
 msgstr "它的记忆怎么处理？"
+
+#: src/pages/shell/message-cards.tsx:110
+msgid "What do you want me on first?"
+msgstr "你想让我先做什么？"
 
 #: src/components/teach/TeachComputerOverlay.tsx:227
 msgid "What result will you demonstrate?"

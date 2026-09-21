@@ -1,26 +1,32 @@
 import type { ThreadMessage } from "@rakazo/contracts";
 import { REPLY_QUOTE_MAX_LENGTH } from "@rakazo/contracts";
 
+function truncateQuote(value: string): string {
+  const truncated = value.slice(0, REPLY_QUOTE_MAX_LENGTH);
+  const last = truncated.charCodeAt(truncated.length - 1);
+  return last >= 0xd800 && last <= 0xdbff ? truncated.slice(0, -1) : truncated;
+}
+
 /**
  * Resolves a text selection to the message it quotes. A quote stays scoped to
- * one message row — spanning selections, rows that didn't opt in via
- * `data-quotable`, and empty text get no affordance. The excerpt is capped at
+ * one Markdown text region; selections that cross regions or include message
+ * chrome and structured cards get no affordance. The excerpt is capped at
  * capture so an oversized selection never fails the send.
  */
 export function quoteDraftForSelection(
   selection: {
-    startRow: Pick<HTMLElement, "dataset"> | null;
-    endRow: Pick<HTMLElement, "dataset"> | null;
+    startContent: Pick<HTMLElement, "dataset"> | null;
+    endContent: Pick<HTMLElement, "dataset"> | null;
     text: string;
   },
   messageById: ReadonlyMap<string, ThreadMessage>,
 ): { message: ThreadMessage; text: string } | null {
-  const { startRow, endRow } = selection;
+  const { startContent, endContent } = selection;
   const message =
-    startRow && startRow === endRow && startRow.dataset.quotable !== undefined
-      ? messageById.get(startRow.dataset.messageId ?? "")
+    startContent && startContent === endContent
+      ? messageById.get(startContent.dataset.quoteMessageId ?? "")
       : undefined;
-  const text = selection.text.trim().slice(0, REPLY_QUOTE_MAX_LENGTH);
+  const text = truncateQuote(selection.text.trim());
   if (!message || !text) return null;
   return { message, text };
 }

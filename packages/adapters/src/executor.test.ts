@@ -8,6 +8,7 @@ import {
   createRunWorkspaceCheckpoint,
   loadCurrentTurnImages,
   missingTurnImagesInstruction,
+  parseUpdateBotPatch,
   runNotificationsEnabled,
   selectBuiltinToolsForRun,
   settleSteeringAttachmentLoads,
@@ -99,6 +100,127 @@ describe("tool completion audit", () => {
       error: "destination rejected the record",
     });
     expect(completion).not.toHaveProperty("result");
+  });
+
+  it("records an MCP tool result flagged isError as an error", () => {
+    const payload = toolCompletionAuditPayload({
+      name: "mcp__files__read_text_file",
+      executionId: "call-1",
+      durationMs: 9,
+      result: {
+        content: [{ type: "text", text: "ENOENT: no such file or directory, open '/missing'" }],
+        details: {
+          content: [{ type: "text", text: "ENOENT: no such file or directory, open '/missing'" }],
+          isError: true,
+        },
+      },
+    });
+
+    expect(payload).toMatchObject({
+      outcome: "error",
+      error: "ENOENT: no such file or directory, open '/missing'",
+    });
+  });
+
+  it.each([
+    ["destination rejected the record", "destination rejected the record"],
+    [{ message: "request rejected" }, "request rejected"],
+    [false, "false"],
+    [0, "0"],
+  ])("records a returned error inside a Pi result wrapper: %j", (error, message) => {
+    const result = { content: [{ type: "text", text: "tool response" }], details: { error } };
+    const completion = {
+      name: "destination.write",
+      executionId: "call-1",
+      durationMs: 4,
+      result,
+    };
+    expect(toolCompletionAuditPayload(completion)).toMatchObject({
+      outcome: "error",
+      error: message,
+    });
+    expect(completion.result).toBe(result);
+    expect(result.details.error).toBe(error);
+  });
+
+  it("sanitizes an object error's message without copying its other fields", () => {
+    const error = {
+      message: "Rejected fake-provider-key using Bearer fake-token",
+      request: { body: "private request body" },
+    };
+    expect(
+      toolCompletionAuditPayload(
+        {
+          name: "destination.write",
+          executionId: "call-1",
+          durationMs: 4,
+          result: { content: [], details: { error } },
+        },
+        ["fake-provider-key"],
+      ),
+    ).toEqual({
+      name: "destination.write",
+      executionId: "call-1",
+      durationMs: 4,
+      outcome: "error",
+      error: "Rejected [redacted] using Bearer [redacted]",
+    });
+  });
+
+  it.each([{}, { error: null }, { error: undefined }, { data: { error: "a record field" } }])(
+    "does not treat successful wrapped data as a tool failure: %j",
+    (details) => {
+      expect(
+        toolCompletionAuditPayload({
+          name: "destination.read",
+          executionId: "call-1",
+          durationMs: 4,
+          result: { content: [], details },
+        }),
+      ).toEqual({
+        name: "destination.read",
+        executionId: "call-1",
+        durationMs: 4,
+        outcome: "succeeded",
+      });
+    },
+  );
+
+  it("sanitizes wrapped errors and keeps an explicit exception authoritative", () => {
+    const completion = {
+      name: "destination.write",
+      executionId: "call-1",
+      durationMs: 4,
+      result: { content: [], details: { error: "Rejected fake-provider-key" } },
+    };
+    expect(toolCompletionAuditPayload(completion, ["fake-provider-key"])).toMatchObject({
+      outcome: "error",
+      error: "Rejected [redacted]",
+    });
+    expect(
+      toolCompletionAuditPayload({ ...completion, error: new Error("request failed") }),
+    ).toMatchObject({
+      outcome: "error",
+      error: "request failed",
+    });
+    expect(toolCompletionAuditPayload({ ...completion, paused: true })).toMatchObject({
+      outcome: "paused",
+    });
+  });
+
+  it("keeps an MCP tool result without isError a success", () => {
+    const payload = toolCompletionAuditPayload({
+      name: "mcp__files__read_text_file",
+      executionId: "call-2",
+      durationMs: 9,
+      result: {
+        content: [{ type: "text", text: "file contents" }],
+        details: { content: [{ type: "text", text: "file contents" }], isError: false },
+      },
+    });
+
+    expect(payload).toMatchObject({ outcome: "succeeded" });
+    expect(payload).not.toHaveProperty("error");
   });
 });
 
@@ -420,6 +542,48 @@ function modelPreference({
     },
   };
 }
+
+describe("parseUpdateBotPatch", () => {
+  it("accepts notifyOnFinish on its own", () => {
+    expect(parseUpdateBotPatch({ notifyOnFinish: false }, "Chief")).toEqual({
+      patch: { notifyOnFinish: false },
+    });
+    expect(parseUpdateBotPatch({ notifyOnFinish: true }, "Chief")).toEqual({
+      patch: { notifyOnFinish: true },
+    });
+  });
+
+  it("accepts notify_on_finish as an alias", () => {
+    expect(parseUpdateBotPatch({ notify_on_finish: false }, "Chief")).toEqual({
+      patch: { notifyOnFinish: false },
+    });
+  });
+
+  it("keeps name patches and notifyOnFinish together", () => {
+    expect(parseUpdateBotPatch({ name: "Scout", notifyOnFinish: false }, "Chief")).toEqual({
+      patch: { name: "Scout", notifyOnFinish: false },
+    });
+  });
+
+  it("rejects a non-boolean notifyOnFinish", () => {
+    expect(parseUpdateBotPatch({ notifyOnFinish: "false" }, "Chief")).toEqual({
+      error: "notifyOnFinish must be true or false.",
+    });
+  });
+
+  it("requires at least one supported field", () => {
+    expect(parseUpdateBotPatch({}, "Chief")).toEqual({
+      error:
+        "Provide at least one of name, title, description, notifyOnFinish, color, artifact_id, or use_attached_image.",
+    });
+  });
+
+  it("leaves avatar-only args for the executor to resolve", () => {
+    expect(parseUpdateBotPatch({ color: "#8B5CF6" }, "Chief")).toEqual({ patch: {} });
+    expect(parseUpdateBotPatch({ artifact_id: "art-1" }, "Chief")).toEqual({ patch: {} });
+    expect(parseUpdateBotPatch({ use_attached_image: true }, "Chief")).toEqual({ patch: {} });
+  });
+});
 
 describe("run notification preference", () => {
   it("silences direct messages but leaves group notifications enabled", async () => {

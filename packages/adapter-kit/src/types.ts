@@ -354,6 +354,8 @@ export interface MemoryCommitRequest {
   content: string;
   /** When set, commit fails if the live document revision is no longer this value. */
   expectedRevision?: number;
+  /** When set, fail if the document was deleted or replaced at the same path. */
+  expectedDocumentId?: string;
   sourceRunId?: string;
   sourceThreadId?: string;
 }
@@ -844,6 +846,7 @@ export interface NotificationMessage {
   threadId: string;
   /** The finished run, so a device that also polls for finished work does not alert twice. */
   runId?: string;
+  routineId?: string;
   /** Group chat that owns threadId, so a tap does not open the bot's direct thread. */
   groupId?: string;
   /** Unread chats to show on the app icon, when the sender knows them. */

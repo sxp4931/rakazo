@@ -13,6 +13,7 @@ import { NativeSymbol } from "./native-symbol";
 export function useTextEditDialog(
   label: string,
   maxLength: number,
+  preserveWhitespace = false,
 ): {
   ask: (value: string, onCommit: (next: string) => void) => void;
   dialog: ReactNode;
@@ -26,7 +27,7 @@ export function useTextEditDialog(
   function commit(next: string, onCommit: (next: string) => void) {
     if (next.length > maxLength) return;
     setAsked(null);
-    onCommit(next.trim());
+    onCommit(preserveWhitespace ? next : next.trim());
   }
   function ask(value: string, onCommit: (next: string) => void) {
     if (Platform.OS === "ios")
@@ -84,6 +85,7 @@ export function ProfileEditDialog({
   editLabel,
   maxLength,
   large = false,
+  preserveWhitespace = false,
   icon,
   onCommit,
 }: {
@@ -92,11 +94,12 @@ export function ProfileEditDialog({
   editLabel: string;
   maxLength: number;
   large?: boolean;
+  preserveWhitespace?: boolean;
   icon?: "plus";
   onCommit: (value: string) => Promise<void>;
 }) {
   const tokens = useMobileTokens();
-  const edit = useTextEditDialog(label, maxLength);
+  const edit = useTextEditDialog(label, maxLength, preserveWhitespace);
   return (
     <>
       <Pressable

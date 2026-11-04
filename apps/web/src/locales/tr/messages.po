@@ -670,6 +670,14 @@ msgstr ""
 msgid "Agent from another app"
 msgstr ""
 
+#: src/pages/RoutineHealth.tsx
+msgid "Alert accepted; delivery not confirmed"
+msgstr "Uyarı kabul edildi; teslimat doğrulanmadı"
+
+#: src/pages/RoutineHealth.tsx
+msgid "Alert could not be sent"
+msgstr "Uyarı gönderilemedi"
+
 #: src/components/VaultSettings.tsx
 #: src/pages/PluginsOverlay.tsx
 msgid "All"
@@ -1159,6 +1167,10 @@ msgstr ""
 #: src/pages/shell/agent-import.tsx
 msgid "Built-in"
 msgstr "Yerleşik"
+
+#: src/pages/KnowledgeSection.tsx
+msgid "bytes"
+msgstr "bayt"
 
 #: src/pages/shell/chat-header.tsx
 msgid "Call"
@@ -2114,6 +2126,10 @@ msgstr "Model ayarları yüklenemedi"
 msgid "Could not load run history"
 msgstr "Çalıştırma geçmişi yüklenemedi"
 
+#: src/pages/RoutineHealth.tsx
+msgid "Could not load schedule status"
+msgstr "Zamanlama durumu yüklenemedi"
+
 #: src/lib/account-security.ts
 #: src/pages/Auth.tsx
 msgid "Could not load sign-in options"
@@ -2253,6 +2269,7 @@ msgstr ""
 #: src/pages/ExternalConversationSettings.tsx
 #: src/pages/KnowledgeSection.tsx
 #: src/pages/McpServersOverlay.tsx
+#: src/pages/RoutineHealth.tsx
 #: src/pages/shell/bot-panel.tsx
 #: src/pages/shell/dialogs.tsx
 #: src/pages/shell/use-space-roster.ts
@@ -2601,6 +2618,14 @@ msgstr "OpenClaw varsayılanı"
 msgid "Default scope"
 msgstr "Varsayılan kapsam"
 
+#: src/pages/RoutineHealth.tsx
+msgid "Delay alerts"
+msgstr "Gecikme uyarıları"
+
+#: src/pages/RoutineHealth.tsx
+msgid "Delay alerts run while the worker is running."
+msgstr "Gecikme uyarıları yalnızca işçi çalışırken çalışır."
+
 #: src/components/AccountAccess.tsx
 #: src/components/pages/PagesList.tsx
 #: src/components/PasskeySettings.tsx
@@ -2903,6 +2928,10 @@ msgstr "Adı düzenle"
 msgid "Edit Profile"
 msgstr "Profili Düzenle"
 
+#: src/pages/KnowledgeSection.tsx
+msgid "Edit selection"
+msgstr "Seçimi düzenle"
+
 #: src/components/vault/VaultItemDetail.tsx
 #: src/components/vault/VaultItemEditor.tsx
 #: src/pages/AdminAccessPage.tsx
@@ -2926,6 +2955,10 @@ msgstr "E-posta doğrulaması gerekiyor"
 #: src/pages/shell/bot-panel.tsx
 msgid "Enable {0}"
 msgstr "{0} etkinleştir"
+
+#: src/pages/RoutineHealth.tsx
+msgid "Enable mobile notifications to receive delay alerts."
+msgstr "Gecikme uyarıları almak için mobil bildirimleri açın."
 
 #: src/components/ComputerProviderSettings.tsx
 msgid "End user ID"
@@ -3128,6 +3161,10 @@ msgstr "Durdurulamadı"
 #: src/lib/browser-notifications.ts
 msgid "Failed."
 msgstr "Başarısız oldu."
+
+#: src/pages/RoutineHealth.tsx
+msgid "Failure alerts"
+msgstr "Hata uyarıları"
 
 #: src/components/teach/SkillDraftCard.tsx
 msgid "Failure handling"
@@ -3655,6 +3692,10 @@ msgstr "Etiket"
 msgid "Language"
 msgstr "Dil"
 
+#: src/pages/RoutineHealth.tsx
+msgid "Last attempt"
+msgstr "Son deneme"
+
 #. placeholder {0}: new Date(state.checkedAt).toLocaleString()
 #: src/pages/RoutineEditor.tsx
 msgid "Last check {0}: changed"
@@ -3664,6 +3705,10 @@ msgstr "Son kontrol {0}: değişiklik var"
 #: src/pages/RoutineEditor.tsx
 msgid "Last check {0}: no changes"
 msgstr "Son kontrol {0}: değişiklik yok"
+
+#: src/pages/RoutineHealth.tsx
+msgid "Last successful run"
+msgstr "Son başarılı çalıştırma"
 
 #: src/components/DesktopUpdates.tsx
 msgid "Later"
@@ -4309,6 +4354,10 @@ msgstr ""
 msgid "Next page"
 msgstr "Sonraki sayfa"
 
+#: src/pages/RoutineHealth.tsx
+msgid "Next scheduled"
+msgstr "Sonraki planlı çalıştırma"
+
 #: src/pages/SettingsOverlay.tsx
 msgid "Next settings sections"
 msgstr ""
@@ -4420,6 +4469,10 @@ msgstr "Henüz beceri yok"
 msgid "No submissions"
 msgstr ""
 
+#: src/pages/RoutineHealth.tsx
+msgid "No successful runs yet"
+msgstr "Henüz başarılı çalıştırma yok"
+
 #: src/pages/Board.tsx
 msgid "No tickets yet"
 msgstr ""
@@ -4427,6 +4480,10 @@ msgstr ""
 #: src/pages/RoutineEditor.tsx
 msgid "No trigger"
 msgstr ""
+
+#: src/pages/RoutineHealth.tsx
+msgid "No upcoming schedule"
+msgstr "Yaklaşan zamanlama yok"
 
 #: src/components/vault/VaultItemEditor.tsx
 msgid "None"
@@ -5267,6 +5324,10 @@ msgstr ""
 msgid "Reopen"
 msgstr "Yeniden aç"
 
+#: src/pages/KnowledgeSection.tsx
+msgid "Replace"
+msgstr "Değiştir"
+
 #: src/pages/model-settings/connection-controls.tsx
 msgid "Replace API key"
 msgstr "API anahtarını değiştir"
@@ -5275,6 +5336,10 @@ msgstr "API anahtarını değiştir"
 #: src/pages/VoiceSettingsOverlay.tsx
 msgid "Replace key"
 msgstr "Anahtarı değiştir"
+
+#: src/pages/KnowledgeSection.tsx
+msgid "Replacement"
+msgstr "Yeni içerik"
 
 #. placeholder {0}: block.replaces.origin
 #. placeholder {0}: initial.replacedSite
@@ -5577,6 +5642,7 @@ msgid "Say yes or no, or answer in a sentence."
 msgstr "Evet ya da hayır de veya bir cümleyle yanıtla."
 
 #: src/pages/RoutineEditor.tsx
+#: src/pages/RoutineHealth.tsx
 msgid "Schedule delayed"
 msgstr "Zamanlanmış çalıştırma gecikti"
 
@@ -6655,6 +6721,7 @@ msgid "Unassigned"
 msgstr "Atanmamış"
 
 #: src/components/AskCard.tsx
+#: src/pages/KnowledgeSection.tsx
 msgid "Undo"
 msgstr "Geri al"
 
@@ -6882,6 +6949,10 @@ msgstr ""
 #: src/pages/PluginsOverlay.tsx
 msgid "View all"
 msgstr ""
+
+#: src/pages/KnowledgeSection.tsx
+msgid "View prompt memory"
+msgstr "İstem belleğini görüntüle"
 
 #: src/components/integrations/plugin-marketplace.tsx
 msgid "View source"

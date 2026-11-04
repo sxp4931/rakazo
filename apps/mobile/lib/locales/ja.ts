@@ -1367,6 +1367,26 @@ export const JA_MESSAGES: Record<string, string> = {
     "{count}個のボットがスペースのデフォルトを使用するようになりました。",
   "Could not switch {failedNames}. Try again.":
     "{failedNames}を切り替えられませんでした。もう一度お試しください。",
+  "Next scheduled: {date}": "次の実行予定: {date}",
+  "Last attempt: {date} · {status}": "前回の試行: {date} · {status}",
+  "Last successful run: {date}": "前回成功した実行: {date}",
+  "Edit memory": "メモリを編集",
+  "Edit {entry}": "{entry}を編集",
+  "Delete {entry}": "{entry}を削除",
+  "Delete memory?": "メモリを削除しますか？",
+  "{used} / {limit} bytes": "{used} / {limit} バイト",
+  "Alert accepted; delivery not confirmed": "通知は受け付けられました。配信は未確認です",
+  "Alert could not be sent": "通知を送信できませんでした",
+  "Could not load schedule status": "スケジュールの状態を読み込めませんでした",
+  "Delay alerts": "遅延通知",
+  "Delay alerts run while the worker is running.": "遅延通知はワーカーの実行中に動作します。",
+  "Failure alerts": "失敗通知",
+  "No successful runs yet": "成功した実行はまだありません",
+  "No upcoming schedule": "次の実行予定はありません",
+  "View prompt memory": "プロンプトのメモリを表示",
+  "Could not load": "読み込めませんでした",
+  "Enable mobile notifications to receive delay alerts.":
+    "遅延アラートを受け取るにはモバイル通知を有効にしてください。",
 };
 
 export const PEER_MESSAGE_FORMS = { other: "{peer}とのメッセージ{count}件" };

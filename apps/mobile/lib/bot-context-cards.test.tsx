@@ -14,6 +14,10 @@ vi.mock("./native", () => ({ native: {}, useMobileTokens: () => ({}) }));
 vi.mock("./user-error", () => ({ errorText: (error: Error) => error.message }));
 vi.mock("../components/native-symbol", () => ({ NativeSymbol: () => null }));
 vi.mock("../components/profile-edit-dialog", () => ({ ProfileEditDialog: () => null }));
+vi.mock("../components/native-action-button", () => ({
+  NativeActionButton: ({ label }: { label: string }) =>
+    createElement("button", { type: "button" }, label),
+}));
 vi.mock("react-native", () => {
   const view = ({ children }: { children?: ReactNode }) => createElement("div", null, children);
   return { Alert: { alert: vi.fn() }, Pressable: view, Text: view, View: view };
@@ -28,6 +32,9 @@ beforeEach(() => {
   document.body.append(container);
   root = createRoot(container);
   rpc.mockReset();
+  rpc.mockImplementation(async (_method: string, input?: { scope?: string }) =>
+    input?.scope === "user" ? [] : memory,
+  );
 });
 
 afterEach(() => {
@@ -45,16 +52,17 @@ async function render(botId = "bot-a") {
 describe("bot context cards", () => {
   it.each([
     ["scratchpad/list", "Memory", "notes.md", "Open work"],
-    ["memory/list", "Open work", "Review draft", "Memory"],
+    ["memory/list", "Open work", "Review draft", null],
   ])("renders the other section when %s fails", async (failed, heading, item, hidden) => {
-    rpc.mockImplementation(async (method: string) => {
+    rpc.mockImplementation(async (method: string, input?: { scope?: string }) => {
       if (method === failed) throw new Error("Request failed");
+      if (input?.scope === "user") return [];
       return method === "scratchpad/list" ? work : memory;
     });
     await render();
     expect(container.textContent).toContain(heading);
     expect(container.textContent).toContain(item);
-    expect(container.textContent).not.toContain(hidden);
+    if (hidden) expect(container.textContent).not.toContain(hidden);
     expect(container.textContent).toContain("Request failed");
   });
 
@@ -62,8 +70,9 @@ describe("bot context cards", () => {
     ["scratchpad/list", "Memory", "notes.md"],
     ["memory/list", "Open work", "Review draft"],
   ])("renders the other section while %s is still pending", async (pending, heading, item) => {
-    rpc.mockImplementation((method: string) => {
+    rpc.mockImplementation((method: string, input?: { scope?: string }) => {
       if (method === pending) return new Promise(() => {});
+      if (input?.scope === "user") return Promise.resolve([]);
       return Promise.resolve(method === "scratchpad/list" ? work : memory);
     });
     await render();
@@ -72,16 +81,18 @@ describe("bot context cards", () => {
   });
 
   it("hides empty work and placeholder-only memory", async () => {
-    rpc.mockImplementation(async (method: string) =>
-      method === "scratchpad/list" ? [] : [{ id: "memory-a", path: "MEMORY.md", content: "" }],
+    rpc.mockImplementation(async (method: string, input?: { scope?: string }) =>
+      method === "scratchpad/list" || input?.scope === "user"
+        ? []
+        : [{ id: "memory-a", path: "MEMORY.md", content: "" }],
     );
     await render();
-    expect(container.textContent).toBe("");
+    expect(container.textContent).toContain("View prompt memory");
   });
 
   it("ignores results from the previous bot", async () => {
     let resolveWork!: (items: typeof work) => void;
-    rpc.mockImplementation((method: string, { botId }: { botId: string }) => {
+    rpc.mockImplementation((method: string, { botId }: { botId?: string }) => {
       if (botId === "bot-a" && method === "scratchpad/list") {
         return new Promise((resolve) => {
           resolveWork = resolve;
@@ -92,6 +103,19 @@ describe("bot context cards", () => {
     await render();
     await render("bot-b");
     await act(async () => resolveWork(work));
-    expect(container.textContent).toBe("");
+    expect(container.textContent).not.toContain("Review draft");
+  });
+
+  it("shows shared memory alongside bot memory", async () => {
+    rpc.mockImplementation(async (method: string, input?: { scope?: string }) =>
+      method === "scratchpad/list"
+        ? []
+        : input?.scope === "user"
+          ? [{ id: "shared", path: "shared.md", content: "Shared fact" }]
+          : memory,
+    );
+    await render();
+    expect(container.textContent).toContain("shared.md");
+    expect(container.textContent).toContain("notes.md");
   });
 });

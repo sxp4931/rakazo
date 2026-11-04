@@ -1284,6 +1284,27 @@ export const ES_MESSAGES: Record<string, string> = {
     "{count} bots ahora usan el modelo predeterminado del espacio.",
   "Could not switch {failedNames}. Try again.":
     "No se pudo cambiar {failedNames}. Vuelve a intentarlo.",
+  "Next scheduled: {date}": "Próxima ejecución: {date}",
+  "Last attempt: {date} · {status}": "Último intento: {date} · {status}",
+  "Last successful run: {date}": "Última ejecución correcta: {date}",
+  "Edit memory": "Editar recuerdo",
+  "Edit {entry}": "Editar {entry}",
+  "Delete {entry}": "Eliminar {entry}",
+  "Delete memory?": "¿Eliminar recuerdo?",
+  "{used} / {limit} bytes": "{used} / {limit} bytes",
+  "Alert accepted; delivery not confirmed": "Aviso aceptado; entrega sin confirmar",
+  "Alert could not be sent": "No se pudo enviar el aviso",
+  "Could not load schedule status": "No se pudo cargar el estado de la programación",
+  "Delay alerts": "Avisos de retraso",
+  "Delay alerts run while the worker is running.":
+    "Los avisos de retraso funcionan mientras el trabajador está activo.",
+  "Failure alerts": "Avisos de fallo",
+  "No successful runs yet": "Aún no hay ejecuciones correctas",
+  "No upcoming schedule": "No hay próximas ejecuciones",
+  "View prompt memory": "Ver memoria del prompt",
+  "Could not load": "No se pudo cargar",
+  "Enable mobile notifications to receive delay alerts.":
+    "Activa las notificaciones móviles para recibir alertas de retraso.",
 };
 
 export const PEER_MESSAGE_FORMS: Partial<Record<Intl.LDMLPluralRule, string>> = {

@@ -10,6 +10,7 @@ import { phoneCallSettings } from "@rakazo/core";
 import { loadRootEnv } from "@rakazo/core/node/load-root-env";
 import { stopOnShutdownSignals } from "@rakazo/core/node/shutdown-signals";
 import { startWorkerHealth, watchEventLoopStalls } from "./health.js";
+import { startRoutineDelayAlerts } from "./routine-delay-alerts.js";
 import { createWorkerSecretStore } from "./secret-store.js";
 
 loadRootEnv();
@@ -383,6 +384,7 @@ async function main() {
     reconcileDeadJobs: inMemoryJobs ? undefined : createDeadJobPruner(pool),
   });
   let stopHealth: (() => Promise<void>) | undefined;
+  let stopRoutineAlerts: (() => Promise<void>) | undefined;
   let stopping = false;
   let stopped: Promise<void> | undefined;
   // Every caller waits for the same shutdown, which can take as long as the running jobs do.
@@ -393,6 +395,7 @@ async function main() {
       stopStallWatch();
       try {
         await stopHealth?.();
+        await stopRoutineAlerts?.();
         await reconciler.stop();
         await jobHost.stop();
         await jobs.close();
@@ -459,6 +462,9 @@ async function main() {
   }
   if (stopping) return;
   reconciler.start();
+  stopRoutineAlerts = startRoutineDelayAlerts(prisma, (message, context) =>
+    notifications.deliver(message, context),
+  );
   stopHealth = startWorkerHealth(reconciler.lastCompletedAt);
 
   logger.info("worker ready", { degraded: secrets.describe().capabilities.degraded ?? false });

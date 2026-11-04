@@ -59,6 +59,7 @@ import {
 } from "../lib/model-catalog";
 import { useSpaceQueries } from "../lib/query";
 import { rpc } from "../lib/rpc";
+import { RoutineHealth } from "./RoutineHealth";
 import { RoutineRunHistory } from "./RoutineRunHistory";
 import { RoutineSchedule } from "./RoutineSchedule";
 
@@ -760,7 +761,12 @@ export function RoutineEditor({
         </p>
       ) : null}
 
-      {editing ? <RoutineRunHistory key={editing.id} routineId={editing.id} /> : null}
+      {editing ? (
+        <>
+          <RoutineHealth key={`health-${editing.id}`} routineId={editing.id} />
+          <RoutineRunHistory key={editing.id} routineId={editing.id} />
+        </>
+      ) : null}
     </div>
   );
 }

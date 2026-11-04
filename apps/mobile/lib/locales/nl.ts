@@ -1333,6 +1333,27 @@ export const NL_MESSAGES: Record<string, string> = {
   "{count} bots now use the space default.": "{count} bots gebruiken nu de spacestandaard.",
   "Could not switch {failedNames}. Try again.":
     "Kon {failedNames} niet overzetten. Probeer het opnieuw.",
+  "Next scheduled: {date}": "Volgende uitvoering: {date}",
+  "Last attempt: {date} · {status}": "Laatste poging: {date} · {status}",
+  "Last successful run: {date}": "Laatste geslaagde uitvoering: {date}",
+  "Edit memory": "Geheugen bewerken",
+  "Edit {entry}": "{entry} bewerken",
+  "Delete {entry}": "{entry} verwijderen",
+  "Delete memory?": "Geheugen verwijderen?",
+  "{used} / {limit} bytes": "{used} / {limit} bytes",
+  "Alert accepted; delivery not confirmed": "Melding geaccepteerd; bezorging niet bevestigd",
+  "Alert could not be sent": "Melding kon niet worden verzonden",
+  "Could not load schedule status": "Schemastatus kon niet worden geladen",
+  "Delay alerts": "Vertragingsmeldingen",
+  "Delay alerts run while the worker is running.":
+    "Vertragingsmeldingen werken zolang de worker actief is.",
+  "Failure alerts": "Foutmeldingen",
+  "No successful runs yet": "Nog geen geslaagde uitvoeringen",
+  "No upcoming schedule": "Geen volgende uitvoering",
+  "View prompt memory": "Promptgeheugen bekijken",
+  "Could not load": "Kon niet laden",
+  "Enable mobile notifications to receive delay alerts.":
+    "Schakel mobiele meldingen in om vertragingsmeldingen te ontvangen.",
 };
 
 export const PEER_MESSAGE_FORMS: Partial<Record<Intl.LDMLPluralRule, string>> = {

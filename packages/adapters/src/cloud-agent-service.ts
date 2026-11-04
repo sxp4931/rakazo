@@ -1,22 +1,21 @@
 import type { AdapterContext, JobPublisher } from "@rakazo/adapter-kit";
 import { cloudAgentPollJob } from "@rakazo/adapter-kit";
 import { cloudAgentBlockFromPayload } from "@rakazo/core";
-import {
-  appendEventInTransaction,
-  type CloudAgent,
-  createThreadMessageInTransaction,
-  type PrismaClient,
-  type ThreadEvents,
-} from "@rakazo/db";
+import type { CloudAgent, PrismaClient, ThreadEvents } from "@rakazo/db";
+import { appendEventInTransaction, createThreadMessageInTransaction } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
-import { type CloudAgentConnection, cloudAgentsEnabled } from "./cloud-agent-factory.js";
+import type { CloudAgentConnection } from "./cloud-agent-factory.js";
+import { cloudAgentsEnabled } from "./cloud-agent-factory.js";
 import { cloudAgentLaunchSchema, cloudAgentReplySchema } from "./cloud-agent-tools.js";
+import type { ExecutorDeps } from "./executor-deps.js";
+import { runLeaseFor } from "./run-messages.js";
 
 export interface CloudAgentDeps {
   prisma: PrismaClient;
   jobs: JobPublisher;
   events: Pick<ThreadEvents, "notify">;
   cloudAgent: CloudAgentConnection | null | undefined;
+  runLease?: ExecutorDeps["runLease"];
 }
 
 export function cloudAgentBlock(agent: CloudAgent) {
@@ -76,6 +75,7 @@ export async function executeCloudAgentTool(
         runId: run.id,
         role: "bot",
         blocks,
+        lease: runLeaseFor(deps, run.id),
       });
       const saved = await tx.cloudAgent.update({
         where: { id: created.id },
@@ -86,14 +86,21 @@ export async function executeCloudAgentTool(
         threadId: run.threadId,
         botId: context.botId,
         runId: run.id,
+        lease: runLeaseFor(deps, run.id),
         type: "thread.message.created",
         payload: { messageId: message.id, role: "bot", blocks },
       });
-      return { agent: saved, seq: event.seq };
+      return {
+        agent: saved,
+        seq: event.seq,
+        firstResponseRunId: event.firstResponse ? run.id : undefined,
+      };
     });
     agent = result.agent;
     if (result.seq !== undefined)
-      await deps.events.notify(run.threadId, result.seq).catch(() => undefined);
+      await deps.events
+        .notify(run.threadId, result.seq, result.firstResponseRunId)
+        .catch(() => undefined);
   } else {
     const owned = await deps.prisma.cloudAgent.findFirst({
       where: {
@@ -119,7 +126,7 @@ export async function executeCloudAgentTool(
         where: { id: agent.id, version: agent.version },
         data: {
           followup,
-          followupDispatching: false,
+          followupDispatchedAt: null,
           status: "running",
           generation: { increment: 1 },
           version: { increment: 1 },
@@ -142,7 +149,7 @@ export async function executeCloudAgentTool(
     id: agentId,
     ...snapshot,
     ...(agent.cancelRequested ? { cancellationPending: true } : {}),
-    ...(agent.followupDispatching ? { followupPending: true } : {}),
+    ...(agent.followupDispatchedAt ? { followupPending: true } : {}),
   };
 }
 

@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
+import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
 import { serve } from "@hono/node-server";
@@ -35,8 +36,12 @@ describe.skipIf(process.env.RUN_COMPUTER_REPLAY_DOCKER !== "1")(
           "Run through the computer-replay CLI to create an isolated supervisor environment",
         );
       }
-      const { supervisorApp } = await import("../../../infra/sandboxes/supervisor/src/index.js");
-      const server = serve({ fetch: supervisorApp.fetch, hostname: "127.0.0.1", port: 0 });
+      const { supervisorApp } = await import("@rakazo/sandbox-supervisor");
+      const server = serve({
+        fetch: supervisorApp.fetch,
+        hostname: "127.0.0.1",
+        port: 0,
+      }) as Server;
       try {
         if (!server.listening)
           await new Promise<void>((resolve, reject) => {
@@ -65,7 +70,7 @@ describe.skipIf(process.env.RUN_COMPUTER_REPLAY_DOCKER !== "1")(
           // Docker rejects overlapping subnets; only this test's unique network is touched.
           if (process.env.COMPUTER_REPLAY_SUBNET) {
             const { computerNetworkNameFor } = await import(
-              "../../../infra/sandboxes/supervisor/src/computer-spec.js"
+              "@rakazo/sandbox-supervisor/computer-spec"
             );
             const name = computerNetworkNameFor(context.botId);
             execFileSync(
@@ -138,7 +143,38 @@ describe.skipIf(process.env.RUN_COMPUTER_REPLAY_DOCKER !== "1")(
             new ComputerBrowserProvider({ sandbox }),
             computer,
             context,
-          );
+          ).catch((error: unknown) => {
+            // This offline fixture contains only fake contacts. A read-only
+            // snapshot distinguishes browser failures from command transport failures.
+            let diagnostic = "unavailable";
+            try {
+              diagnostic = execFileSync(
+                "docker",
+                [
+                  "exec",
+                  computer!.id,
+                  "bash",
+                  "-c",
+                  "/usr/local/bin/rakazo-page-browser snapshot; tail -40 /tmp/rakazo/screen-1-browser.log",
+                ],
+                { encoding: "utf8", timeout: 40_000 },
+              );
+            } catch (diagnosticError: unknown) {
+              // Diagnostics are best-effort; keep any snapshot stdout and the replay cause.
+              if (
+                diagnosticError &&
+                typeof diagnosticError === "object" &&
+                "stdout" in diagnosticError &&
+                typeof (diagnosticError as { stdout: unknown }).stdout === "string" &&
+                (diagnosticError as { stdout: string }).stdout.trim()
+              ) {
+                diagnostic = (diagnosticError as { stdout: string }).stdout;
+              }
+            }
+            throw new Error(`Computer replay failed; direct browser snapshot: ${diagnostic}`, {
+              cause: error,
+            });
+          });
           expect(result.modelRequests).toBe(9);
           // These reads are independent of the agent's reply and tool-result assertions.
           expect(await waitForReplayFile(sandbox, computer, context, CONTACTS_PATH)).toBe(

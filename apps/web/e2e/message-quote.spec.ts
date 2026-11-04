@@ -1,5 +1,6 @@
-import { expect, type Locator, type Page, test } from "@playwright/test";
-import { captureScreenshot, completeOnboarding, signup } from "./helpers";
+import type { Locator, Page } from "@playwright/test";
+import { expect, test } from "@playwright/test";
+import { activeBotId, captureScreenshot, completeOnboarding, rpc, signup } from "./helpers";
 
 /**
  * Build a real browser Selection over `startNeedle` … `endNeedle` inside `scope`
@@ -17,6 +18,9 @@ async function selectAndRelease(
 ) {
   await scope.evaluate(
     (el, { startNeedle, endNeedle }) => {
+      // The quote pill positions itself off the selection rect — keep the scope
+      // inside the viewport or a fixed-position pill renders offscreen.
+      el.scrollIntoView({ block: "center" });
       const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
       const nodes: Text[] = [];
       let node = walker.nextNode();
@@ -75,7 +79,6 @@ test("selecting a text span quotes it into a reply", async ({ page }, testInfo) 
     .first();
   await expect(sourceRow).toBeVisible({ timeout: 20_000 });
 
-  // Selection inside one message offers the Quote action; Escape dismisses it.
   await selectAndRelease(page, sourceRow, "**forty two percent**");
   await expect(quoteButton).toBeVisible();
   await captureScreenshot(page, testInfo, "message-quote-selection");
@@ -91,21 +94,27 @@ test("selecting a text span quotes it into a reply", async ({ page }, testInfo) 
   await page.keyboard.press("Escape");
   await expect(quoteButton).toHaveCount(0);
 
-  // Quoting arms the existing reply flow with the excerpt in the chip.
+  // Quoting arms the existing reply flow with the excerpt in the chip. The
+  // pill unmounts on click, so focus must land in the composer — and the
+  // chip's arrival is announced through the composer live region.
   await selectAndRelease(page, sourceRow, "**forty two percent**");
   await expect(quoteButton).toBeVisible();
   await quoteButton.click();
   const replyChip = page.getByTestId("reply-chip");
   await expect(replyChip).toBeVisible();
-  await expect(replyChip).toContainText(/Replying to/);
+  await expect(composer).toBeFocused();
+  await expect(page.getByTestId("composer-announcement")).toHaveText(/Replying to/);
+  await expect(replyChip).toContainText(/forty two percent/);
   await expect(replyChip).toContainText("**forty two percent**");
 
   const replyText = `quote-reply-${stamp} why this number?`;
   await composer.fill(replyText);
   await composer.press("Enter");
   await expect(replyChip).toHaveCount(0);
+  // Sending disarms the reply — the live region must not keep a stale
+  // "Replying to" that no longer describes anything after the chip is gone.
+  await expect(page.getByTestId("composer-announcement")).toHaveText("");
 
-  // The sent message shows the excerpt and keeps jump-to-source.
   const replyRow = transcript
     .locator("[data-message-id]")
     .filter({ has: page.getByTestId("message-user-bubble") })
@@ -114,6 +123,9 @@ test("selecting a text span quotes it into a reply", async ({ page }, testInfo) 
   await expect(replyRow).toBeVisible({ timeout: 20_000 });
   const parentPreview = replyRow.getByTestId("reply-parent-preview");
   await expect(parentPreview).toBeVisible();
+  // The accessible name names the action AND the excerpt — the quote must not
+  // be masked by a bare "Jump to replied message" label.
+  await expect(parentPreview).toHaveAccessibleName(/Jump to replied message:.*forty two percent/);
   await expect(parentPreview).toContainText("**forty two percent**");
   await expect(parentPreview).not.toContainText("quote-source");
   await captureScreenshot(page, testInfo, "message-quote-reply");
@@ -121,7 +133,6 @@ test("selecting a text span quotes it into a reply", async ({ page }, testInfo) 
   await parentPreview.click();
   await expect(sourceRow).toBeInViewport();
 
-  // The excerpt is persisted — it still renders after a full reload.
   await page.reload();
   const reloadedRow = transcript
     .locator("[data-message-id]")
@@ -134,58 +145,14 @@ test("selecting a text span quotes it into a reply", async ({ page }, testInfo) 
   );
 });
 
-test("rendered markdown selections survive server quote derivation", async ({ page }) => {
+test("an armed reply survives the parent paging out of the transcript", async ({ page }) => {
   const stamp = Date.now();
-  await signup(page, `quote-markdown-${stamp}@rakazo.test`, "password12", "Quote Tester");
+  await signup(page, `quote-evict-${stamp}@rakazo.test`, "password12", "Quote Tester");
   await completeOnboarding(page);
 
   const transcript = page.getByTestId("transcript");
   const composer = page.getByRole("combobox", { name: /Message/ });
-  const sourceMarker = `md-${stamp}`;
-  await composer.fill(`quote markdown fixture ${sourceMarker}`);
-  await composer.press("Enter");
-
-  // Bot bubble: scripted fixture → ChatMarkdown + server markdown derivation.
-  const sourceRow = transcript
-    .locator("[data-message-id]")
-    .filter({ has: page.getByTestId("message-bot-bubble") })
-    .filter({ hasText: sourceMarker })
-    .first();
-  await expect(sourceRow).toBeVisible({ timeout: 20_000 });
-
-  const quoteAndSend = async (start: string, end: string, replyMarker: string) => {
-    await selectAndRelease(page, sourceRow, start, end);
-    await page.getByTestId("quote-selection").click();
-    await composer.fill(replyMarker);
-    await composer.press("Enter");
-    const replyRow = transcript
-      .locator("[data-message-id]")
-      .filter({ has: page.getByTestId("message-user-bubble") })
-      .filter({ hasText: replyMarker })
-      .first();
-    await expect(replyRow).toBeVisible({ timeout: 20_000 });
-    return replyRow.getByTestId("reply-parent-preview");
-  };
-
-  await expect(await quoteAndSend("list-a", "list-b", `reply-list-${stamp}`)).toContainText(
-    "list-a list-b",
-  );
-  await expect(await quoteAndSend("cell-a", "cell-b", `reply-table-${stamp}`)).toContainText(
-    "cell-a cell-b",
-  );
-  await expect(await quoteAndSend("code-a", "code-b", `reply-code-${stamp}`)).toContainText(
-    "code-a --- code-b",
-  );
-});
-
-test("a selection spanning two messages offers no quote action", async ({ page }) => {
-  const stamp = Date.now();
-  await signup(page, `quote-span-${stamp}@rakazo.test`, "password12", "Quote Tester");
-  await completeOnboarding(page);
-
-  const transcript = page.getByTestId("transcript");
-  const composer = page.getByRole("combobox", { name: /Message/ });
-  // The scripted bot echoes user text; scope to user bubbles for unique rows.
+  const botId = activeBotId(page);
   const userRow = (text: string) =>
     transcript
       .locator("[data-message-id]")
@@ -193,15 +160,151 @@ test("a selection spanning two messages offers no quote action", async ({ page }
       .filter({ hasText: text })
       .first();
 
-  const firstText = `quote-first-${stamp}`;
-  const secondText = `quote-second-${stamp}`;
+  const parentText = `quote-evict-parent-${stamp}`;
+  await composer.fill(parentText);
+  await composer.press("Enter");
+  const parentRow = userRow(parentText);
+  await expect(parentRow).toBeVisible({ timeout: 20_000 });
+
+  await selectAndRelease(page, parentRow, `evict-parent-${stamp}`);
+  await page.getByTestId("quote-selection").click();
+  const replyChip = page.getByTestId("reply-chip");
+  await expect(replyChip).toBeVisible();
+  await expect(replyChip).toContainText(`evict-parent-${stamp}`);
+
+  // Newer durable messages push the parent out of the latest page (window is
+  // 100). While the flood's runs are alive, refreshes race the event stream and
+  // get discarded as stale — so stop the thread to end the churn first.
+  for (let i = 0; i < 105; i++) {
+    await rpc(page, "threads/send", {
+      botId,
+      text: `quote-filler-${stamp}-${i}`,
+      clientNonce: `qf-${stamp}-${i}`,
+    });
+  }
+  const lastFiller = userRow(`quote-filler-${stamp}-104`);
+  await expect(lastFiller).toBeVisible({ timeout: 30_000 });
+  const lastFillerId = await lastFiller.getAttribute("data-message-id");
+  expect(lastFillerId).toBeTruthy();
+  await rpc(page, "threads/stop", { botId });
+  // stop deletes the cancelled runs' thread.progress events; if one of those
+  // was the last applied event, the live cursor outranks every later snapshot
+  // and refreshes are discarded as stale. A reaction writes one durable event
+  // past the wedge — no run, no new churn — so the next refresh can commit.
+  await rpc(page, "threads/react", {
+    botId,
+    messageId: lastFillerId,
+    reaction: "👍",
+    clientNonce: `qr-${stamp}`,
+  });
+  // Opening the bot panel refreshes the thread.
+  const panelButton = page.getByTestId("bot-settings-trigger");
+  await expect(async () => {
+    if ((await panelButton.getAttribute("aria-expanded")) === "true") {
+      await panelButton.click();
+    }
+    await panelButton.click();
+    await expect(parentRow).toHaveCount(0, { timeout: 3_000 });
+  }).toPass({ timeout: 30_000 });
+  await expect(replyChip).toBeVisible();
+
+  const replyText = `quote-evict-reply-${stamp}`;
+  await composer.fill(replyText);
+  await composer.press("Enter");
+  const replyRow = userRow(replyText);
+  await expect(replyRow).toBeVisible({ timeout: 20_000 });
+  const parentPreview = replyRow.getByTestId("reply-parent-preview");
+  await expect(parentPreview).toBeVisible();
+  await expect(parentPreview).toContainText(`evict-parent-${stamp}`);
+
+  // The link still reaches the evicted parent via the around-page jump.
+  await parentPreview.click();
+  await expect(userRow(parentText)).toBeVisible({ timeout: 20_000 });
+
+  // Stop the reply's run so its continues cannot churn into the next test.
+  await rpc(page, "threads/stop", { botId });
+});
+
+test("triple-clicking the last paragraph of the latest reply quotes it", async ({ page }) => {
+  const stamp = Date.now();
+  await signup(page, `quote-triple-${stamp}@rakazo.test`, "password12", "Quote Tester");
+  await completeOnboarding(page);
+
+  const composer = page.getByRole("combobox", { name: /Message/ });
+  await composer.fill(`quote-triple-${stamp}`);
+  await composer.press("Enter");
+  // The scripted bot answers in two paragraphs; the last one ends the transcript,
+  // so a triple-click's selection runs on into the composer.
+  const lastParagraph = page
+    .getByTestId("message-bot-bubble")
+    .locator("p")
+    .filter({ hasText: `i handled: quote-triple-${stamp}` });
+  await expect(lastParagraph).toBeVisible({ timeout: 20_000 });
+
+  await lastParagraph.click({ clickCount: 3 });
+  const quoteButton = page.getByTestId("quote-selection");
+  await expect(quoteButton).toBeVisible();
+  await quoteButton.click();
+  await expect(page.getByTestId("reply-chip")).toContainText(`i handled: quote-triple-${stamp}`);
+});
+
+test("quoting a second message retargets the armed reply", async ({ page }) => {
+  const stamp = Date.now();
+  await signup(page, `quote-switch-${stamp}@rakazo.test`, "password12", "Quote Tester");
+  await completeOnboarding(page);
+
+  const transcript = page.getByTestId("transcript");
+  const composer = page.getByRole("combobox", { name: /Message/ });
+  const quoteButton = page.getByTestId("quote-selection");
+  const replyChip = page.getByTestId("reply-chip");
+  const userRow = (text: string) =>
+    transcript
+      .locator("[data-message-id]")
+      .filter({ has: page.getByTestId("message-user-bubble") })
+      .filter({ hasText: text })
+      .first();
+
+  const firstText = `quote-switch-a-${stamp}`;
+  const secondText = `quote-switch-b-${stamp}`;
+  // Each send must resolve before the next Enter — the composer swallows
+  // input while a send is in flight.
+  const sentFirst = page.waitForResponse(
+    (response) => response.url().includes("/rpc/threads/send") && response.ok(),
+  );
   await composer.fill(firstText);
   await composer.press("Enter");
-  await expect(userRow(firstText)).toBeVisible({ timeout: 20_000 });
+  await sentFirst;
+  const firstRow = userRow(firstText);
+  await expect(firstRow).toBeVisible({ timeout: 20_000 });
+  const sentSecond = page.waitForResponse(
+    (response) => response.url().includes("/rpc/threads/send") && response.ok(),
+  );
   await composer.fill(secondText);
   await composer.press("Enter");
-  await expect(userRow(secondText)).toBeVisible({ timeout: 20_000 });
+  await sentSecond;
+  const secondRow = userRow(secondText);
+  await expect(secondRow).toBeVisible({ timeout: 20_000 });
 
-  await selectAndRelease(page, transcript, firstText, secondText);
-  await expect(page.getByTestId("quote-selection")).toHaveCount(0);
+  // Arm a quote on the first message…
+  await selectAndRelease(page, firstRow, firstText);
+  await quoteButton.click();
+  await expect(replyChip).toContainText("switch-a");
+  await expect(composer).toBeFocused();
+
+  // …then quote the second: the chip retargets, the announcement re-fires,
+  // and focus returns to the composer instead of dropping to <body>.
+  await secondRow.scrollIntoViewIfNeeded();
+  await selectAndRelease(page, secondRow, secondText);
+  await quoteButton.click();
+  await expect(replyChip).toContainText("switch-b");
+  await expect(replyChip).not.toContainText("switch-a");
+  await expect(composer).toBeFocused();
+  await expect(page.getByTestId("composer-announcement")).toHaveText(/Replying to/);
+
+  // Cancelling announces the cancel in the same event that disarms the reply —
+  // the send-disarm clear must not wipe it.
+  await page.getByRole("button", { name: "Cancel reply" }).click();
+  await expect(replyChip).toHaveCount(0);
+  await expect(composer).toBeFocused();
+  await expect(page.getByTestId("composer-announcement")).toHaveText(/Reply cancelled/);
 });

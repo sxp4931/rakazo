@@ -19,76 +19,95 @@ import { MoreHorizontal } from "lucide-react";
 import { useState } from "react";
 import { computerUpdates } from "../lib/computer-updates";
 import { rpc } from "../lib/rpc";
+import { errorText } from "../lib/user-error";
 
-type Action = "recover" | "reset" | "update";
+type Action = "stop" | "recover" | "reset" | "update";
 
 export function ComputerMaintenanceActions({
   botId,
   computer,
   onChanged,
+  visibleRecover = false,
 }: {
   botId: string;
   computer: ComputerStatus | null;
   onChanged: () => Promise<void>;
+  visibleRecover?: boolean;
 }) {
   const { t } = useLingui();
   const [menuOpen, setMenuOpen] = useState(false);
   const [pending, setPending] = useState<Action | null>(null);
-  const [confirmReset, setConfirmReset] = useState(false);
+  const [confirmAction, setConfirmAction] = useState<"reset" | "recover" | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   if (!computer) return null;
 
   const busy = Boolean(computer.busyBotName) || computer.state === "booting";
-  const showRecover =
+  const showReset =
     computer.state === "error" ||
     computer.state === "running" ||
     computer.state === "suspended" ||
     computer.state === "stopped";
-  const showReset = showRecover;
+  // Recover rebuilds the computer's system, which only computers that can update have.
+  const showRecover = showReset && computer.canUpdate;
+  const showStop = computer.state === "running";
   const showUpdate = computer.canUpdate;
-  const hasActions = showRecover || showReset || showUpdate;
+  const hasActions = showStop || showRecover || showReset || showUpdate;
   if (!hasActions) return null;
 
   async function run(action: Action) {
     setPending(action);
     setError(null);
     try {
-      if (action === "recover") await computerUpdates.start(botId, "recover");
+      if (action === "stop") await rpc.computer.stop({ botId });
+      else if (action === "recover") await computerUpdates.start(botId, "recover");
       else if (action === "reset") await rpc.computer.reset({ botId });
       else await computerUpdates.start(botId);
-      setConfirmReset(false);
+      setConfirmAction(null);
       setMenuOpen(false);
       await onChanged();
     } catch (err) {
-      setError(err instanceof Error ? err.message : t`Could not update computer`);
+      setError(
+        errorText(
+          err,
+          action === "stop" ? t`Could not stop computer` : t`Could not update computer`,
+        ),
+      );
     } finally {
       setPending(null);
     }
   }
 
-  function openResetConfirm() {
+  function openConfirm(action: "reset" | "recover") {
     setError(null);
     setMenuOpen(false);
-    setConfirmReset(true);
+    setConfirmAction(action);
   }
 
   // Escape closes the dialog inside the popup, so Shell's Escape handler does not also
   // close the computer overlay.
-  const resetDialog = (
+  const confirmationDialog = (
     <AlertDialog
-      open={confirmReset}
+      open={confirmAction !== null}
       onOpenChange={(open) => {
-        if (!open) setConfirmReset(false);
+        if (!open) setConfirmAction(null);
       }}
     >
       <AlertDialogContent>
         <AlertDialogHeader>
           <AlertDialogTitle>
-            <Trans>Reset computer?</Trans>
+            {confirmAction === "recover" ? (
+              <Trans>Recover computer?</Trans>
+            ) : (
+              <Trans>Reset computer?</Trans>
+            )}
           </AlertDialogTitle>
           <AlertDialogDescription>
-            <Trans>Restore the last saved workspace. Unsaved work on the computer is lost.</Trans>
+            {confirmAction === "recover" ? (
+              <Trans>Recovery restores the last saved workspace. Unsaved work may be lost.</Trans>
+            ) : (
+              <Trans>Restore the last saved workspace. Unsaved work on the computer is lost.</Trans>
+            )}
           </AlertDialogDescription>
         </AlertDialogHeader>
         {error ? <p className="text-[13px] text-destructive">{error}</p> : null}
@@ -96,13 +115,42 @@ export function ComputerMaintenanceActions({
           <AlertDialogCancel>
             <Trans>Cancel</Trans>
           </AlertDialogCancel>
-          <AlertDialogAction disabled={pending !== null} onClick={() => void run("reset")}>
-            {pending === "reset" ? <Trans>Resetting…</Trans> : <Trans>Reset</Trans>}
+          <AlertDialogAction
+            disabled={pending !== null}
+            variant="destructive"
+            onClick={() => {
+              if (confirmAction) void run(confirmAction);
+            }}
+          >
+            {pending === "recover" ? (
+              <Trans>Recovering…</Trans>
+            ) : confirmAction === "recover" ? (
+              <Trans>Recover computer</Trans>
+            ) : pending === "reset" ? (
+              <Trans>Resetting…</Trans>
+            ) : (
+              <Trans>Reset</Trans>
+            )}
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>
   );
+
+  if (visibleRecover)
+    return showRecover ? (
+      <>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={busy || pending !== null}
+          onClick={() => openConfirm("recover")}
+        >
+          <Trans>Recover computer</Trans>
+        </Button>
+        {confirmationDialog}
+      </>
+    ) : null;
 
   return (
     <>
@@ -126,33 +174,70 @@ export function ComputerMaintenanceActions({
           data-testid="computer-more-menu"
           className="w-auto min-w-44"
         >
+          {showStop ? (
+            <DropdownMenuItem
+              closeOnClick={false}
+              disabled={busy || pending !== null}
+              onClick={() => void run("stop")}
+            >
+              {pending === "stop" ? <Trans>Stopping…</Trans> : <Trans>Stop computer</Trans>}
+            </DropdownMenuItem>
+          ) : null}
           {showRecover ? (
             <DropdownMenuItem
               closeOnClick={false}
               disabled={busy || pending !== null}
-              onClick={() => void run("recover")}
+              aria-label={t`Recover computer`}
+              className="flex flex-col items-start"
+              onClick={() => openConfirm("recover")}
             >
-              {pending === "recover" ? <Trans>Recovering…</Trans> : <Trans>Recover computer</Trans>}
+              <span>
+                {pending === "recover" ? (
+                  <Trans>Recovering…</Trans>
+                ) : (
+                  <Trans>Recover computer</Trans>
+                )}
+              </span>
+              <span className="text-xs text-muted-foreground">
+                <Trans>Recreate a computer that is not working.</Trans>
+              </span>
             </DropdownMenuItem>
           ) : null}
           {showReset ? (
-            <DropdownMenuItem disabled={busy || pending !== null} onClick={openResetConfirm}>
-              {pending === "reset" ? <Trans>Resetting…</Trans> : <Trans>Reset computer</Trans>}
+            <DropdownMenuItem
+              aria-label={t`Reset computer`}
+              className="flex flex-col items-start"
+              disabled={busy || pending !== null}
+              onClick={() => openConfirm("reset")}
+            >
+              <span>
+                {pending === "reset" ? <Trans>Resetting…</Trans> : <Trans>Reset computer</Trans>}
+              </span>
+              <span className="text-xs text-muted-foreground">
+                <Trans>Restore the last saved workspace.</Trans>
+              </span>
             </DropdownMenuItem>
           ) : null}
           {showUpdate ? (
             <DropdownMenuItem
               closeOnClick={false}
               disabled={busy || pending !== null}
+              aria-label={t`Update computer`}
+              className="flex flex-col items-start"
               onClick={() => void run("update")}
             >
-              {pending === "update" ? <Trans>Updating…</Trans> : <Trans>Update computer</Trans>}
+              <span>
+                {pending === "update" ? <Trans>Updating…</Trans> : <Trans>Update computer</Trans>}
+              </span>
+              <span className="text-xs text-muted-foreground">
+                <Trans>Save the workspace and install current software.</Trans>
+              </span>
             </DropdownMenuItem>
           ) : null}
           {error ? <p className="px-1.5 py-1 text-[12.5px] text-destructive">{error}</p> : null}
         </DropdownMenuContent>
       </DropdownMenu>
-      {resetDialog}
+      {confirmationDialog}
     </>
   );
 }

@@ -25,6 +25,10 @@ required secrets, and startup commands.
 
 CI runs `pnpm lint`, `pnpm check`, production builds (including Electron preload smoke), `pnpm test`, `pnpm test:integration`, and `pnpm test:e2e` on every PR.
 
+Ordinary test processes (`NODE_ENV=test`) do not load the checkout's `.env`.
+Verification CLIs load configuration before starting isolated test processes;
+live canaries explicitly enabled with `VERIFY_PROVIDERS` also opt into loading it.
+
 ## Adding a UI language
 
 The web and Electron-hosted UI use Lingui catalogs. To add a locale, register it in
@@ -47,16 +51,18 @@ deterministic execution tests, computer replay, and real-model quality evals.
 ## Optional live-provider checks
 
 The default Playwright suite uses the fake sandbox. To run the same scripted-agent suite against
-real computers, set the matching `E2B_API_KEY`, `DAYTONA_API_KEY`, or `BOX_API_KEY` and choose a provider:
+real computers, set the matching `E2B_API_KEY`, `NOVITA_API_KEY`, `DAYTONA_API_KEY`, `BOAT_API_KEY`, or `BOXD_API_KEY` and choose a provider:
 
 ```bash
 pnpm test:e2e -- --sandbox=e2b
+pnpm test:e2e -- --sandbox=novita
 pnpm test:e2e -- --sandbox=daytona
-pnpm test:e2e -- --sandbox=box
+pnpm test:e2e -- --sandbox=boat
+pnpm test:e2e -- --sandbox=boxd
 ```
 
-The Playwright workflow also accepts these providers through its manual **Sandbox provider** input.
-These runs provision real machines and destroy them after the suite. Automatic runs use `fake`.
+For Novita, build the [computer template](docs/self-host-sandbox-providers.md#novita-computer-template) first.
+These runs provision real machines and destroy them after the suite. CI always uses `fake`.
 For the separate real-model desktop acceptance test, see
 [computer verification](docs/computer-runtime.md#verification).
 

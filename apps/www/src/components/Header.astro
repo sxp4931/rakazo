@@ -1,14 +1,10 @@
 ---
 import { getHomeCopy } from "../i18n/home";
 import type { HomeCopy } from "../i18n/home";
-import {
-  DEFAULT_LOCALE,
-  localeHashPath,
-  localeHomePath,
-  type Locale,
-} from "../i18n/locales";
-import { DOCS_URL, GITHUB_URL } from "../site";
-import Button from "./Button.astro";
+import { DEFAULT_LOCALE, localeHomePath } from "../i18n/locales";
+import type { Locale } from "../i18n/locales";
+import { BRAND_KIT_PATH, WORDMARK_SVG_PATH } from "../brand";
+import { APP_URL, GITHUB_URL } from "../site";
 import Logo from "./Logo.astro";
 
 type Props = {
@@ -16,31 +12,54 @@ type Props = {
   locale?: Locale;
   copy?: HomeCopy["nav"];
   homeHref?: string;
+  /** Names the part of the site this header sits on, such as "Docs", next to the logo. */
+  section?: { label: string; href: string };
 };
 
-const { starsLabel } = Astro.props;
+const { starsLabel, section } = Astro.props;
 const locale = Astro.props.locale ?? DEFAULT_LOCALE;
 const copy = Astro.props.copy ?? getHomeCopy(locale).nav;
 const homeHref = Astro.props.homeHref ?? localeHomePath(locale);
 
 const NAV_LINKS = [
-  { href: localeHashPath(locale, "demo"), label: copy.product },
-  { href: localeHashPath(locale, "roster"), label: copy.bots },
-  { href: localeHashPath(locale, "selfhost"), label: copy.selfHost },
-  { href: localeHashPath(locale, "open-source"), label: copy.openSource },
-  { href: DOCS_URL, label: copy.docs, external: true },
-];
+  { href: "/docs/", label: copy.docs },
+  { href: "/integrations/", label: copy.integrations },
+  { href: "/pricing/", label: copy.pricing },
+  { href: "/blog/", label: copy.blog },
+].filter((link) => link.href !== section?.href);
 
-const externalAttrs = { target: "_blank", rel: "noreferrer" };
+const currentPath = Astro.url.pathname.replace(/\/+$/, "") || "/";
+
+function isCurrent(href: string): boolean {
+  return (href.replace(/\/+$/, "") || "/") === currentPath;
+}
 ---
 
 <header class="site-header">
   <div class="site-header__left">
     <Logo href={homeHref} label={copy.home} />
+    <div class="logo-menu" role="menu" aria-label={copy.home} data-logo-menu data-wordmark={WORDMARK_SVG_PATH} hidden>
+      <a role="menuitem" tabindex="-1" href={homeHref} target="_blank" data-attr="logo-menu-new-tab">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 17 17 7M8 7h9v9" /></svg>
+        {copy.openInNewTab}
+      </a>
+      <button type="button" role="menuitem" tabindex="-1" data-logo-menu-copy data-attr="logo-menu-copy">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="13" height="13" rx="2" /><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3" /></svg>
+        {copy.copyWordmark}
+      </button>
+      <a role="menuitem" tabindex="-1" href={BRAND_KIT_PATH} data-attr="logo-menu-brand">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22a10 10 0 1 1 10-10c0 2.8-2.2 4-4 4h-2.5a1.5 1.5 0 0 0-1.1 2.5A2 2 0 0 1 12 22Z" /><circle cx="7.5" cy="10.5" r="1" /><circle cx="10.5" cy="6.5" r="1" /><circle cx="15.5" cy="7.5" r="1" /></svg>
+        {copy.brandKit}
+      </a>
+    </div>
+    {section && <a class="site-header__section" href={section.href}>{section.label}</a>}
     <nav class="site-nav" aria-label={copy.primary}>
       {
         NAV_LINKS.map((link) => (
-          <a href={link.href} {...(link.external ? externalAttrs : {})}>
+          <a
+            href={link.href}
+            aria-current={isCurrent(link.href) ? "page" : undefined}
+          >
             {link.label}
           </a>
         ))
@@ -48,12 +67,22 @@ const externalAttrs = { target: "_blank", rel: "noreferrer" };
     </nav>
   </div>
   <div class="site-header__right">
-    <a class="star-pill" href={GITHUB_URL} target="_blank" rel="noreferrer">
+    <slot />
+    <a
+      class="star-pill"
+      href={GITHUB_URL}
+      target="_blank"
+      rel="noopener"
+      aria-label={copy.github}
+      data-attr="header-github"
+    >
       <span aria-hidden="true">★</span>
       <span>{starsLabel}</span>
     </a>
     <div class="site-header__cta">
-      <Button href={GITHUB_URL} size="sm" external>{copy.viewOnGithub}</Button>
+      <a class="button button--primary button--small" href={APP_URL}>
+        {copy.getStarted}
+      </a>
     </div>
     <details class="site-menu" data-site-menu>
       <summary class="site-menu__toggle" aria-label={copy.menu}>
@@ -67,11 +96,15 @@ const externalAttrs = { target: "_blank", rel: "noreferrer" };
       <nav class="site-menu__panel" aria-label={copy.primary}>
         {
           NAV_LINKS.map((link) => (
-            <a href={link.href} {...(link.external ? externalAttrs : {})}>
+            <a
+              href={link.href}
+              aria-current={isCurrent(link.href) ? "page" : undefined}
+            >
               {link.label}
             </a>
           ))
         }
+        <a href={GITHUB_URL} target="_blank" rel="noopener" data-attr="menu-github">{copy.github}</a>
       </nav>
     </details>
   </div>
@@ -90,7 +123,71 @@ const externalAttrs = { target: "_blank", rel: "noreferrer" };
     });
 
     document.addEventListener("keydown", (event) => {
-      if (event.key === "Escape") menu.open = false;
+      if (event.key === "Escape") {
+        menu.open = false;
+      }
     });
+  }
+  const logoMenu = document.querySelector<HTMLElement>("[data-logo-menu]");
+  const logo = logoMenu?.parentElement?.querySelector<HTMLAnchorElement>(".brand-lockup");
+
+  if (logoMenu && logo) {
+    const items = () => [...logoMenu.querySelectorAll<HTMLElement>("[role=menuitem]")];
+    const close = (restoreFocus = false) => {
+      if (logoMenu.hidden) return;
+      logoMenu.hidden = true;
+      if (restoreFocus) logo.focus();
+    };
+
+    logo.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      logoMenu.hidden = false;
+      const x = event.clientX || logo.getBoundingClientRect().left;
+      const y = event.clientY || logo.getBoundingClientRect().bottom;
+      logoMenu.style.left = `${Math.min(x, window.innerWidth - logoMenu.offsetWidth - 8)}px`;
+      logoMenu.style.top = `${Math.min(y, window.innerHeight - logoMenu.offsetHeight - 8)}px`;
+      items()[0]?.focus();
+    });
+
+    logoMenu.querySelector("[data-logo-menu-copy]")?.addEventListener("click", () => {
+      const url = logoMenu.dataset.wordmark ?? "";
+      const svg = fetch(url).then(async (response) => {
+        if (!response.ok) throw new Error(`Wordmark request failed: ${response.status}`);
+        return new Blob([await response.text()], { type: "text/plain" });
+      });
+      close(true);
+      // If copying fails, open the file so it can still be saved.
+      const openFile = () => window.location.assign(url);
+      try {
+        navigator.clipboard.write([new ClipboardItem({ "text/plain": svg })]).catch(openFile);
+      } catch {
+        openFile();
+      }
+    });
+
+    logoMenu.addEventListener("click", (event) => {
+      if ((event.target as HTMLElement).closest("a")) close();
+    });
+
+    logoMenu.addEventListener("keydown", (event) => {
+      const list = items();
+      const index = list.indexOf(document.activeElement as HTMLElement);
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        const step = event.key === "ArrowDown" ? 1 : -1;
+        list[(index + step + list.length) % list.length]?.focus();
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        close(true);
+      } else if (event.key === "Tab") {
+        close();
+      }
+    });
+
+    document.addEventListener("pointerdown", (event) => {
+      if (!logoMenu.contains(event.target as Node)) close();
+    });
+    window.addEventListener("scroll", () => close(), { passive: true });
+    window.addEventListener("blur", () => close());
   }
 </script>

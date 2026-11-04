@@ -23,3 +23,24 @@ The platform exports are:
 
 Refresh platform exports after changing the source. Android supplies its own mask;
 never bake Mac corners, a rim, or an outer shadow into adaptive layers.
+
+Run `pnpm --filter @rakazo/ui-tokens export:brand` to refresh the web and marketing
+favicons, install icons, marketing mark, Windows/Linux icons, mobile splash, and
+mobile web favicon. These use the same orange foreground with the shared dark
+background, a rounded mask for small browser marks, and transparent splash padding.
+The notification export uses the Android monochrome silhouette so its eyes remain
+transparent. Apple Icon Composer and Android launcher exports remain separate
+because their system masks and safe areas differ.
+
+After exporting, run `pnpm exec tsx apps/www/scripts/render-og.mjs` to refresh the
+marketing page social cards; set `CHROME_PATH` to a headless Chrome executable when
+it is not available at the script's default location.
+
+## Animated vector avatars
+
+The animated Rakazo avatar uses SVG paths and gradients in the shared
+`logo-avatar-art.ts` definition. Its contour is sampled from this canonical
+source's alpha silhouette. The hands and lighting are simplified vector shapes;
+the original photographic skin grain is intentionally not reproduced. No raster
+body is embedded or loaded by the vector renderer. The canonical icon and its
+platform exports remain unchanged.

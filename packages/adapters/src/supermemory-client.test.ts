@@ -1,10 +1,14 @@
+import { createServer } from "node:http";
+import type { AddressInfo, Socket } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { SupermemorySaveResponse } from "./supermemory-client.js";
 import {
   deleteSupermemoryContainer,
   MAX_MEMORY_CONTENT_CHARS,
   MAX_RECALLED_MEMORIES,
   MAX_SUPERMEMORY_RESPONSE_BYTES,
   probeSupermemory,
+  SUPERMEMORY_DELETE_FORBIDDEN_ERROR,
   saveSupermemoryMemory,
   saveSupermemoryMemoryToContainers,
   searchSupermemory,
@@ -313,12 +317,20 @@ describe("deleteSupermemoryContainer", () => {
     vi.unstubAllGlobals();
   });
 
-  it("reports a non-OK response instead of throwing", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("", { status: 404 })));
-    const result = await deleteSupermemoryContainer("rakazo:bot-123", config);
-    expect(result).toEqual({ ok: false, error: expect.stringContaining("404") });
-    vi.unstubAllGlobals();
-  });
+  // DELETE /v3/container-tags/{containerTag} responses from the Supermemory OpenAPI spec.
+  it.each([
+    [200, { ok: true }],
+    [404, { ok: true }],
+    [403, { ok: false, error: SUPERMEMORY_DELETE_FORBIDDEN_ERROR }],
+    [401, { ok: false, error: "Supermemory container delete failed: 401" }],
+    [500, { ok: false, error: "Supermemory container delete failed: 500" }],
+  ] satisfies [number, SupermemorySaveResponse][])(
+    "maps a %i response",
+    async (status, expected) => {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("{}", { status })));
+      await expect(deleteSupermemoryContainer("rakazo:bot-123", config)).resolves.toEqual(expected);
+    },
+  );
 });
 
 describe("probeSupermemory", () => {
@@ -343,5 +355,124 @@ describe("probeSupermemory", () => {
     const result = await probeSupermemory(config);
     expect(result).toEqual({ ok: false, error: expect.stringContaining("unreachable") });
     vi.unstubAllGlobals();
+  });
+});
+
+describe("private-host transport", () => {
+  const pinned = [{ address: "172.18.0.4", family: 4 as const }];
+
+  it("rechecks pinned addresses without resolving the name again", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ results: [] }), { status: 200 }));
+    const resolveHostname = vi.fn();
+
+    const result = await searchSupermemory("query", "fake:tag", {
+      baseUrl: "http://supermemory:6767",
+      apiKey: "sm_test_key",
+      resolveHostname,
+      pinnedAddresses: pinned,
+      fetch: fetchMock,
+    });
+
+    expect(result).toEqual({ ok: true, results: [] });
+    expect(resolveHostname).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a pinned public address before the request", async () => {
+    const fetchMock = vi.fn();
+    const resolveHostname = vi.fn();
+
+    const result = await searchSupermemory("query", "fake:tag", {
+      baseUrl: "http://supermemory:6767",
+      apiKey: "sm_test_key",
+      resolveHostname,
+      pinnedAddresses: [{ address: "203.0.113.10", family: 4 }],
+      fetch: fetchMock,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(resolveHostname).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  // A finished Response from a stub hides this: the dispatcher close waits for
+  // the body, and the caller cannot read that body until close returns.
+  it("reads a body that arrives after the response headers", async () => {
+    const payload = JSON.stringify({ results: [{ memory: "late", similarity: 1 }] });
+    const server = createServer((request, response) => {
+      request.resume();
+      response.writeHead(200, { "content-type": "application/json" });
+      response.flushHeaders();
+      setTimeout(() => response.end(payload), 50);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as AddressInfo).port;
+    try {
+      await expect(
+        searchSupermemory(
+          "query",
+          "fake:tag",
+          {
+            baseUrl: `http://supermemory:${port}`,
+            apiKey: "sm_test_key",
+            resolveHostname: async () => [{ address: "127.0.0.1", family: 4 }],
+          },
+          undefined,
+          AbortSignal.timeout(2_000),
+        ),
+      ).resolves.toEqual({ ok: true, results: [{ memory: "late", similarity: 1 }] });
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it("cancels unread probe, save, and delete bodies", async () => {
+    const sockets = new Set<Socket>();
+    const server = createServer((request, response) => {
+      // A local tool can probe any listening loopback port; only Supermemory calls
+      // are answered and count towards the sockets the client must release.
+      if (!/^\/v[34]\//.test(request.url ?? "")) {
+        request.resume();
+        response.writeHead(404).end();
+        return;
+      }
+      sockets.add(request.socket);
+      request.socket.on("close", () => sockets.delete(request.socket));
+      request.resume();
+      response.writeHead(request.url?.includes("search") ? 500 : 200, {
+        "content-type": "application/json",
+      });
+      response.flushHeaders();
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as AddressInfo).port;
+    const connection = {
+      baseUrl: `http://supermemory:${port}`,
+      apiKey: "sm_test_key",
+      resolveHostname: async () => [{ address: "127.0.0.1", family: 4 as const }],
+    };
+    try {
+      await expect(probeSupermemory(connection)).resolves.toEqual({ ok: true });
+      await expect(saveSupermemoryMemory("fact", "fake:tag", connection)).resolves.toEqual({
+        ok: true,
+      });
+      await expect(deleteSupermemoryContainer("fake:tag", connection)).resolves.toEqual({
+        ok: true,
+      });
+      await expect(searchSupermemory("query", "fake:tag", connection)).resolves.toEqual({
+        ok: false,
+        error: expect.stringContaining("500"),
+      });
+      const deadline = Date.now() + 1_000;
+      while (sockets.size > 0 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(sockets.size).toBe(0);
+    } finally {
+      for (const socket of sockets) socket.destroy();
+      await new Promise((resolve) => server.close(resolve));
+    }
   });
 });

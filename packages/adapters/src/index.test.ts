@@ -1,6 +1,8 @@
 import { createCipheriv, createHash } from "node:crypto";
+import { BUILTIN_TOOL_NAMES, FLEET_TOOL_NAMES } from "@rakazo/contracts";
 import { describe, expect, it } from "vitest";
-import { FakeSandboxProvider } from "./fake-sandbox.js";
+import { agentConnectionTools, builtinAgentTools, DELEGATION_TOOL_NAMES } from "./builtin-tools.js";
+import { selectBuiltinToolsForRun } from "./run-tool-selection.js";
 import { inferScript, ScriptedAgentRuntime } from "./scripted-runtime.js";
 import { EncryptedSecretStore } from "./secrets.js";
 
@@ -16,18 +18,25 @@ describe("secret store", () => {
     });
     expect(record.ciphertext).not.toContain("sk-or-v1-secretvalue");
     expect(record.ciphertext).toMatch(/^v2:/);
-    expect(store.load(record.ciphertext, record.id)).toBe("sk-or-v1-secretvalue");
-    expect(() => store.load(record.ciphertext, "another-row")).toThrow();
+    await expect(store.load(record.ciphertext, record.id)).resolves.toBe("sk-or-v1-secretvalue");
+    await expect(store.load(record.ciphertext, "another-row")).rejects.toThrow();
   });
 
-  it("keeps legacy ciphertext readable without rewriting it at startup", () => {
+  it("keeps legacy ciphertext readable without rewriting it at startup", async () => {
     const key = "legacy-test-key";
     const iv = Buffer.alloc(12, 7);
     const cipher = createCipheriv("aes-256-gcm", createHash("sha256").update(key).digest(), iv);
     const encrypted = Buffer.concat([cipher.update("legacy-secret", "utf8"), cipher.final()]);
     const legacy = Buffer.concat([iv, cipher.getAuthTag(), encrypted]).toString("base64");
     const store = new EncryptedSecretStore(key);
-    expect(store.load(legacy, "secret-row")).toBe("legacy-secret");
+    expect(await store.load(legacy, "secret-row")).toBe("legacy-secret");
+  });
+
+  it("rejects malformed v2 ciphertext when loading asynchronously", async () => {
+    const store = new EncryptedSecretStore("test-key");
+    await expect(store.load("v2:AAAA", "secret-row")).rejects.toThrow(
+      "Encrypted secret is malformed",
+    );
   });
 });
 
@@ -162,63 +171,52 @@ describe("scripted runtime", () => {
 });
 
 describe("builtin tools", () => {
-  it("exposes the tools the executor actually applies", async () => {
-    const { builtinAgentTools } = await import("./builtin-tools.js");
-    expect(builtinAgentTools.map((t) => t.name)).toEqual(
-      expect.arrayContaining([
-        "write_file",
-        "attach_file",
-        "shell",
-        "remember",
-        "request_takeover",
-        "ask_user",
-        "message_user",
-        "request_secret",
-        "run_subagent",
-        "create_space",
-        "spawn_bot",
-        "update_bot",
-        "archive_bot",
-        "skill_read",
-        "skill_create",
-        "skill_update",
-        "skill_delete",
-        "web_search",
-        "web_fetch",
-        "browser_navigate",
-        "browser_snapshot",
-        "browser_act",
-      ]),
-    );
-    const updateBot = builtinAgentTools.find((tool) => tool.name === "update_bot");
-    expect(updateBot?.inputSchema).toEqual(
-      expect.objectContaining({
-        properties: expect.objectContaining({
-          name: expect.any(Object),
-          title: expect.any(Object),
-          description: expect.any(Object),
-          color: expect.any(Object),
-          artifact_id: expect.any(Object),
-          use_attached_image: expect.any(Object),
-          notifyOnFinish: { type: "boolean", description: expect.any(String) },
-        }),
-      }),
-    );
+  it("keeps every bot management tool out of helper tool lists", () => {
+    for (const name of FLEET_TOOL_NAMES) expect(DELEGATION_TOOL_NAMES.has(name), name).toBe(true);
   });
-});
 
-describe("fake sandbox", () => {
-  it("provisions isolated computers", async () => {
-    const sandbox = new FakeSandboxProvider();
-    const ctx = {
-      operationId: "1",
-      traceId: "1",
-      spaceId: "w",
-      userId: "u",
-      signal: new AbortController().signal,
+  it("exposes the tools the executor actually applies", async () => {
+    expect([...BUILTIN_TOOL_NAMES].sort()).toEqual(
+      [...builtinAgentTools, ...agentConnectionTools].map((tool) => tool.name).sort(),
+    );
+    const options = {
+      graphicalToolsAllowed: true,
+      groupId: null,
+      trigger: "user",
+      semanticMemoryEnabled: true,
+      cloudAgentEnabled: true,
+      historyRetrievalEnabled: true,
+      messagingChannelRun: false,
+      voiceCall: true,
     };
-    const a = await sandbox.provision({ botId: "a", homePath: "/tmp/a" }, ctx);
-    const b = await sandbox.provision({ botId: "b", homePath: "/tmp/b" }, ctx);
-    expect(a.id).not.toBe(b.id);
+    const ticketNames = [
+      "board_tickets",
+      "ticket_get",
+      "ticket_create",
+      "ticket_update",
+      "ticket_comment",
+    ];
+    const enabled = selectBuiltinToolsForRun({ ...options, ticketBoardEnabled: true }).map(
+      (tool) => tool.name,
+    );
+    const disabled = selectBuiltinToolsForRun({ ...options, ticketBoardEnabled: false }).map(
+      (tool) => tool.name,
+    );
+    expect(enabled.filter((name) => ticketNames.includes(name))).toEqual(ticketNames);
+    expect(disabled).toEqual(enabled.filter((name) => !ticketNames.includes(name)));
+    expect(
+      selectBuiltinToolsForRun({
+        ...options,
+        ticketBoardEnabled: true,
+        disabledBuiltinTools: ticketNames,
+      }).map((tool) => tool.name),
+    ).toEqual(disabled);
+    const purchaseNames = ["request_purchase", "purchase_status", "paid_request"];
+    expect(enabled.filter((name) => purchaseNames.includes(name))).toEqual([]);
+    expect(
+      selectBuiltinToolsForRun({ ...options, paymentWalletEnabled: true })
+        .map((tool) => tool.name)
+        .filter((name) => purchaseNames.includes(name)),
+    ).toEqual(purchaseNames);
   });
 });

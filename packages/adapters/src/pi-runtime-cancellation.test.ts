@@ -1,5 +1,6 @@
 import type { AgentRunRequest } from "@rakazo/adapter-kit";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { builtinAgentTools } from "./builtin-tools.js";
 
 const fake = vi.hoisted(() => {
   function deferred() {
@@ -66,6 +67,7 @@ vi.mock("@earendil-works/pi-ai/providers/all", () => ({
     },
   }),
 }));
+
 vi.mock("./pi-local-provider.js", () => ({
   registerLocalProvider: (models: unknown) => models,
 }));
@@ -84,7 +86,7 @@ const request: AgentRunRequest = {
   prompt: "fake task",
   instructions: "test",
   history: [],
-  tools: [],
+  tools: builtinAgentTools,
   model: { provider: "test", id: "fake-model" },
 };
 

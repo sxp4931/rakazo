@@ -1,18 +1,22 @@
 import { lookup } from "node:dns/promises";
-import { isIP } from "node:net";
-import { readBoundedResponseBytes } from "@rakazo/core";
-import { Agent } from "undici";
 import {
-  createAddressCheckedLookup,
-  isPrivateAddress,
-  type ResolvedAddress,
-  type ResolveHostname,
-} from "./network-address.js";
-import { dispatcherFetch } from "./undici-fetch.js";
+  ipVersion,
+  isCloudMetadataHost,
+  isInternalHostname,
+  isNonPublicAddress,
+  normalizeHost,
+} from "@rakazo/contracts";
+import { readBoundedResponseBytes } from "@rakazo/core";
+import type { Dispatcher } from "undici";
+import { EnvHttpProxyAgent, Pool } from "undici";
+import type { ResolvedAddress, ResolveHostname } from "./network-address.js";
+import { createAddressCheckedLookup, egressRefused } from "./network-address.js";
+import { fetchPairedWithDispatcher } from "./undici-fetch.js";
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_MAX_BYTES = 5 * 1024 * 1024;
 const MAX_REDIRECTS = 5;
+const DEFAULT_USER_AGENT = "Rakazo/0.1 (+https://github.com/elie222/rakazo)";
 
 export type { ResolveHostname } from "./network-address.js";
 
@@ -24,15 +28,20 @@ export interface SafeWebFetchOptions {
   userAgent?: string;
   headers?: Record<string, string>;
   signal?: AbortSignal;
+  maxRedirects?: number;
+  /** Keep the first `maxBytes` of a longer body instead of rejecting it. */
+  truncate?: boolean;
+  /** Refuse any hop, redirects included, whose port is not listed. */
+  allowedPorts?: readonly number[];
   /**
-   * Test seam for dispatcher teardown. Defaults to `Agent.close()`.
+   * Test seam for dispatcher teardown. Defaults to `dispatcher.close()`.
    * Always raced against the shared operation deadline.
    */
   cleanup?: () => Promise<void>;
   /**
-   * Test seam for force-teardown after cleanup. Defaults to `Agent.destroy()`.
+   * Test seam for force-teardown after cleanup. Defaults to `dispatcher.destroy()`.
    * Invoked without awaiting so a hanging destroy cannot extend the deadline.
-   * May return a Promise (`Agent.destroy()` does); rejections are swallowed.
+   * May return a Promise (`dispatcher.destroy()` does); rejections are swallowed.
    */
   destroy?: () => void | Promise<void>;
 }
@@ -44,6 +53,7 @@ export async function assertSafeWebUrl(
   value: string,
   resolve: ResolveHostname = defaultResolveHostname,
   signal?: AbortSignal,
+  allowedPorts?: readonly number[],
 ): Promise<URL> {
   let url: URL;
   try {
@@ -57,41 +67,163 @@ export async function assertSafeWebUrl(
   if (url.username || url.password) {
     throw new Error("URL must not contain credentials");
   }
-  const hostname = url.hostname.replace(/^\[|\]$/g, "");
-  if (isBlockedHostname(hostname)) {
-    throw new Error("URL targets a private or internal host");
+  const port = Number(url.port || (url.protocol === "https:" ? 443 : 80));
+  if (allowedPorts && !allowedPorts.includes(port)) {
+    throw new Error("URL port is not allowed");
   }
-  assertPublicAddresses(await withAbort(resolve(hostname), signal));
+  await resolvePublicHost(url.hostname, resolve, signal);
   return url;
 }
 
-export function isBlockedHostname(hostname: string): boolean {
-  const normalized = hostname.toLowerCase().replace(/\.$/, "");
-  if (
-    normalized === "localhost" ||
-    normalized.endsWith(".localhost") ||
-    normalized.endsWith(".local") ||
-    normalized.endsWith(".internal") ||
-    normalized === "metadata.google.internal" ||
-    normalized === "metadata.goog"
-  ) {
-    return true;
+async function resolvePublicHost(
+  host: string,
+  resolve: ResolveHostname,
+  signal?: AbortSignal,
+): Promise<ResolvedAddress[]> {
+  const hostname = host.replace(/^\[|\]$/g, "");
+  if (isBlockedHostname(hostname)) {
+    throw egressRefused(hostname, new Error("URL targets a private or internal host"));
   }
-  if (isIP(normalized) !== 0) return isPrivateAddress(normalized);
-  return false;
+  const addresses = await withAbort(resolve(hostname), signal);
+  try {
+    assertPublicAddresses(addresses);
+  } catch (error) {
+    throw egressRefused(hostname, error);
+  }
+  return addresses;
 }
+
+export function isBlockedHostname(hostname: string): boolean {
+  const host = normalizeHost(hostname);
+  if (isInternalHostname(host) || isCloudMetadataHost(host)) return true;
+  return ipVersion(host) !== 0 && isNonPublicAddress(host);
+}
+
+type SafeWebResponse<Body> = { url: string; body: Body; contentType: string | null };
 
 export async function fetchSafeWebText(
   url: string,
   options: SafeWebFetchOptions = {},
-): Promise<{ url: string; body: string; contentType: string | null }> {
+): Promise<SafeWebResponse<string>> {
+  const response = await fetchSafeWebBytes(url, options);
+  return { ...response, body: new TextDecoder().decode(response.body) };
+}
+
+export async function fetchSafeWebBytes(
+  url: string,
+  options: SafeWebFetchOptions = {},
+): Promise<SafeWebResponse<Uint8Array>> {
+  return withSafeEgress(options, ({ baseFetch, resolve, dispatcher, signal }) =>
+    followRedirects(url, {
+      baseFetch,
+      resolve,
+      dispatcher,
+      maxBytes: options.maxBytes ?? DEFAULT_MAX_BYTES,
+      userAgent: options.userAgent ?? DEFAULT_USER_AGENT,
+      headers: options.headers,
+      signal,
+      redirectsRemaining: options.maxRedirects ?? MAX_REDIRECTS,
+      truncate: options.truncate ?? false,
+      allowedPorts: options.allowedPorts,
+    }),
+  );
+}
+
+export interface SafeHttpResponse {
+  url: string;
+  status: number;
+  headers: Headers;
+  /** At most `maxBytes`; `truncated` when the body went on. */
+  body: Uint8Array;
+  truncated: boolean;
+}
+
+/**
+ * One request with any method. A redirect is returned, never followed, so a body or payment
+ * is only ever sent to the URL it was meant for.
+ */
+export async function fetchSafeHttpRequest(
+  url: string,
+  request: { method: string; headers?: Record<string, string>; body?: string },
+  options: Omit<SafeWebFetchOptions, "headers" | "maxRedirects" | "truncate"> = {},
+): Promise<SafeHttpResponse> {
+  const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
+  return withSafeEgress(options, async ({ baseFetch, resolve, dispatcher, signal }) => {
+    const validated = await assertSafeWebUrl(url, resolve, signal, options.allowedPorts);
+    const response = await withAbort(
+      baseFetch(validated.href, {
+        method: request.method,
+        redirect: "manual",
+        signal,
+        headers: { "user-agent": options.userAgent ?? DEFAULT_USER_AGENT, ...request.headers },
+        ...(request.body !== undefined ? { body: request.body } : {}),
+        dispatcher,
+      } as RequestInit & { dispatcher: Dispatcher }),
+      signal,
+    );
+    const body = await readBodyPrefix(response, maxBytes + 1, signal);
+    return {
+      url: validated.href,
+      status: response.status,
+      headers: response.headers,
+      body: body.slice(0, maxBytes),
+      truncated: body.byteLength > maxBytes,
+    };
+  });
+}
+
+/**
+ * Honors HTTP(S)_PROXY / NO_PROXY. Every proxied request is tunneled with CONNECT to the checked
+ * IP, so the proxy never resolves the hostname itself and DNS rebinding cannot reach past it.
+ */
+function safeWebDispatcher(resolve: ResolveHostname): Dispatcher {
+  const { env } = process;
+  for (const proxy of [env.http_proxy ?? env.HTTP_PROXY, env.https_proxy ?? env.HTTPS_PROXY]) {
+    if (proxy && !/^https?:\/\//i.test(proxy)) throw new Error("Only HTTP proxies are supported");
+  }
+  return new EnvHttpProxyAgent({
+    connect: { lookup: createAddressCheckedLookup(resolve, assertPublicAddresses) },
+    proxyTunnel: true,
+    clientFactory: (origin, options) => {
+      const pool = new Pool(origin, options);
+      const connect = pool.connect.bind(pool) as (
+        options: Dispatcher.ConnectOptions,
+      ) => Promise<Dispatcher.ConnectData>;
+      return Object.assign(pool, {
+        connect: async (options: Dispatcher.ConnectOptions) => {
+          const authority = await checkedAuthority(options.path, resolve);
+          return connect({
+            ...options,
+            path: authority,
+            headers: { ...(options.headers as Record<string, string>), host: authority },
+          });
+        },
+      });
+    },
+  });
+}
+
+async function checkedAuthority(authority: string, resolve: ResolveHostname): Promise<string> {
+  const separator = authority.lastIndexOf(":");
+  const [first] = await resolvePublicHost(authority.slice(0, separator), resolve);
+  const address = first?.address ?? "";
+  const host = ipVersion(address) === 6 ? `[${address}]` : address;
+  return `${host}${authority.slice(separator)}`;
+}
+
+async function withSafeEgress<T>(
+  options: SafeWebFetchOptions,
+  run: (egress: {
+    baseFetch: typeof globalThis.fetch;
+    resolve: ResolveHostname;
+    dispatcher: Dispatcher;
+    signal: AbortSignal;
+  }) => Promise<T>,
+): Promise<T> {
   const resolve = options.resolveHostname ?? defaultResolveHostname;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
-  const baseFetch = options.fetch ?? dispatcherFetch;
-  const dispatcher = new Agent({
-    connect: { lookup: createAddressCheckedLookup(resolve, assertPublicAddresses) },
-  });
+  const baseFetch = fetchPairedWithDispatcher(options.fetch);
+  const dispatcher = safeWebDispatcher(resolve);
   // One deadline for the whole redirect chain + body read + cleanup, not per hop.
   const signal = combineSignals(options.signal, AbortSignal.timeout(timeoutMs));
   const cleanup =
@@ -104,16 +236,7 @@ export async function fetchSafeWebText(
   const destroy = options.destroy ?? (() => dispatcher.destroy());
 
   try {
-    return await followRedirects(url, {
-      baseFetch,
-      resolve,
-      dispatcher,
-      maxBytes,
-      userAgent: options.userAgent ?? "OtterBot/0.1 (+https://github.com/elie222/rakazo)",
-      headers: options.headers,
-      signal,
-      redirectsRemaining: MAX_REDIRECTS,
-    });
+    return await run({ baseFetch, resolve, dispatcher, signal });
   } finally {
     // Race graceful close against the shared deadline. Do not wait unbounded on close().
     await withAbort(cleanup(), signal).catch(() => undefined);
@@ -135,18 +258,20 @@ async function followRedirects(
   state: {
     baseFetch: typeof globalThis.fetch;
     resolve: ResolveHostname;
-    dispatcher: Agent;
+    dispatcher: Dispatcher;
     maxBytes: number;
     userAgent: string;
     headers?: Record<string, string>;
     signal: AbortSignal;
     redirectsRemaining: number;
+    truncate: boolean;
+    allowedPorts?: readonly number[];
   },
-): Promise<{ url: string; body: string; contentType: string | null }> {
+): Promise<SafeWebResponse<Uint8Array>> {
   if (state.signal.aborted) {
     throw abortError(state.signal);
   }
-  const validated = await assertSafeWebUrl(rawUrl, state.resolve, state.signal);
+  const validated = await assertSafeWebUrl(rawUrl, state.resolve, state.signal, state.allowedPorts);
   // Race fetch against the deadline — injected fetch may ignore init.signal.
   const response = await withAbort(
     state.baseFetch(validated.href, {
@@ -159,7 +284,7 @@ async function followRedirects(
         ...state.headers,
       },
       dispatcher: state.dispatcher,
-    } as RequestInit & { dispatcher: Agent }),
+    } as RequestInit & { dispatcher: Dispatcher }),
     state.signal,
   );
 
@@ -190,18 +315,16 @@ async function followRedirects(
   }
 
   const contentLength = response.headers.get("content-length");
-  if (contentLength && Number(contentLength) > state.maxBytes) {
+  if (!state.truncate && contentLength && Number(contentLength) > state.maxBytes) {
     await cancelResponseBody(response, state.signal);
     throw new Error("Response is too large");
   }
 
-  const buffer = await readBodyCapped(response, state.maxBytes, state.signal);
+  const body = state.truncate
+    ? await readBodyPrefix(response, state.maxBytes, state.signal)
+    : await readBodyCapped(response, state.maxBytes, state.signal);
 
-  return {
-    url: validated.href,
-    body: new TextDecoder().decode(buffer),
-    contentType: response.headers.get("content-type"),
-  };
+  return { url: validated.href, body, contentType: response.headers.get("content-type") };
 }
 
 async function cancelResponseBody(response: Response, signal: AbortSignal): Promise<void> {
@@ -229,8 +352,35 @@ export async function readBodyCapped(
   });
 }
 
+/** Read at most maxBytes and release the rest of the stream unread. */
+async function readBodyPrefix(
+  response: Response,
+  maxBytes: number,
+  signal: AbortSignal,
+): Promise<Uint8Array> {
+  if (!response.body) {
+    const buffer = await withAbort(response.arrayBuffer(), signal);
+    return new Uint8Array(buffer).slice(0, maxBytes);
+  }
+  const reader = response.body.getReader();
+  const prefix = new Uint8Array(maxBytes);
+  let total = 0;
+  try {
+    while (total < maxBytes) {
+      const { done, value } = await withAbort(reader.read(), signal);
+      if (done) break;
+      const take = Math.min(value.byteLength, maxBytes - total);
+      prefix.set(value.subarray(0, take), total);
+      total += take;
+    }
+  } finally {
+    void Promise.resolve(reader.cancel()).catch(() => undefined);
+  }
+  return prefix.slice(0, total);
+}
+
 function assertPublicAddresses(addresses: ResolvedAddress[]): void {
-  if (addresses.length === 0 || addresses.some((entry) => isPrivateAddress(entry.address))) {
+  if (addresses.length === 0 || addresses.some((entry) => isNonPublicAddress(entry.address))) {
     throw new Error("URL resolves to a private address");
   }
 }

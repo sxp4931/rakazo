@@ -1,8 +1,12 @@
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
-import { createServer, type RequestListener, type Server } from "node:http";
+import type { RequestListener, Server } from "node:http";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { type ElectronApplication, _electron as electron, expect, test } from "@playwright/test";
+import type { ElectronApplication } from "@playwright/test";
+import { _electron as electron, expect, test } from "@playwright/test";
+import { prepareHostComputer } from "../src/host-computer.js";
 
 const APP_MARKER = "Local OtterBot stack ready";
 const IMAGE_TAG = "v9.9.9";
@@ -13,6 +17,7 @@ const COMPOSE_DIR = path.resolve(import.meta.dirname, "..", "..", "..", "infra",
 type FakeDockerMode =
   | "ok"
   | "daemon-down"
+  | "compose-check-fails"
   | "pull-fails"
   | "pool-exhausted"
   | "port-conflict"
@@ -40,19 +45,6 @@ test.beforeAll(async () => {
       response.end(JSON.stringify({ ok: true, imageTag: IMAGE_TAG }));
       return;
     }
-    if (request.url === "/api/desktop-settings/rpc/integrationSetup/get") {
-      const expected = await readFile(path.join(userData, "stack", ".desktop-stack-token"), "utf8");
-      if (
-        request.headers["x-rakazo-local-settings-token"] !== expected.trim() ||
-        request.headers.cookie
-      ) {
-        response.writeHead(401).end();
-        return;
-      }
-      response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify({ json: { canConfigure: true } }));
-      return;
-    }
     if (request.url === "/rpc/health" && request.method === "POST") {
       response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
       response.end(JSON.stringify({ json: { ok: true, version: "0.1.0" } }));
@@ -78,6 +70,8 @@ test.afterAll(async () => {
 test.beforeEach(async () => {
   // The fake docker logs $PWD, which is the resolved path (macOS /var is a symlink).
   userData = await realpath(await mkdtemp(path.join(tmpdir(), "rakazo-desktop-stack-")));
+  // Setup otherwise follows the machine's language; these specs read its English text.
+  await writeFile(path.join(userData, "ui-locale.txt"), "en\n");
 });
 
 test.afterEach(async () => {
@@ -109,7 +103,9 @@ async function writeFakeDocker(mode: FakeDockerMode) {
     "#!/bin/sh",
     `printf '%s | %s | %s\\n' "$PWD" "$RAKAZO_IMAGE_TAG" "$*" >> '${fakeDockerLog()}'`,
     'case "$1 $2" in',
-    '  "compose version") echo "2.29.0"; exit 0 ;;',
+    mode === "compose-check-fails"
+      ? '  "compose version") echo "Access is denied." >&2; exit 7 ;;'
+      : '  "compose version") echo "5.6.1"; exit 0 ;;',
     '  "info --format")',
     mode === "daemon-down"
       ? '    echo "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?" >&2; exit 1 ;;'
@@ -169,7 +165,7 @@ test("This computer installs and starts the stack, then opens the app", async ()
   app = await launch("ok");
   const setup = await app.firstWindow();
 
-  await expect(setup.getByRole("radio", { name: /This computer/ })).toBeChecked();
+  await setup.getByRole("radio", { name: /This computer/ }).check();
   // The panel is empty until a start begins, so check the attribute rather than the box.
   await expect(setup.locator("#panel-new")).toHaveJSProperty("hidden", false);
   await expect(setup.locator("#stack")).toBeHidden();
@@ -215,6 +211,7 @@ test("This computer installs and starts the stack, then opens the app", async ()
   expect(await readLog()).toEqual([
     `${stackDir} | ${IMAGE_TAG} | compose version --short`,
     `${stackDir} | ${IMAGE_TAG} | info --format {{.ServerVersion}}`,
+    `${stackDir} | ${IMAGE_TAG} | ${compose} config --images`,
     `${stackDir} | ${IMAGE_TAG} | ${compose} pull`,
     `${stackDir} | ${IMAGE_TAG} | ${compose} up -d --wait --wait-timeout 300`,
   ]);
@@ -223,6 +220,7 @@ test("This computer installs and starts the stack, then opens the app", async ()
 test("without Docker the app explains how to get it and offers to check again", async () => {
   app = await launch("missing");
   const setup = await app.firstWindow();
+  await setup.getByRole("radio", { name: /This computer/ }).check();
 
   await setup.getByRole("button", { name: "Continue" }).click();
   await expect(setup.locator("#stack-phase")).toHaveText(
@@ -247,6 +245,7 @@ test("without Docker the app explains how to get it and offers to check again", 
 test("switching to Existing instance while the stack starts keeps that choice", async () => {
   app = await launch("ok");
   const setup = await app.firstWindow();
+  await setup.getByRole("radio", { name: /This computer/ }).check();
 
   await setup.getByRole("button", { name: "Continue" }).click();
   await expect(setup.locator("#stack-phase")).toHaveText("Downloading OtterBot…");
@@ -276,6 +275,7 @@ test("switching to Existing instance while the stack starts keeps that choice", 
 test("a stopped Docker daemon is reported and Check again asks Docker once more", async () => {
   app = await launch("daemon-down");
   const setup = await app.firstWindow();
+  await setup.getByRole("radio", { name: /This computer/ }).check();
 
   await setup.getByRole("button", { name: "Continue" }).click();
   await expect(setup.locator("#stack-phase")).toHaveText(
@@ -290,9 +290,27 @@ test("a stopped Docker daemon is reported and Check again asks Docker once more"
   expect((await readLog()).some((line) => line.includes(" pull"))).toBe(false);
 });
 
+test("a failed Compose check shows diagnostics instead of installation help", async () => {
+  app = await launch("compose-check-fails");
+  const setup = await app.firstWindow();
+  await setup.getByRole("radio", { name: /This computer/ }).check();
+  await setup.getByRole("button", { name: "Continue" }).click();
+  await expect(setup.locator("#stack-phase")).toHaveText(
+    "Could not check Docker Compose. Check the output below, then retry.",
+  );
+  await expect(setup.locator("#stack-output")).toContainText("Access is denied.");
+  await expect(setup.locator("#stack-output")).toContainText("exited with code 7");
+  await expect(setup.getByRole("button", { name: "Retry" })).toBeEnabled();
+  await expect(setup.locator("#stack-docker-help")).toBeHidden();
+  await setup.screenshot({
+    path: path.join(import.meta.dirname, "screenshots", "11-setup-compose-check-failed.png"),
+  });
+});
+
 test("unpublished images show the docker output and a Retry button", async () => {
   app = await launch("pull-fails");
   const setup = await app.firstWindow();
+  await setup.getByRole("radio", { name: /This computer/ }).check();
 
   await setup.getByRole("button", { name: "Continue" }).click();
   await expect(setup.locator("#stack-phase")).toHaveText(
@@ -336,6 +354,12 @@ test("a saved local stack that is down is started again without asking", async (
 test("a saved local stack is reused only after its private identity matches", async () => {
   const stackDir = path.join(userData, "stack");
   await mkdir(stackDir, { recursive: true });
+  const host = await prepareHostComputer(userData);
+  await writeFile(
+    path.join(stackDir, ".desktop-host-config"),
+    createHash("sha256").update(JSON.stringify(host.connection)).digest("hex"),
+  );
+  await host.close();
   await writeFile(path.join(stackDir, ".desktop-stack-token"), `${"ab".repeat(32)}\n`, {
     encoding: "utf8",
     mode: 0o600,
@@ -396,7 +420,7 @@ test("a saved local target is the exact origin authenticated before reuse", asyn
   }
 });
 
-test("an existing stack .env is never rewritten", async () => {
+test("an existing stack .env keeps its lines and gains only added secrets", async () => {
   const stackDir = path.join(userData, "stack");
   await mkdir(stackDir, { recursive: true });
   const sentinel = "POSTGRES_PASSWORD=keep-me\nSENTINEL=1\n";
@@ -404,17 +428,21 @@ test("an existing stack .env is never rewritten", async () => {
 
   app = await launch("ok");
   const setup = await app.firstWindow();
+  await setup.getByRole("radio", { name: /This computer/ }).check();
   const appWindowPromise = app.waitForEvent("window");
   await setup.getByRole("button", { name: "Continue" }).click();
   const appWindow = await appWindowPromise;
   await expect(appWindow.getByText(APP_MARKER)).toBeVisible();
 
-  await expect(readFile(path.join(stackDir, ".env"), "utf8")).resolves.toBe(sentinel);
+  const env = await readFile(path.join(stackDir, ".env"), "utf8");
+  expect(env.startsWith(sentinel)).toBe(true);
+  expect(env.slice(sentinel.length)).toMatch(/^POSTGRES_APP_PASSWORD=[0-9a-f]{32}\n$/);
 });
 
 test("exhausted address pools explain recovery", async () => {
   app = await launch("pool-exhausted");
   const setup = await app.firstWindow();
+  await setup.getByRole("radio", { name: /This computer/ }).check();
   await setup.getByRole("button", { name: "Continue" }).click();
   await expect(setup.locator("#stack-phase")).toHaveText(
     "Docker has no free network address pools. Remove unused Docker networks or expand Docker’s address pools, then retry.",
@@ -428,6 +456,7 @@ test("exhausted address pools explain recovery", async () => {
 test("a port conflict opens and saves the replacement managed origin", async () => {
   app = await launch("port-conflict");
   const setup = await app.firstWindow();
+  await setup.getByRole("radio", { name: /This computer/ }).check();
   const appWindowPromise = app.waitForEvent("window");
   await setup.getByRole("button", { name: "Continue" }).click();
   const urlFile = path.join(userData, "stack", ".desktop-web-url");
@@ -459,6 +488,7 @@ test("a port conflict opens and saves the replacement managed origin", async () 
 test("repeated port conflicts stop with a retry action", async () => {
   app = await launch("ports-exhausted");
   const setup = await app.firstWindow();
+  await setup.getByRole("radio", { name: /This computer/ }).check();
   await setup.getByRole("button", { name: "Continue" }).click();
   await expect(setup.locator("#stack-phase")).toHaveText(
     "Could not bind a local port after retrying. Retry to choose another port.",
@@ -470,46 +500,18 @@ test("repeated port conflicts stop with a retry action", async () => {
   });
 });
 
-test("the native settings menu opens an isolated logged-out settings capability", async () => {
+test("the desktop never exposes server administration or account impersonation", async () => {
   app = await launch("ok");
   const setup = await app.firstWindow();
+  await setup.getByRole("radio", { name: /This computer/ }).check();
   const nextWindow = app.waitForEvent("window");
   await setup.getByRole("button", { name: "Continue", exact: true }).click();
   const main = await nextWindow;
   await expect(main.getByText(APP_MARKER)).toBeVisible();
-  await expect.poll(savedSetup).toEqual({ mode: "new", serverUrl });
-  const denied = await main.evaluate(async () => {
-    try {
-      await window.rakazoDesktop?.localSettings?.request(
-        "/api/desktop-settings/rpc/integrationSetup/get",
-        "{}",
-      );
-      return false;
-    } catch {
-      return true;
-    }
-  });
-  expect(denied).toBe(true);
-  const settingsOpened = app.waitForEvent("window");
-  await app.evaluate(({ Menu }) => {
-    const item = Menu.getApplicationMenu()?.getMenuItemById("local-server-settings");
-    if (!item) throw new Error("Missing settings menu");
-    item.click();
-  });
-  const settings = await settingsOpened;
-  await expect(settings).toHaveURL(`${serverUrl}/desktop-settings`);
-  const result = await settings.evaluate(() =>
-    window.rakazoDesktop?.localSettings?.request(
-      "/api/desktop-settings/rpc/integrationSetup/get",
-      "{}",
+  expect(await main.evaluate(() => "localSettings" in window.rakazoDesktop!)).toBe(false);
+  expect(
+    await app.evaluate(({ Menu }) =>
+      Boolean(Menu.getApplicationMenu()?.getMenuItemById("local-server-settings")),
     ),
-  );
-  expect(result?.status).toBe(200);
-  expect(JSON.parse(result!.body)).toEqual({ json: { canConfigure: true } });
-  await app.evaluate(({ Menu }) =>
-    Menu.getApplicationMenu()?.getMenuItemById("local-server-settings")?.click(),
-  );
-  expect(app.windows()).toHaveLength(2);
-  await settings.close();
-  await expect(main.getByText(APP_MARKER)).toBeVisible();
+  ).toBe(false);
 });

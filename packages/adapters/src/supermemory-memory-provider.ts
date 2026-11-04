@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type {
   AdapterContext,
   DurableMemoryScope,
@@ -8,30 +9,31 @@ import type {
   SemanticMemorySaveRequest,
 } from "@rakazo/adapter-kit";
 import {
+  assertLocalServiceBaseUrlSync,
+  LocalServiceHost,
+  parseServiceBaseUrl,
+  pinLocalServiceHost,
+} from "./local-service-endpoint.js";
+import type { ResolveHostname } from "./network-address.js";
+import type { SupermemoryConnectionConfig } from "./supermemory-client.js";
+import {
   deleteSupermemoryContainer,
-  parseSupermemoryBaseUrl,
   probeSupermemory,
-  type SupermemoryConnectionConfig,
+  SUPERMEMORY_CLOUD_BASE_URL,
   saveSupermemoryMemoryToContainers,
   searchSupermemoryContainers,
 } from "./supermemory-client.js";
 
 export const SUPERMEMORY_PROVIDER_ID = "supermemory";
-export const SUPERMEMORY_CLOUD_BASE_URL = "https://api.supermemory.ai";
+export { SUPERMEMORY_CLOUD_BASE_URL };
 
-export function supermemoryRequiresDeploymentOwner(settings: Record<string, string>): boolean {
+export function supermemoryRequiresPrivateEndpoint(settings: Record<string, string>): boolean {
   return settings.mode === "local";
 }
 
-function isLoopbackBaseUrl(url: string): boolean {
+function isSupermemoryCloudBaseUrl(baseUrl: string): boolean {
   try {
-    const parsed = new URL(url);
-    return (
-      (parsed.protocol === "http:" || parsed.protocol === "https:") &&
-      (parsed.hostname === "localhost" ||
-        parsed.hostname === "127.0.0.1" ||
-        parsed.hostname === "[::1]")
-    );
+    return new URL(baseUrl).origin === new URL(SUPERMEMORY_CLOUD_BASE_URL).origin;
   } catch {
     return false;
   }
@@ -55,20 +57,45 @@ function parseSupermemoryConnection(
   if (apiKey.length < 8) throw new Error("apiKey must contain at least 8 characters");
   const baseUrl =
     mode === "cloud" ? SUPERMEMORY_CLOUD_BASE_URL : requiredValue(settings, "baseUrl");
-  if (mode === "local" && !isLoopbackBaseUrl(baseUrl)) {
-    throw new Error("Local mode requires a loopback address (localhost, 127.0.0.1, or ::1).");
+  if (mode === "local") {
+    // The cloud origin takes the unpinned cloud transport, so it cannot be a local endpoint.
+    if (isSupermemoryCloudBaseUrl(baseUrl)) {
+      throw new Error("Local mode cannot use the Supermemory Cloud URL.");
+    }
+    assertLocalServiceBaseUrlSync(baseUrl);
   }
-  parseSupermemoryBaseUrl(baseUrl);
+  parseServiceBaseUrl(baseUrl);
   return { mode, baseUrl, apiKey };
 }
 
 export async function prepareSupermemoryConnection(
   settings: Record<string, string>,
   credentials: Record<string, string>,
+  options?: {
+    allowPrivateEndpoint?: boolean;
+    resolveHostname?: ResolveHostname;
+    fetch?: typeof globalThis.fetch;
+  },
 ): Promise<{ settings: Record<string, string>; credentials: Record<string, string> }> {
   const { mode, baseUrl, apiKey } = parseSupermemoryConnection(settings, credentials);
-  const probe = await probeSupermemory({ baseUrl, apiKey });
+  const pinnedAddresses =
+    mode === "local" ? await pinLocalServiceHost(baseUrl, options) : undefined;
+  const connection: SupermemoryConnectionConfig = {
+    baseUrl,
+    apiKey,
+    resolveHostname: options?.resolveHostname,
+    fetch: options?.fetch,
+    ...(pinnedAddresses ? { pinnedAddresses } : {}),
+  };
+  const probe = await probeSupermemory(connection);
   if (!probe.ok) throw new Error(probe.error);
+  // Clearing a conversation deletes its memory, which only owner and admin keys may do.
+  // Deleting a fresh random tag checks that without touching anyone's data.
+  const deletable = await deleteSupermemoryContainer(
+    `rakazo:delete-probe:${randomUUID()}`,
+    connection,
+  );
+  if (!deletable.ok) throw new Error(deletable.error);
   return { settings: { mode, baseUrl }, credentials: { apiKey } };
 }
 
@@ -105,7 +132,21 @@ function recallContainerTags(request: SemanticMemoryRecallRequest, spaceId: stri
 }
 
 export class SupermemoryMemoryProvider implements SemanticMemoryProvider {
-  constructor(private readonly connection: SupermemoryConnectionConfig) {}
+  private readonly localHost?: LocalServiceHost;
+
+  constructor(private readonly connection: SupermemoryConnectionConfig) {
+    if (!isSupermemoryCloudBaseUrl(connection.baseUrl)) {
+      this.localHost = new LocalServiceHost(connection.baseUrl, connection.resolveHostname);
+    }
+  }
+
+  private localBaseUrlBlock(): Promise<string | null> {
+    return this.localHost?.block() ?? Promise.resolve(null);
+  }
+
+  private connectionForRequest(): SupermemoryConnectionConfig {
+    return this.localHost?.withPin(this.connection) ?? this.connection;
+  }
 
   describe() {
     return {
@@ -125,10 +166,14 @@ export class SupermemoryMemoryProvider implements SemanticMemoryProvider {
     request: SemanticMemoryRecallRequest,
     context: AdapterContext,
   ): Promise<SemanticMemoryResponse<SemanticMemoryResult[]>> {
+    // Supermemory rejects an empty search query.
+    if (!request.query.trim()) return { ok: true, value: [] };
+    const blocked = await this.localBaseUrlBlock();
+    if (blocked) return { ok: false, error: blocked };
     const result = await searchSupermemoryContainers(
       request.query,
       recallContainerTags(request, context.spaceId),
-      this.connection,
+      this.connectionForRequest(),
       request.limit,
       context.signal,
     );
@@ -148,6 +193,8 @@ export class SupermemoryMemoryProvider implements SemanticMemoryProvider {
     request: SemanticMemorySaveRequest,
     context: AdapterContext,
   ): Promise<SemanticMemoryResponse> {
+    const blocked = await this.localBaseUrlBlock();
+    if (blocked) return { ok: false, error: blocked };
     const tags =
       request.source.kind === "history"
         ? [historyContainerTag(request.botId, request.source.generation)]
@@ -155,7 +202,7 @@ export class SupermemoryMemoryProvider implements SemanticMemoryProvider {
     const result = await saveSupermemoryMemoryToContainers(
       request.content,
       tags,
-      this.connection,
+      this.connectionForRequest(),
       context.signal,
     );
     return result.ok ? { ok: true, value: undefined } : result;
@@ -165,11 +212,13 @@ export class SupermemoryMemoryProvider implements SemanticMemoryProvider {
     request: { botId: string; generations: number[] },
     context: AdapterContext,
   ): Promise<SemanticMemoryResponse> {
+    const blocked = await this.localBaseUrlBlock();
+    if (blocked) return { ok: false, error: blocked };
     const results = await Promise.all(
       [...new Set(request.generations)].map((generation) =>
         deleteSupermemoryContainer(
           historyContainerTag(request.botId, generation),
-          this.connection,
+          this.connectionForRequest(),
           context.signal,
         ),
       ),

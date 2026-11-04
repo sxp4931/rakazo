@@ -1,7 +1,7 @@
 /// <reference lib="dom" />
 import * as Plot from "@observablehq/plot";
 import { MAX_CHART_DATA_ROWS } from "@rakazo/contracts";
-import { autoType, csvParse, tsvParse } from "d3-dsv";
+import { autoType, csvParseRows, tsvParseRows } from "d3-dsv";
 
 /**
  * Declarative, JSON-only surface over Observable Plot for the render_plot
@@ -31,7 +31,6 @@ export type PlotSpec = {
   marginBottom?: number;
   grid?: boolean;
   inset?: number;
-  aspectRatio?: number;
   x?: Record<string, unknown>;
   y?: Record<string, unknown>;
   fx?: Record<string, unknown>;
@@ -43,7 +42,6 @@ export type PlotSpec = {
   symbol?: Record<string, unknown>;
   length?: Record<string, unknown>;
   projection?: unknown;
-  style?: Record<string, unknown>;
   marks: PlotMarkSpec[];
 };
 
@@ -109,6 +107,168 @@ const DATALESS_MARKS = {
   sphere: Plot.sphere,
   graticule: Plot.graticule,
 } as unknown as Record<string, (options: Record<string, unknown>) => Plot.Markish>;
+
+const MAX_PLOT_SIZE = 2_000;
+const MAX_PLOT_TICKS = 1_000;
+const MAX_PLOT_STEPS = 10_000;
+// Contours redraw the whole grid once per threshold.
+const MAX_CONTOUR_THRESHOLDS = 200;
+const SIZE_OPTIONS = new Set([
+  "width",
+  "height",
+  "margin",
+  "marginTop",
+  "marginRight",
+  "marginBottom",
+  "marginLeft",
+  "inset",
+  "insetTop",
+  "insetRight",
+  "insetBottom",
+  "insetLeft",
+]);
+const MINIMUM_OPTIONS: Record<string, number> = {
+  tickSpacing: 5,
+  binWidth: 5,
+  pixelSize: 1,
+  precision: 0.01,
+};
+// Freedman-Diaconis is left out: a tight cluster plus one outlier yields unbounded bins.
+const NAMED_THRESHOLDS = new Set(["auto", "scott", "sturges"]);
+
+type PlotInterval = {
+  floor(value: unknown): unknown;
+  offset(value: unknown, step?: number): unknown;
+  range(lo: unknown, hi: unknown): unknown[];
+};
+
+/** Number-like option value; undefined for anything Plot reads another way. */
+function numericOption(value: unknown): number | undefined {
+  if (typeof value !== "number" && typeof value !== "string") return undefined;
+  const number = Number(value);
+  return Number.isNaN(number) ? undefined : number;
+}
+
+function tooMany(key: string, limit: number): Error {
+  return new Error(
+    `Plot ${key} would generate more than ${limit.toLocaleString("en-US")} values; use a coarser value.`,
+  );
+}
+
+/** Plot's own interval for this value, refusing to enumerate more than maxSteps values. */
+function boundedInterval(key: string, value: number | string, maxSteps: number, time: boolean) {
+  const interval = (typeof value === "number"
+    ? Plot.numberInterval(value)
+    : (time ? Plot.timeInterval : Plot.utcInterval)(
+        value as Plot.LiteralTimeInterval,
+      )) as unknown as PlotInterval;
+  return Object.assign(Object.create(interval) as PlotInterval, {
+    range(lo: unknown, hi: unknown) {
+      if (Number(interval.offset(interval.floor(lo), maxSteps)) < Number(hi)) {
+        throw tooMany(key, maxSteps);
+      }
+      return interval.range(lo, hi);
+    },
+  });
+}
+
+function boundPlotOption(
+  key: string,
+  value: unknown,
+  mark: string | undefined,
+  time: boolean,
+): unknown {
+  if (key === "aspectRatio" && value != null) {
+    // Plot derives the height from the data's extents, so no limit holds.
+    throw new Error("Plot aspectRatio is not supported; set height instead.");
+  }
+  const maxSteps =
+    key === "ticks"
+      ? MAX_PLOT_TICKS
+      : key !== "thresholds" && key !== "interval"
+        ? undefined
+        : mark === "contour" || mark === "density"
+          ? MAX_CONTOUR_THRESHOLDS
+          : MAX_PLOT_STEPS;
+  if (Array.isArray(value)) {
+    if (maxSteps !== undefined && value.length > maxSteps) throw tooMany(key, maxSteps);
+    if (
+      key === "range" &&
+      value.some((item) => !(Math.abs(numericOption(item) ?? 0) <= MAX_PLOT_SIZE))
+    ) {
+      throw new Error(
+        `Plot range must be within ±${MAX_PLOT_SIZE.toLocaleString("en-US")} pixels.`,
+      );
+    }
+    return value;
+  }
+  if (value && typeof value === "object") return boundPlotOptions(value, mark);
+  const number = numericOption(value);
+  if (number !== undefined && SIZE_OPTIONS.has(key) && !(Math.abs(number) <= MAX_PLOT_SIZE)) {
+    throw new Error(`Plot ${key} must be within ±${MAX_PLOT_SIZE.toLocaleString("en-US")} pixels.`);
+  }
+  const minimum = MINIMUM_OPTIONS[key];
+  if (number !== undefined && minimum !== undefined && !(number >= minimum)) {
+    throw new Error(`Plot ${key} must be at least ${minimum}.`);
+  }
+  if (maxSteps === undefined) return value;
+  // A number is a count for ticks and thresholds but a step for interval.
+  if (typeof value === "number" && key !== "interval") {
+    if (value > maxSteps) throw tooMany(key, maxSteps);
+    return value;
+  }
+  if (typeof value === "string" && value.toLowerCase() === "freedman-diaconis") {
+    throw new Error(
+      'Plot thresholds "freedman-diaconis" is not supported; use "scott" or a count.',
+    );
+  }
+  if (
+    typeof value === "number" ||
+    (typeof value === "string" && !NAMED_THRESHOLDS.has(value.toLowerCase()))
+  ) {
+    // Plot reads string thresholds as UTC and other intervals in their scale's time zone.
+    return boundedInterval(key, value, maxSteps, time && key !== "thresholds");
+  }
+  return value;
+}
+
+function boundPlotOptions(
+  options: object,
+  mark: string | undefined,
+  time = false,
+): Record<string, unknown> {
+  const local = time || (options as { type?: unknown }).type === "time";
+  return Object.fromEntries(
+    Object.entries(options).map(([key, value]) => [key, boundPlotOption(key, value, mark, local)]),
+  );
+}
+
+/**
+ * Ticks, bins, hexagons, contours and pixels grow with these options rather
+ * than with the row count, so one small spec could stall the renderer.
+ */
+function boundPlotSpec(spec: PlotSpec): PlotSpec {
+  const { data, marks, ...options } = spec;
+  return {
+    ...(boundPlotOptions(options, undefined) as Omit<PlotSpec, "data" | "marks">),
+    ...(data === undefined ? {} : { data }),
+    marks: marks.map((mark) => {
+      const axis = /^(?:axis|grid)([XY])$/.exec(mark.type)?.[1]?.toLowerCase() as
+        | "x"
+        | "y"
+        | undefined;
+      const time = axis !== undefined && spec[axis]?.type === "time";
+      const outputs = mark.transform?.outputs;
+      return {
+        ...mark,
+        ...(mark.options ? { options: boundPlotOptions(mark.options, mark.type, time) } : {}),
+        ...(mark.transform && outputs && typeof outputs === "object"
+          ? { transform: { ...mark.transform, outputs: boundPlotOptions(outputs, mark.type) } }
+          : {}),
+      };
+    }),
+  };
+}
 
 type TransformFactory = (
   outputs: Record<string, unknown>,
@@ -219,7 +379,8 @@ function buildMark(
   sharedData: unknown[] | undefined,
   normalizeData: (rows: unknown[]) => unknown[],
 ): Plot.Markish {
-  const options = { ...(mark.options ?? {}) };
+  // A class name could match the app's own styles once the chart is in its page.
+  const { className: _className, ...options } = mark.options ?? {};
   const dataless = DATALESS_MARKS[mark.type];
   if (dataless) return dataless(options);
   const factory = DATA_MARKS[mark.type];
@@ -253,9 +414,16 @@ function buildMark(
   return factory(data, finalOptions);
 }
 
+/** csvParse builds row objects with `new Function`, which the web app's CSP blocks. */
+function delimitedRows([columns = [], ...rows]: string[][]): unknown[] {
+  return rows.map((row) =>
+    autoType(Object.fromEntries(columns.map((column, index) => [column, row[index] ?? ""]))),
+  );
+}
+
 export function parsePlotData(name: string, content: string): unknown[] {
-  if (/\.csv$/i.test(name)) return csvParse(content, autoType);
-  if (/\.tsv$/i.test(name)) return tsvParse(content, autoType);
+  if (/\.csv$/i.test(name)) return delimitedRows(csvParseRows(content));
+  if (/\.tsv$/i.test(name)) return delimitedRows(tsvParseRows(content));
   const parsed = JSON.parse(content) as unknown;
   if (!Array.isArray(parsed))
     throw new Error("JSON data files must contain a top-level array of rows");
@@ -276,14 +444,22 @@ function isSafePlotLink(href: string): boolean {
   }
 }
 
-function sanitizePlotLinks(plotted: Element): void {
+// A backslash could spell url() as a CSS escape.
+const REMOTE_CSS_URL = /\\|url\(\s*(?!['"]?#)/i;
+
+function sanitizePlot(plotted: Element): void {
   // Inspect the resolved output: href can come from columns, per-mark arrays,
   // channel objects, scales, or transforms. Check both href and xlink:href
-  // before either mounting the live plot or serializing it for export.
-  for (const anchor of Array.from(plotted.querySelectorAll("a"))) {
-    for (const attribute of Array.from(anchor.attributes)) {
-      if (attribute.localName === "href" && !isSafePlotLink(attribute.value)) {
-        anchor.removeAttributeNode(attribute);
+  // before either mounting the live plot or serializing it for export. Colors
+  // and filters may be url() references; only the chart's own #ids may load.
+  for (const element of [plotted, ...Array.from(plotted.querySelectorAll("*"))]) {
+    for (const attribute of Array.from(element.attributes)) {
+      const unsafeLink =
+        element.localName === "a" &&
+        (attribute.localName === "target" ||
+          (attribute.localName === "href" && !isSafePlotLink(attribute.value)));
+      if (unsafeLink || REMOTE_CSS_URL.test(attribute.value)) {
+        element.removeAttributeNode(attribute);
       }
     }
   }
@@ -315,7 +491,15 @@ export function buildPlotParts(
     throw new Error("The spec needs a non-empty marks array.");
   }
   assertPlotDataWithinLimits(spec, data);
-  const { title, marks, data: nestedData, ...plotOptions } = spec;
+  // Plot applies style and className to the live page, outside the chart.
+  const {
+    title,
+    marks,
+    data: nestedData,
+    style: _style,
+    className: _className,
+    ...plotOptions
+  } = boundPlotSpec(spec) as PlotSpec & { style?: unknown; className?: unknown };
   const sharedData = data ?? (Array.isArray(nestedData) ? nestedData : undefined);
   const normalizedData = new WeakMap<unknown[], unknown[]>();
   const normalizeData = (rows: unknown[]) => {
@@ -338,13 +522,13 @@ export function buildPlotParts(
     }
   }
   const plotted = Plot.plot({
-    document,
     ...(sanitizedPlotOptions as Plot.PlotOptions),
+    document,
     ...(overrides.width ? { width: overrides.width } : {}),
     ...(overrides.height ? { height: overrides.height } : {}),
     marks: marks.map((mark) => buildMark(mark, sharedData, normalizeData)),
   });
-  sanitizePlotLinks(plotted);
+  sanitizePlot(plotted);
   const svg = plotted.tagName === "svg" ? plotted : plotted.querySelector("svg");
   if (!svg) throw new Error("Plot did not produce an SVG element");
   const width = Number(svg.getAttribute("width") ?? overrides.width ?? spec.width ?? 640);
@@ -355,7 +539,6 @@ export function buildPlotParts(
   return { plotted, svg, title, swatches: categoricalSwatches(colorScale), width, height };
 }
 
-/** Render a spec to a standalone SVG string using the provided DOM document. */
 export function renderPlotSpecToSvg(
   spec: PlotSpec,
   data: unknown[] | undefined,
@@ -363,12 +546,6 @@ export function renderPlotSpecToSvg(
 ): string {
   const { svg, title, swatches, width, height } = buildPlotParts(spec, data, document);
   const titleHeight = title ? 28 : 0;
-  const legendHeight = swatches.length > 0 ? 24 : 0;
-  const totalHeight = height + titleHeight + legendHeight;
-
-  svg.setAttributeNS(XMLNS, "xmlns", "http://www.w3.org/2000/svg");
-  svg.setAttributeNS(XMLNS, "xmlns:xlink", "http://www.w3.org/1999/xlink");
-  svg.setAttribute("y", String(titleHeight + legendHeight));
   const header: string[] = [];
   if (title) {
     header.push(
@@ -376,14 +553,75 @@ export function renderPlotSpecToSvg(
     );
   }
   let swatchX = 8;
+  let swatchY = 0;
+  let rowHeight = 0;
+  const labelWidth = Math.max(1, width - 8 - 8 - 15);
   for (const { label, color } of swatches) {
+    const lines = wrapLegendLabel(label, labelWidth);
+    const entryWidth = 15 + lines.reduce((max, line) => Math.max(max, line.width), 0);
+    if (swatchX > 8 && swatchX + entryWidth > width - 8) {
+      swatchX = 8;
+      swatchY += rowHeight;
+      rowHeight = 0;
+    }
+    rowHeight = Math.max(rowHeight, 24 + (lines.length - 1) * 16);
+    const labelLines = lines
+      .map(
+        (line, index) =>
+          `<tspan x="${swatchX + 15}" dy="${index === 0 ? 0 : 16}"${line.fontSize ? ` font-size="${line.fontSize}"` : ""}>${escapeXml(line.text)}</tspan>`,
+      )
+      .join("");
     header.push(
-      `<rect x="${swatchX}" y="${titleHeight + 5}" width="11" height="11" fill="${escapeXml(color)}"></rect>`,
-      `<text x="${swatchX + 15}" y="${titleHeight + 15}" font-family="system-ui, sans-serif" font-size="12" fill="currentColor">${escapeXml(label)}</text>`,
+      `<rect x="${swatchX}" y="${titleHeight + swatchY + 5}" width="11" height="11" fill="${escapeXml(color)}"></rect>`,
+      `<text x="${swatchX + 15}" y="${titleHeight + swatchY + 15}" font-family="system-ui, sans-serif" font-size="12" fill="currentColor">${labelLines}</text>`,
     );
-    swatchX += 15 + 8 + label.length * 7 + 14;
+    swatchX += entryWidth + 22;
   }
+  const legendHeight = swatchY + rowHeight;
+  const totalHeight = height + titleHeight + legendHeight;
+  svg.setAttributeNS(XMLNS, "xmlns", "http://www.w3.org/2000/svg");
+  svg.setAttributeNS(XMLNS, "xmlns:xlink", "http://www.w3.org/1999/xlink");
+  svg.setAttribute("y", String(titleHeight + legendHeight));
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${totalHeight}" viewBox="0 0 ${width} ${totalHeight}" font-family="system-ui, sans-serif" style="background:#ffffff;color:#1a1a1a">${header.join("")}${svg.outerHTML}</svg>`;
+}
+
+function wrapLegendLabel(label: string, maxWidth: number) {
+  const lines: { text: string; width: number }[] = [];
+  let text = "";
+  let width = 0;
+  // Conservative 12px-font advances work without browser layout in the server
+  // DOM. Emoji budgets count visible bases for fallback fonts, not code units,
+  // joiners, variation selectors, or modifiers.
+  for (const { segment } of new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(
+    label,
+  )) {
+    const bases = Array.from(
+      segment.replace(/\p{Mark}|\p{Emoji_Modifier}|\p{Default_Ignorable_Code_Point}/gu, ""),
+    );
+    const emoji = /\p{Extended_Pictographic}|\p{Regional_Indicator}|\u20e3/u.test(segment);
+    const advance = emoji
+      ? Math.max(28, bases.length * 14)
+      : bases.reduce((sum, base) => {
+          const ordinary = /^[a-z0-9]$/.test(base) && base !== "m" && base !== "w";
+          const wide = "MWmw".includes(base) || base.codePointAt(0)! > 127;
+          return sum + (base === " " ? 6 : ordinary ? 9 : wide ? 14 : 12);
+        }, 0);
+    if (text && width + advance > maxWidth) {
+      lines.push({ text, width });
+      text = "";
+      width = 0;
+    }
+    text += segment;
+    width += advance;
+  }
+  lines.push({ text, width });
+  return lines.map((line) => ({
+    text: line.text,
+    width: Math.min(line.width, maxWidth),
+    // Shrink an oversized grapheme; textLength could instead enlarge it when
+    // its natural width is smaller than our conservative estimate.
+    fontSize: line.width > maxWidth ? (12 * maxWidth) / line.width : undefined,
+  }));
 }
 
 function categoricalSwatches(scale: Plot.Scale | undefined): { label: string; color: string }[] {
@@ -391,10 +629,9 @@ function categoricalSwatches(scale: Plot.Scale | undefined): { label: string; co
   const domain = Array.isArray(scale.domain) ? scale.domain : [];
   if (domain.length === 0 || domain.length > 12) return [];
   if (scale.type && scale.type !== "ordinal" && scale.type !== "categorical") return [];
-  return domain.map((value) => ({
-    label: String(value),
-    color: String(scale.apply(value)),
-  }));
+  return domain
+    .map((value) => ({ label: String(value), color: String(scale.apply(value)) }))
+    .filter(({ color }) => !REMOTE_CSS_URL.test(color));
 }
 
 function escapeXml(value: string): string {

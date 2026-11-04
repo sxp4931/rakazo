@@ -22,8 +22,14 @@ KNOWN_LAUNCH = frozenset(
         "xterm",
     }
 )
+# Focus-or-launch wraps KNOWN_LAUNCH launchers: rakazo-focus-or-launch <launcher> [uri].
+FOCUS_OR_LAUNCH = "rakazo-focus-or-launch"
 CONTROL_TIMEOUT_SEC = 10
 LAUNCH_SPAWN_POLL_SEC = 0.2
+# A live browser opens a URL in this process, then exits. rakazo-browser caps the
+# profile scan at 0.4s and that forward at 1.6s. This poll outlasts both, plus a
+# little shell, so a forward that fails after the scan is not reported as success.
+BROWSER_OPEN_POLL_SEC = 2.4
 NATIVE_CAPTURES = {}
 NATIVE_LOCK = threading.Lock()
 DISPLAY_LOCKS = {}
@@ -64,6 +70,8 @@ class NativeCapture:
         library.rakazo_xcapture_damage.restype = ctypes.c_int
         library.rakazo_xinput_argv.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_char_p)]
         library.rakazo_xinput_argv.restype = ctypes.c_int
+        library.rakazo_xcapture_close.argtypes = [ctypes.c_void_p]
+        library.rakazo_xcapture_close.restype = None
         context = library.rakazo_xcapture_open(display.encode("utf-8"))
         if not context:
             raise RuntimeError("MIT-SHM capture is unavailable")
@@ -91,11 +99,21 @@ class NativeCapture:
         )
 
     def act(self, argv):
+        if not self.context:
+            return -1
         encoded = (ctypes.c_char_p * len(argv))(*(value.encode("utf-8") for value in argv))
         return self.library.rakazo_xinput_argv(self.context, len(argv), encoded)
 
+    def close(self):
+        context = self.context
+        self.context = None
+        if context:
+            self.library.rakazo_xcapture_close(context)
 
-def native_capture(display):
+
+def native_capture(display, reset=False):
+    if reset:
+        drop_native_capture(display)
     existing = NATIVE_CAPTURES.get(display)
     if existing is not None:
         return existing
@@ -108,7 +126,9 @@ def native_capture(display):
 
 
 def drop_native_capture(display):
-    NATIVE_CAPTURES.pop(display, None)
+    stale = NATIVE_CAPTURES.pop(display, None)
+    if stale is not None:
+        stale.close()
 
 
 def _is_int_string(value):
@@ -127,6 +147,14 @@ def allowed_xdotool_argv(argv):
     if op == "mousemove":
         if len(argv) == 7 and argv[4] == "--" and _is_int_string(argv[5]) and _is_int_string(argv[6]):
             return True
+        if (
+            len(argv) == 11
+            and argv[4] == "--"
+            and ASCII_INT.fullmatch(argv[5])
+            and ASCII_INT.fullmatch(argv[6])
+            and _allowed_wheel(argv[7:])
+        ):
+            return True
         return (
             len(argv) == 9
             and argv[4] == "--"
@@ -140,14 +168,25 @@ def allowed_xdotool_argv(argv):
     if op == "type":
         return len(argv) == 7 and argv[4] == "--clearmodifiers" and argv[5] == "--"
     if op == "click":
-        return (
-            len(argv) == 7
-            and argv[4] == "--repeat"
-            and argv[5].isdigit()
-            and 1 <= int(argv[5]) <= 20
-            and argv[6] in ("4", "5")
-        )
+        return len(argv) == 7 and _allowed_wheel(argv[3:])
     return False
+
+
+# ASCII digits only: str.isdigit() also accepts characters such as "²" that int() rejects.
+ASCII_INT = re.compile(r"-?[0-9]+")
+ASCII_COUNT = re.compile(r"[0-9]+")
+
+
+def _allowed_wheel(argv):
+    """A wheel scroll: click --repeat N with the up (4), down (5), left (6) or right (7) button."""
+    return (
+        len(argv) == 4
+        and argv[0] == "click"
+        and argv[1] == "--repeat"
+        and ASCII_COUNT.fullmatch(argv[2]) is not None
+        and 1 <= int(argv[2]) <= 20
+        and argv[3] in ("4", "5", "6", "7")
+    )
 
 
 def control_command_index(argv):
@@ -171,30 +210,67 @@ def allowed_control_argv(argv, display):
         profile = argv[2].removeprefix("RAKAZO_BROWSER_PROFILE=")
         if not re.fullmatch(r"/home/rakazo/\.browser-profiles/chromium-bot-[a-f0-9]{32}", profile):
             return False
-        if command not in ("xdg-open", "rakazo-browser"):
+        if command not in ("xdg-open", "rakazo-browser", FOCUS_OR_LAUNCH):
             return False
     if command == "xdotool":
         return allowed_xdotool_argv(argv)
     if command == "xdg-open":
         return len(argv) == index + 2
+    if command == FOCUS_OR_LAUNCH:
+        return (
+            len(argv) in (index + 2, index + 3)
+            and argv[index + 1] in KNOWN_LAUNCH
+            and (index == 2 or argv[index + 1] == "rakazo-browser")
+        )
     if "/" in command or command not in KNOWN_LAUNCH:
         return False
     return len(argv) in (index + 1, index + 2)
 
 
+# The wrapper bounds each wmctrl call at 5s and may also wait out a browser
+# forward. Wait for it to exit so a slow listing is not reported as success.
+# computerControlTimeoutMs adds this per focus step on top of its 15s base.
+FOCUS_COMPLETION_SEC = 5 + BROWSER_OPEN_POLL_SEC + 5 + 1
+
+
 def is_long_lived_control(argv):
-    """Apps and openers that must not be waited on under display_lock."""
+    """Apps and openers that must not be waited on under display_lock.
+
+    The focus wrapper exits after it raises a window or detaches a spawn, so
+    the caller waits for that exit instead of treating the wrapper as the app.
+    """
     command = argv[control_command_index(argv)]
+    if command == FOCUS_OR_LAUNCH:
+        return False
     return command == "xdg-open" or command in KNOWN_LAUNCH
+
+
+def launch_spawn_poll_sec(argv):
+    index = control_command_index(argv)
+    command = argv[index]
+    if command == FOCUS_OR_LAUNCH:
+        # The wrapped launcher keeps its own poll bound through the wrapper.
+        command = argv[index + 1] if len(argv) > index + 1 else ""
+    if command == "rakazo-browser":
+        return BROWSER_OPEN_POLL_SEC
+    return LAUNCH_SPAWN_POLL_SEC
 
 
 def run_control_argv(argv, display):
     """Run a fallback control command without holding the lock forever."""
     env = {**os.environ, "DISPLAY": display}
+    if argv[control_command_index(argv)] == FOCUS_OR_LAUNCH:
+        try:
+            result = subprocess.run(argv, env=env, timeout=FOCUS_COMPLETION_SEC)
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError("computer action timed out") from error
+        if result.returncode:
+            raise RuntimeError("computer action failed")
+        return
     if is_long_lived_control(argv):
         child = subprocess.Popen(argv, env=env, start_new_session=True)
         try:
-            code = child.wait(timeout=LAUNCH_SPAWN_POLL_SEC)
+            code = child.wait(timeout=launch_spawn_poll_sec(argv))
         except subprocess.TimeoutExpired:
             threading.Thread(target=child.wait, daemon=True).start()
             return
@@ -207,6 +283,21 @@ def run_control_argv(argv, display):
         raise RuntimeError("computer action timed out") from error
     if result.returncode:
         raise RuntimeError("computer action failed")
+
+
+def run_computer_step(display, argv):
+    """Prefer the native connection; reopen it once if that X server is gone."""
+    with NATIVE_LOCK:
+        source = native_capture(display)
+        handled = source.act(argv) if source else 0
+        if handled < 0:
+            source = native_capture(display, reset=True)
+            handled = source.act(argv) if source else -1
+            if handled < 0:
+                drop_native_capture(display)
+                handled = 0
+    if not handled:
+        run_control_argv(argv, display)
 
 
 def capture(display):
@@ -228,7 +319,13 @@ def capture(display):
                 encoded, width, height, damage = source.copy()
                 image = subprocess.CompletedProcess([], 0, encoded, b"")
             except RuntimeError:
-                drop_native_capture(display)
+                source = native_capture(display, reset=True)
+                if source:
+                    try:
+                        encoded, width, height, damage = source.copy()
+                        image = subprocess.CompletedProcess([], 0, encoded, b"")
+                    except RuntimeError:
+                        drop_native_capture(display)
     if image is None:
         image = subprocess.run(
             ["import", "-define", "png:compression-level=3", "-window", "root", "png:-"],
@@ -276,14 +373,7 @@ class Handler(BaseHTTPRequestHandler):
                     argv = step.get("argv")
                     if not allowed_control_argv(argv, display):
                         raise RuntimeError("unsupported computer action")
-                    with NATIVE_LOCK:
-                        source = native_capture(display)
-                        handled = source.act(argv) if source else 0
-                        if handled < 0:
-                            drop_native_capture(display)
-                            handled = 0
-                    if not handled:
-                        run_control_argv(argv, display)
+                    run_computer_step(display, argv)
                 settle_ms = max(0, min(int(body.get("settleMs", 0)), 5000))
                 if settle_ms:
                     time.sleep(settle_ms / 1000)

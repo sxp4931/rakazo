@@ -1,24 +1,36 @@
 import type {
   AgentHomeStore,
   AgentRuntime,
+  ArtifactStore,
   JobPublisher,
   MessagingSurface,
   SandboxProvider,
 } from "@rakazo/adapter-kit";
+import { SandboxUnresponsiveError } from "@rakazo/adapter-kit";
 import type { PrismaClient, ThreadEvents } from "@rakazo/db";
+import { currentDbContext } from "@rakazo/db";
 import { createLogger, createTestSink, installLogger } from "@rakazo/logging";
 import { describe, expect, it, vi } from "vitest";
 import { createBackgroundJobHandlers } from "./background-job-handlers.js";
+import type * as ComputerControl from "./computer-control.js";
+import { expireComputerControl } from "./computer-control.js";
 import { createRunExecutor } from "./executor.js";
 import { compactHistory } from "./history-compaction.js";
 import { deliverMessagingOutbound, mirrorMessagingOutbound } from "./messaging-delivery.js";
 import type { EncryptedSecretStore } from "./secrets.js";
 
 vi.mock("./history-compaction.js", () => ({ compactHistory: vi.fn(async () => undefined) }));
+vi.mock("./computer-control.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof ComputerControl>()),
+  expireComputerControl: vi.fn(async () => false),
+}));
 vi.mock("./messaging-delivery.js", () => ({
   deliverMessagingOutbound: vi.fn(async () => undefined),
   mirrorMessagingOutbound: vi.fn(async () => undefined),
 }));
+
+const owner = { spaceId: "space-1", userId: "user-1" };
+const owned = () => ({ findUnique: vi.fn(async () => owner) });
 
 describe("createBackgroundJobHandlers", () => {
   it("delivers directly when shutdown rejects a completed run's mirror job", async () => {
@@ -34,9 +46,10 @@ describe("createBackgroundJobHandlers", () => {
       executor: {
         continueRun: vi.fn(async () => undefined),
       } as unknown as ReturnType<typeof createRunExecutor>,
-      prisma: {} as unknown as PrismaClient,
+      prisma: { run: owned() } as unknown as PrismaClient,
       sandbox: {} as unknown as SandboxProvider,
       home: {} as unknown as AgentHomeStore,
+      artifacts: {} as unknown as ArtifactStore,
       jobs,
       events: {} as unknown as ThreadEvents,
       workerId: "worker-1",
@@ -54,7 +67,7 @@ describe("createBackgroundJobHandlers", () => {
     );
     expect(deliverMessagingOutbound).toHaveBeenCalledWith(
       expect.objectContaining({ prisma: expect.anything(), messaging: expect.anything(), jobs }),
-      { runId: undefined },
+      {},
       expect.objectContaining({ operationId: "messaging.deliver:drain" }),
     );
     expect(sink.events.some((event) => event.message === "messaging.deliver enqueue error")).toBe(
@@ -64,17 +77,20 @@ describe("createBackgroundJobHandlers", () => {
   });
 
   it("compacts the requested thread with the runtime, job publisher, and model key it was given", async () => {
-    const prisma = {} as unknown as PrismaClient;
+    const prisma = { thread: owned() } as unknown as PrismaClient;
     const runtime = {} as unknown as AgentRuntime;
     const jobs = {} as unknown as JobPublisher;
     const secretStore = {} as unknown as EncryptedSecretStore;
     const memoryProviders = { resolve: vi.fn(async () => null) };
     const resolveModel = vi.fn();
     const handlers = createBackgroundJobHandlers({
-      executor: { resolveModel } as unknown as ReturnType<typeof createRunExecutor>,
+      executor: { resolveModel, contextStrategy: "current" } as unknown as ReturnType<
+        typeof createRunExecutor
+      >,
       prisma,
       sandbox: {} as unknown as SandboxProvider,
       home: {} as unknown as AgentHomeStore,
+      artifacts: {} as unknown as ArtifactStore,
       jobs,
       events: {} as unknown as ThreadEvents,
       workerId: "worker-1",
@@ -82,6 +98,7 @@ describe("createBackgroundJobHandlers", () => {
       secretStore,
       memoryProviders,
       deploymentModelKey: "openrouter-key",
+      deploymentModelConfigured: true,
     });
 
     await handlers["history.compact"]({ threadId: "thread-1" });
@@ -93,28 +110,133 @@ describe("createBackgroundJobHandlers", () => {
         jobs,
         memoryProviders,
         deploymentModelKey: "openrouter-key",
+        deploymentModelConfigured: true,
         resolveModel,
       },
       "thread-1",
     );
   });
 
+  it.each([undefined, "retrieval", "snapshots", "cache-aware"] as const)(
+    "does not spend on a queued legacy compaction after switching to %s",
+    async (contextStrategy) => {
+      vi.mocked(compactHistory).mockClear();
+      const runtime = { run: vi.fn() } as unknown as AgentRuntime;
+      const handlers = createBackgroundJobHandlers({
+        executor:
+          contextStrategy === undefined
+            ? createRunExecutor({ prisma: {} as PrismaClient } as Parameters<
+                typeof createRunExecutor
+              >[0])
+            : ({ contextStrategy } as ReturnType<typeof createRunExecutor>),
+        prisma: { thread: owned() } as unknown as PrismaClient,
+        sandbox: {} as unknown as SandboxProvider,
+        home: {} as unknown as AgentHomeStore,
+        artifacts: {} as unknown as ArtifactStore,
+        jobs: {} as unknown as JobPublisher,
+        events: {} as unknown as ThreadEvents,
+        workerId: "worker-fixture",
+        runtime,
+        secretStore: {} as unknown as EncryptedSecretStore,
+        memoryProviders: { resolve: vi.fn(async () => null) },
+      });
+
+      await handlers["history.compact"]({ threadId: "thread-fixture" });
+
+      expect(compactHistory).not.toHaveBeenCalled();
+      expect(runtime.run).not.toHaveBeenCalled();
+    },
+  );
+
+  it("runs a job as the tenant of the row it acts for, and skips one whose row is gone", async () => {
+    const seen: unknown[] = [];
+    const continueRun = vi.fn(async () => {
+      seen.push(currentDbContext());
+    });
+    const lookups = { findUnique: vi.fn(async () => owner) };
+    const handlers = createBackgroundJobHandlers({
+      executor: { continueRun } as unknown as ReturnType<typeof createRunExecutor>,
+      prisma: { run: lookups } as unknown as PrismaClient,
+      sandbox: {} as unknown as SandboxProvider,
+      home: {} as unknown as AgentHomeStore,
+      artifacts: {} as unknown as ArtifactStore,
+      jobs: {} as unknown as JobPublisher,
+      events: {} as unknown as ThreadEvents,
+      workerId: "worker-1",
+      runtime: {} as unknown as AgentRuntime,
+      secretStore: {} as unknown as EncryptedSecretStore,
+      memoryProviders: { resolve: vi.fn(async () => null) },
+    });
+
+    await handlers["run.continue"]({ runId: "run-1" });
+    expect(seen).toEqual([{ kind: "tenant", ...owner }]);
+    expect(lookups.findUnique).toHaveBeenCalledWith({
+      where: { id: "run-1" },
+      select: { spaceId: true, userId: true },
+    });
+
+    const onRunStarted = vi.fn();
+    await handlers["run.continue"]({ runId: "run-1" }, { onRunStarted });
+    expect(continueRun).toHaveBeenLastCalledWith("run-1", "worker-1", onRunStarted);
+
+    lookups.findUnique.mockResolvedValueOnce(null as never);
+    await handlers["run.continue"]({ runId: "run-gone" });
+    expect(continueRun).toHaveBeenCalledTimes(2);
+  });
+
+  it("tries a control release again later when the computer provider is unreachable", async () => {
+    const sink = createTestSink();
+    installLogger(createLogger({ service: "rakazo-worker", sinks: [sink] }));
+    vi.mocked(expireComputerControl).mockRejectedValueOnce(
+      new SandboxUnresponsiveError("Boat could not be reached"),
+    );
+    const enqueue = vi.fn(async () => undefined);
+    const handlers = createBackgroundJobHandlers({
+      executor: {} as unknown as ReturnType<typeof createRunExecutor>,
+      prisma: { computer: owned() } as unknown as PrismaClient,
+      sandbox: {} as unknown as SandboxProvider,
+      home: {} as unknown as AgentHomeStore,
+      artifacts: {} as unknown as ArtifactStore,
+      jobs: { enqueue } as unknown as JobPublisher,
+      events: {} as unknown as ThreadEvents,
+      workerId: "worker-1",
+      runtime: {} as unknown as AgentRuntime,
+      secretStore: {} as unknown as EncryptedSecretStore,
+      memoryProviders: { resolve: vi.fn(async () => null) },
+    });
+
+    await handlers["computer.control-expire"]({ computerId: "computer-1", leaseId: "lease-1" });
+
+    expect(enqueue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: "computer.control-expire",
+        payload: { computerId: "computer-1", leaseId: "lease-1" },
+      }),
+    );
+    expect(sink.events.map((event) => [event.level, event.message])).toEqual([
+      ["warn", "computer.control_expire_deferred"],
+    ]);
+  });
+
   it("resolves the deployment model when no user credential is configured", async () => {
     const prisma = {
-      spaceModelPreference: { findFirst: vi.fn(async () => null) },
+      userModelPreference: { findFirst: vi.fn(async () => null) },
+      spaceSettingOverride: { findUnique: vi.fn(async () => null) },
+      userModelRoleChoice: { findMany: vi.fn(async () => []) },
       userModelCredential: { findFirst: vi.fn(async () => null) },
       deploymentSettings: { findUnique: vi.fn(async () => null) },
     } as unknown as PrismaClient;
     const executor = createRunExecutor({
       prisma,
       deploymentModelKey: "deployment-key",
+      deploymentModelConfigured: true,
     } as Parameters<typeof createRunExecutor>[0]);
 
     await expect(
       executor.resolveModel({ userId: "user-1", spaceId: "workspace-1" }),
     ).resolves.toEqual({
       provider: "openrouter",
-      id: "openai/gpt-5.6-luna",
+      id: "openai/gpt-6-luna",
       apiKey: "deployment-key",
       baseUrl: undefined,
       thinkingLevel: null,
@@ -124,7 +246,9 @@ describe("createBackgroundJobHandlers", () => {
 
   it("preserves a configured local model when resolving background compaction", async () => {
     const prisma = {
-      spaceModelPreference: { findFirst: vi.fn(async () => null) },
+      userModelPreference: { findFirst: vi.fn(async () => null) },
+      spaceSettingOverride: { findUnique: vi.fn(async () => null) },
+      userModelRoleChoice: { findMany: vi.fn(async () => []) },
       userModelCredential: { findFirst: vi.fn(async () => null) },
       deploymentSettings: {
         findUnique: vi.fn(async () => ({
@@ -148,4 +272,30 @@ describe("createBackgroundJobHandlers", () => {
       oauth: undefined,
     });
   });
+});
+
+it("retries retired messaging credentials without deleting a currently referenced credential", async () => {
+  const remove = vi.fn(async () => undefined);
+  const findUnique = vi.fn(async () => ({ ciphertext: "active-ref" }));
+  const handlers = createBackgroundJobHandlers({
+    prisma: { messagingInstallation: { findUnique } },
+    secretStore: { delete: remove },
+  } as unknown as Parameters<typeof createBackgroundJobHandlers>[0]);
+  await handlers["messaging.credential-cleanup"]({
+    installationId: "install-a",
+    ref: "active-ref",
+  });
+  expect(remove).not.toHaveBeenCalled();
+  await handlers["messaging.credential-cleanup"]({
+    installationId: "install-a",
+    ref: "retired-ref",
+  });
+  expect(remove).toHaveBeenCalledWith(
+    "retired-ref",
+    expect.objectContaining({ recordId: "install-a" }),
+  );
+  remove.mockRejectedValueOnce(new Error("secret store temporarily unavailable") as never);
+  await expect(
+    handlers["messaging.credential-cleanup"]({ installationId: "install-a", ref: "retired-ref" }),
+  ).rejects.toThrow("temporarily unavailable");
 });

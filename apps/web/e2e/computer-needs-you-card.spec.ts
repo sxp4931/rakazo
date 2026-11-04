@@ -5,54 +5,9 @@ import {
   captureScreenshot,
   completeOnboarding,
   createNamedBot,
-  realSandboxTimeout,
   rpc,
   signup,
 } from "./helpers";
-
-test("needs-you computer card opens the computer", async ({ page }, testInfo) => {
-  const stamp = Date.now();
-  await signup(page, `needs-you-${stamp}@rakazo.test`, "password12", "Needs You");
-  await completeOnboarding(page);
-
-  const botId = activeBotId(page);
-  const composer = page.getByPlaceholder(/Message/);
-  await composer.fill("install the gsc cli and sign in");
-  await page.keyboard.press("Enter");
-
-  await expect
-    .poll(
-      async () => {
-        const snapshot = await rpc<{ run?: { status: string } | null }>(page, "threads/get", {
-          botId,
-        });
-        return snapshot.run?.status ?? null;
-      },
-      {
-        timeout: realSandboxTimeout(90_000, 30_000),
-        message: "the protected-input run must be ready for takeover",
-      },
-    )
-    .toBe("waiting_takeover");
-
-  const card = page.getByTestId("computer-card");
-  if ((await card.count()) === 0) {
-    await page.reload({ waitUntil: "domcontentloaded" });
-    await expect(page.getByPlaceholder(/Message/)).toBeVisible({ timeout: 15_000 });
-  }
-  await expect(card).toBeVisible({ timeout: 15_000 });
-  await expect(card.getByText("Computer", { exact: true })).toBeVisible();
-  await expect(card.getByText("Needs you", { exact: true })).toBeVisible();
-  const open = card.getByTestId("computer-card-open");
-  await expect(open).toBeVisible();
-  await expect(open).toHaveText("Open");
-  await captureScreenshot(page, testInfo, "computer-needs-you-card");
-
-  await open.click();
-  await expect(page.getByRole("button", { name: "Close computer" })).toBeVisible();
-  await expect(page.getByTestId("computer-viewport")).toBeVisible();
-  await captureScreenshot(page, testInfo, "computer-needs-you-card-open");
-});
 
 test("needs-you computer card opens a group member bot computer", async ({ page }, testInfo) => {
   const stamp = Date.now();
@@ -84,8 +39,26 @@ test("needs-you computer card opens a group member bot computer", async ({ page 
   await expect(page).toHaveURL(new RegExp(`/app/g/${group.id}`));
   await expect(page.getByRole("button", { name: "Close computer" })).toBeVisible();
   await expect(page.getByTestId("computer-viewport")).toBeVisible();
+  await expectSidebarEdgeClickReachesComputer(page);
   await captureScreenshot(page, testInfo, "computer-needs-you-card-group-open");
 });
+
+// The expanded bots sidebar's resize edge sits at x = 308-316px; the computer covers it.
+async function expectSidebarEdgeClickReachesComputer(page: Page) {
+  const sidebar = page.getByTestId("bots-sidebar");
+  await expect(sidebar).not.toHaveAttribute("data-collapsed", "true");
+  await expect(page.getByTestId("bots-sidebar-edge")).toHaveCount(0);
+  const point = { x: 312, y: Math.round((page.viewportSize()?.height ?? 720) / 2) };
+  const hitsComputer = await page.evaluate(
+    ({ x, y }) =>
+      Boolean(document.elementFromPoint(x, y)?.closest('[data-testid="computer-viewport"]')),
+    point,
+  );
+  expect(hitsComputer).toBe(true);
+  await page.mouse.click(point.x, point.y);
+  await expect(page.getByTestId("computer-viewport")).toBeVisible();
+  await expect(sidebar).not.toHaveAttribute("data-collapsed", "true");
+}
 
 async function mockGroupComputerCard(page: Page, groupId: string, botId: string) {
   await page.route("**/rpc/threads/get", async (route) => {

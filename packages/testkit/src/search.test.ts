@@ -3,9 +3,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { SearchHit, ThreadSnapshot } from "@rakazo/contracts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import type { BotIntroHarness } from "./discard-bot-intro.js";
+import { discardBotIntroFromCreate } from "./discard-bot-intro.js";
 import { sessionCookieHeader } from "./index.js";
 
-type App = { request: (input: string, init?: RequestInit) => Promise<Response> };
+type App = { request: (input: string, init?: RequestInit) => Response | Promise<Response> };
 
 process.env.WAKEUP_DRIVER = "memory";
 process.env.SANDBOX_PROVIDER = "fake";
@@ -13,6 +15,7 @@ process.env.AGENT_RUNTIME = "scripted";
 
 const hasDb = process.env.VERIFY_DATABASE === "1" && Boolean(process.env.DATABASE_URL);
 const describeSearch = hasDb ? describe : describe.skip;
+let botIntroHarness: BotIntroHarness | undefined;
 
 describeSearch("workspace search", () => {
   let app: App;
@@ -21,7 +24,7 @@ describeSearch("workspace search", () => {
   const dataDir = mkdtempSync(path.join(tmpdir(), "rakazo-search-"));
 
   beforeAll(async () => {
-    const { createApp } = await import("../../../apps/api/src/app.ts");
+    const { createApp } = await import("@rakazo/api/app");
     const handles = await createApp({
       databaseUrl: process.env.DATABASE_URL!,
       dataDir,
@@ -30,6 +33,7 @@ describeSearch("workspace search", () => {
     });
     app = handles.app;
     stop = handles.stop;
+    botIntroHarness = handles;
   });
 
   afterAll(async () => {
@@ -106,6 +110,35 @@ describeSearch("workspace search", () => {
       q: "example.com",
     });
     expect(linkHits.hits.some((hit) => hit.kind === "link")).toBe(true);
+  });
+
+  it("finds literal message text without widening wildcard queries", async () => {
+    const cookie = await signup(app, `search-literal-${stamp}@rakazo.test`, "Literal Search");
+    const bot = await rpc<{ id: string }>(app, cookie, "bots/create", {
+      name: "Literal Finder",
+      title: "Literal Finder",
+      description: "",
+      instructions: "",
+      notifyOnFinish: true,
+    });
+    const queries = [String.raw`back\slash`, 'say "hi"', "50%_off", "café/東京"];
+    for (const text of [...queries, "500 off"]) {
+      await sendAndWait(app, cookie, bot.id, { text });
+    }
+    for (const q of queries) {
+      const { hits } = await rpc<{ hits: SearchHit[] }>(app, cookie, "search/query", { q });
+      expect(hits).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ kind: "message", botId: bot.id, snippet: q }),
+        ]),
+      );
+    }
+    const { hits } = await rpc<{ hits: SearchHit[] }>(app, cookie, "search/query", { q: "50%" });
+    const messages = hits.filter((hit) => hit.kind === "message");
+    expect(messages).toEqual(
+      expect.arrayContaining([expect.objectContaining({ botId: bot.id, snippet: "50%_off" })]),
+    );
+    expect(messages.some((hit) => hit.snippet.includes("500 off"))).toBe(false);
   });
 
   it("returns no hits for another workspace", async () => {
@@ -206,7 +239,7 @@ async function rpc<T>(app: App, cookie: string, proc: string, body: unknown = {}
   if (res.status >= 400 || parsed.error) {
     throw new Error(`${proc} ${res.status}: ${parsed.error?.message ?? text}`);
   }
-  return parsed.json as T;
+  return discardBotIntroFromCreate(botIntroHarness, cookie, proc, parsed.json as T);
 }
 
 async function raw(app: App, cookie: string, proc: string, body: unknown) {

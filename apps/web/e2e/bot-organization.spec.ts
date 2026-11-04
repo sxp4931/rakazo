@@ -61,6 +61,47 @@ test("pinned bots and sidebar sections persist", async ({ page }, testInfo) => {
   await expect(sidebar.locator('[data-sidebar-group="unassigned"]')).toContainText("Chief");
 });
 
+test("deleting a section keeps its bots and groups", async ({ page }, testInfo) => {
+  await signup(page, `section-delete-${Date.now()}@rakazo.test`, "password12", "Section Delete");
+  await completeOnboarding(page);
+  const chiefId = activeBotId(page);
+  const alpha = await rpc<{ id: string }>(page, "bots/create", {
+    name: "Alpha",
+    computerMode: "team",
+  });
+  const section = await rpc<{ id: string }>(page, "botSections/create", {
+    botId: alpha.id,
+    name: "Projects",
+  });
+  await rpc(page, "bots/update", { botId: chiefId, sectionId: section.id });
+  const group = await rpc<{ id: string }>(page, "groups/create", {
+    name: "Review room",
+    botIds: [chiefId, alpha.id],
+  });
+  await rpc(page, "groups/update", { groupId: group.id, sectionId: section.id });
+  await page.reload();
+
+  const sidebar = page.locator("aside").first();
+  const sectionRows = sidebar.locator(`[data-sidebar-group="section:${section.id}"]`);
+  await sectionRows
+    .getByRole("button", { name: "Collapse Projects", exact: true })
+    .click({ button: "right" });
+  await page
+    .getByRole("menu", { name: "Actions for Projects" })
+    .getByRole("menuitem", { name: "Delete section", exact: true })
+    .click();
+  const dialog = page.getByRole("alertdialog", { name: "Delete Projects?" });
+  await expect(dialog).toContainText("Its bots and groups are kept and leave the section.");
+  await captureScreenshot(page, testInfo, "delete-section-dialog");
+  await dialog.getByRole("button", { name: "Delete", exact: true }).click();
+
+  await expect(sectionRows).toHaveCount(0);
+  for (const id of [chiefId, alpha.id]) {
+    await expect(sidebar.locator(`[data-roster-bot-id="${id}"]`)).toBeVisible();
+  }
+  await expect(sidebar.getByRole("button", { name: /^Review room/ })).toBeVisible();
+  await captureScreenshot(page, testInfo, "section-deleted");
+});
 test("bots can be reordered by drag or keyboard and keep that order", async ({ page }) => {
   const stamp = Date.now();
   await signup(page, `bot-reorder-${stamp}@rakazo.test`, "password12", "Bot Order");
@@ -71,7 +112,6 @@ test("bots can be reordered by drag or keyboard and keep that order", async ({ p
   const chiefId = activeBotId(page);
   const alpha = await rpc<{ id: string }>(page, "bots/create", {
     name: "Alpha",
-    title: "",
     description: "",
     instructions: "",
     notifyOnFinish: true,
@@ -79,7 +119,6 @@ test("bots can be reordered by drag or keyboard and keep that order", async ({ p
   });
   const beta = await rpc<{ id: string }>(page, "bots/create", {
     name: "Beta",
-    title: "",
     description: "",
     instructions: "",
     notifyOnFinish: true,
@@ -176,14 +215,16 @@ test("bots can be reordered by drag or keyboard and keep that order", async ({ p
   await expect.poll(order).toEqual([beta.id, alpha.id, chiefId]);
 });
 
-test("chat composer controls are vertically centered", async ({ page }) => {
+test("chat composer controls are vertically centered", async ({ page }, testInfo) => {
   const stamp = Date.now();
   await signup(page, `composer-layout-${stamp}@rakazo.test`, "password12", "Composer Layout");
   await completeOnboarding(page);
 
-  const centers = await page.getByTestId("composer-bar").evaluate((composer) =>
-    ["Attach file", "Message Chief", "Voice", "Send"].map((label) => {
-      const element = composer.querySelector<HTMLElement>(`[aria-label="${label}"]`);
+  const bar = page.getByTestId("composer-bar");
+  const composer = page.getByRole("combobox", { name: "Message Chief" });
+  const centers = await bar.evaluate((composerBar) =>
+    ["Attach file", "Message Chief", "Hold to talk", "Send"].map((label) => {
+      const element = composerBar.querySelector<HTMLElement>(`[aria-label="${label}"]`);
       if (!element) throw new Error(`Missing composer control: ${label}`);
       const box = element.getBoundingClientRect();
       return box.top + box.height / 2;
@@ -191,6 +232,58 @@ test("chat composer controls are vertically centered", async ({ page }) => {
   );
 
   expect(Math.max(...centers) - Math.min(...centers)).toBeLessThanOrEqual(1);
+
+  await composer.fill("Short note");
+  await expect(bar).toHaveAttribute("data-expanded", "false");
+  await captureScreenshot(page, testInfo, "composer-one-line");
+
+  const wrappedDraft =
+    "This draft is long enough to wrap onto its own row above the controls. ".repeat(16);
+  await composer.fill(wrappedDraft);
+  await expect(bar).toHaveAttribute("data-expanded", "true");
+  // The field moves up from the one-line slot; its box overlaps the controls until that finishes.
+  await expect
+    .poll(() =>
+      bar.evaluate((composerBar) => {
+        const field = composerBar.querySelector('[data-testid="composer-field"]');
+        return [composerBar, field].every(
+          (element) =>
+            element?.getAnimations().every((animation) => animation.playState !== "running") ??
+            true,
+        );
+      }),
+    )
+    .toBe(true);
+  const fieldBox = await composer.evaluate((element) => ({
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+    bottom: element.getBoundingClientRect().bottom,
+  }));
+  const sendTop = await bar
+    .getByRole("button", { name: "Send", exact: true })
+    .evaluate((element) => element.getBoundingClientRect().top);
+  expect(fieldBox.scrollHeight).toBeGreaterThan(fieldBox.clientHeight);
+  expect(fieldBox.clientHeight).toBeLessThanOrEqual(104);
+  // Round both edges; a fractional bottom can sit just under a pixel past the slack.
+  expect(Math.round(fieldBox.bottom)).toBeLessThanOrEqual(Math.round(sendTop) + 2);
+  await captureScreenshot(page, testInfo, "composer-wrapped");
+  await page.evaluate(
+    () =>
+      new Promise((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(resolve));
+      }),
+  );
+  await expect(bar).toHaveAttribute("data-expanded", "true");
+
+  await composer.fill("");
+  await expect(composer).toHaveValue("");
+  await expect(bar).toHaveAttribute("data-expanded", "false");
+
+  await composer.fill(wrappedDraft);
+  await expect(bar).toHaveAttribute("data-expanded", "true");
+  await composer.press("Enter");
+  await expect(composer).toHaveValue("");
+  await expect(bar).toHaveAttribute("data-expanded", "false");
 });
 
 test("group chats share every context-menu action", async ({ page }, testInfo) => {
@@ -203,7 +296,6 @@ test("group chats share every context-menu action", async ({ page }, testInfo) =
   const chiefId = activeBotId(page);
   const partner = await rpc<{ id: string }>(page, "bots/create", {
     name: "Partner",
-    title: "",
     description: "",
     instructions: "",
     notifyOnFinish: true,

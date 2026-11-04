@@ -1,5 +1,6 @@
-import { expect, type Locator, type Page, type Route, test } from "@playwright/test";
-import { captureScreenshot, completeOnboarding, signup } from "./helpers";
+import type { Locator, Page, TestInfo } from "@playwright/test";
+import { expect, test } from "@playwright/test";
+import { activeBotId, captureScreenshot, completeOnboarding, signup } from "./helpers";
 
 /** Submit from the Send control so an in-flight prior send cannot swallow Enter. */
 async function sendComposerMessage(page: Page, composer: Locator, text: string) {
@@ -26,6 +27,32 @@ async function revealHoverRail(row: Locator): Promise<Locator> {
   return rail;
 }
 
+/** Touch drops the side gutter, so the bubble cap stays wider than the row minus 8rem. */
+async function expectNoTouchSideGutter(frame: Locator) {
+  const widths = await frame.evaluate((element) => {
+    const parentWidth = element.parentElement?.getBoundingClientRect().width ?? 0;
+    const maxWidth = getComputedStyle(element).maxWidth;
+    const rem = Number.parseFloat(getComputedStyle(document.documentElement).fontSize);
+    // Let the browser resolve the cap (it mixes percentages and rem) by
+    // overflowing the frame and reading back its clamped width.
+    const frame = element as HTMLElement;
+    const width = frame.style.width;
+    frame.style.width = "100000px";
+    const max = frame.getBoundingClientRect().width;
+    frame.style.width = width;
+    return {
+      parentWidth,
+      max,
+      maxWidth,
+      gutter: 8 * rem,
+    };
+  });
+  expect(widths.parentWidth).toBeGreaterThan(widths.gutter);
+  expect(widths.max, `max-width ${widths.maxWidth}`).toBeGreaterThan(
+    widths.parentWidth - widths.gutter,
+  );
+}
+
 /** Park the pointer outside the message and blur focus so the rail returns to opacity-0. */
 async function expectRailAtRest(page: Page, row: Locator) {
   const rail = row.getByTestId("message-hover-rail");
@@ -40,7 +67,68 @@ async function expectRailAtRest(page: Page, row: Locator) {
   });
   await expect(rail).toHaveCSS("opacity", "0");
   await expect(rail).toHaveCSS("pointer-events", "none");
-  await expect(row.getByTestId("message-hover-time")).toHaveCSS("opacity", "0");
+}
+
+async function expectHeaderAboveHoveredRow(page: Page, testInfo: TestInfo, row: Locator) {
+  const placement = await row.evaluate((element) => {
+    const transcript = element.closest<HTMLElement>('[data-testid="transcript"]');
+    const header = document.querySelector<HTMLElement>('[data-testid="bot-settings-trigger"]');
+    if (!transcript || !header) throw new Error("missing transcript or chat header");
+
+    // Make even a short thread scrollable so the row can sit underneath the header.
+    const originalScrollTop = transcript.scrollTop;
+    const spacer = document.createElement("div");
+    spacer.dataset.layerTestSpacer = "";
+    spacer.style.height = `${transcript.clientHeight}px`;
+    spacer.style.flexShrink = "0";
+    transcript.append(spacer);
+
+    const transcriptBox = transcript.getBoundingClientRect();
+    const headerBox = header.getBoundingClientRect();
+    const headerPoint = {
+      x: headerBox.left + headerBox.width / 2,
+      y: headerBox.top + headerBox.height / 2,
+    };
+    const rowBox = element.getBoundingClientRect();
+    const rowCenterContentY =
+      rowBox.top - transcriptBox.top + transcript.scrollTop + rowBox.height / 2;
+    transcript.scrollTop = rowCenterContentY - (headerPoint.y - transcriptBox.top);
+    const movedRowBox = element.getBoundingClientRect();
+
+    return {
+      originalScrollTop,
+      headerPoint,
+      hoverPoint: { x: movedRowBox.left + 1, y: headerPoint.y },
+      overlapsHeader:
+        movedRowBox.left < headerPoint.x &&
+        movedRowBox.right > headerPoint.x &&
+        movedRowBox.top < headerPoint.y &&
+        movedRowBox.bottom > headerPoint.y,
+    };
+  });
+
+  try {
+    expect(placement.overlapsHeader).toBe(true);
+    // Rows keep their rails and avatars layered among themselves, never over the header.
+    await expect(page.getByTestId("transcript")).toHaveCSS("isolation", "isolate");
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    // The header's empty gutter passes pointer events through to keep the row hovered.
+    await page.mouse.move(placement.hoverPoint.x, placement.hoverPoint.y);
+    await expect(row.getByTestId("message-hover-rail")).toHaveCSS("opacity", "1");
+    const headerReceivesHit = await page.evaluate(({ x, y }) => {
+      const header = document.querySelector<HTMLElement>('[data-testid="bot-settings-trigger"]');
+      const topmost = document.elementFromPoint(x, y);
+      return Boolean(header && topmost && header.contains(topmost));
+    }, placement.headerPoint);
+    expect(headerReceivesHit).toBe(true);
+    await captureScreenshot(page, testInfo, "message-hover-under-header-desktop");
+  } finally {
+    await row.evaluate((element, originalScrollTop) => {
+      const transcript = element.closest<HTMLElement>('[data-testid="transcript"]');
+      transcript?.querySelector("[data-layer-test-spacer]")?.remove();
+      if (transcript) transcript.scrollTop = originalScrollTop;
+    }, placement.originalScrollTop);
+  }
 }
 
 test("message hover shows beside-bubble actions; reply links to parent", async ({
@@ -68,15 +156,7 @@ test("message hover shows beside-bubble actions; reply links to parent", async (
 
   const botRail = await revealHoverRail(botRow);
   const botToolbar = botRow.getByTestId("message-hover-actions");
-  const botTime = botRow.getByTestId("message-hover-time");
-  await expect(botTime).toHaveCSS("opacity", "1");
-  const botTimeBox = await botTime.boundingBox();
-  const botRowBox = await botRow.boundingBox();
-  expect(botTimeBox).not.toBeNull();
-  expect(botRowBox).not.toBeNull();
-  expect(
-    Math.abs(botTimeBox!.x + botTimeBox!.width - botRowBox!.x - botRowBox!.width),
-  ).toBeLessThan(2);
+  await expect(botRow.locator("time")).toHaveCount(0);
 
   await expect(botToolbar.getByRole("button", { name: "Reply" })).toBeVisible();
   await expect(botToolbar.getByRole("button", { name: "More" })).toBeVisible();
@@ -103,7 +183,6 @@ test("message hover shows beside-bubble actions; reply links to parent", async (
   const parentText = `hover-parent-${stamp}`;
   const replyText = `hover-reply-${stamp}`;
   const composer = page.getByRole("combobox", { name: /^Message/ });
-  await expect(composer).toBeVisible();
   await sendComposerMessage(page, composer, parentText);
 
   const parentRow = transcript.locator(`[data-message-id]`).filter({ hasText: parentText }).first();
@@ -115,7 +194,6 @@ test("message hover shows beside-bubble actions; reply links to parent", async (
   await expect(toolbar.getByRole("button", { name: "More" })).toBeVisible();
   const react = toolbar.getByRole("button", { name: "React" });
   await expect(react).toBeVisible();
-  // Default reaction matches Reply/More: muted control color, not yellow.
   await expect
     .poll(async () => {
       const mutedColor = await toolbar
@@ -126,7 +204,6 @@ test("message hover shows beside-bubble actions; reply links to parent", async (
     })
     .toBe(true);
 
-  // User bubble (right): icons sit to the left, vertically centered — not under the bubble.
   const frame = parentRow.getByTestId("message-bubble-frame");
   await expect
     .poll(async () => {
@@ -144,14 +221,12 @@ test("message hover shows beside-bubble actions; reply links to parent", async (
     })
     .toEqual({ beside: true, flush: true, centered: true, notBelow: true });
 
-  // User bubble is a muted elevated surface (not cream invert / bright pill).
   const userSurface = parentRow.getByTestId("message-user-bubble");
   await expect(userSurface).toBeVisible();
   await expect
     .poll(async () => userSurface.evaluate((el) => getComputedStyle(el).backgroundColor))
     .not.toMatch(/^rgb\(241,\s*241,\s*239\)$/); // not cream primary foreground
 
-  // Long user bubble: rail stays ~6px beside the bubble edge, not the full row width.
   const longText = `hover-long-${stamp}-${"x".repeat(220)}`;
   await sendComposerMessage(page, composer, longText);
   const longRow = transcript
@@ -169,28 +244,20 @@ test("message hover shows beside-bubble actions; reply links to parent", async (
       return Math.abs(frameBox.x - (railBox.x + railBox.width));
     })
     .toBeLessThan(8);
+  await captureScreenshot(page, testInfo, "message-bubble-wide-desktop");
 
-  // Time appears at the opposite row edge on hover, outside More.
   await revealHoverRail(parentRow);
-  const rowTime = parentRow.getByTestId("message-hover-time");
-  await expect(rowTime).toHaveCSS("opacity", "1");
-  await expect(rowTime).toHaveText(/\d/);
-  const timeBox = await rowTime.boundingBox();
-  const rowBox = await parentRow.boundingBox();
-  expect(timeBox).not.toBeNull();
-  expect(rowBox).not.toBeNull();
-  expect(Math.abs(timeBox!.x - rowBox!.x)).toBeLessThan(2);
   await toolbar.getByRole("button", { name: "More" }).click();
+  await expect(page.getByRole("menu")).toBeVisible();
   await expect(page.getByRole("menu").locator("time")).toHaveCount(0);
   // Escape closes More and restores focus to the trigger so the rail stays up.
   await page.keyboard.press("Escape");
+  await expect(page.getByRole("menu")).toHaveCount(0);
   await expect(toolbar.getByRole("button", { name: "More" })).toBeFocused();
   await captureScreenshot(page, testInfo, "message-user-actions-hover-desktop");
-  // Default transcript shot: rail at rest (no hover pin, mouse clear).
   await expectRailAtRest(page, parentRow);
   await captureScreenshot(page, testInfo, "message-user-bubble-desktop");
 
-  // Clip shot of bubble + rail for gallery geometry.
   await revealHoverRail(parentRow);
   const railBox = await rail.boundingBox();
   const frameBox = await frame.boundingBox();
@@ -247,7 +314,7 @@ test("message hover shows beside-bubble actions; reply links to parent", async (
   await toolbar.getByRole("button", { name: "Reply" }).click();
   const replyChip = page.getByTestId("reply-chip");
   await expect(replyChip).toBeVisible();
-  await expect(replyChip).toContainText(/Replying to/);
+  await expect(replyChip).toContainText(parentText);
 
   await sendComposerMessage(page, composer, replyText);
   await expect(replyChip).toHaveCount(0);
@@ -257,6 +324,18 @@ test("message hover shows beside-bubble actions; reply links to parent", async (
   const parentPreview = replyRow.getByTestId("reply-parent-preview");
   await expect(parentPreview).toBeVisible();
   await expect(parentPreview).toContainText(parentText);
+  // The reply line sits above the bubble; the rail centers on the bubble, not the pair.
+  const replyRail = await revealHoverRail(replyRow);
+  const replyBubble = replyRow.getByTestId("message-user-bubble");
+  await expect
+    .poll(async () => {
+      const railBox = await replyRail.boundingBox();
+      const bubbleBox = await replyBubble.boundingBox();
+      if (!railBox || !bubbleBox) return null;
+      return Math.abs(railBox.y + railBox.height / 2 - (bubbleBox.y + bubbleBox.height / 2));
+    })
+    .toBeLessThan(2);
+  await expect(transcript.getByTestId("time-separator").first()).toContainText(/Today/);
   await captureScreenshot(page, testInfo, "message-reply-thread");
 
   await parentPreview.click();
@@ -269,89 +348,56 @@ test("message hover shows beside-bubble actions; reply links to parent", async (
   await parentRow.scrollIntoViewIfNeeded();
   await revealHoverRail(parentRow);
   await captureScreenshot(page, testInfo, "message-user-actions-mobile");
+  await page.setViewportSize({ width: 1280, height: 812 });
+  await expect(page.getByTestId("bots-sidebar")).toBeVisible();
+  await page.getByTestId("bot-settings-trigger").hover({ trial: true });
+  await expectHeaderAboveHoveredRow(page, testInfo, parentRow);
 });
 
-test("reply preview jumps to parent outside the loaded page", async ({ page }) => {
+test("a message with an attachment centers hover actions on its text bubble", async ({
+  page,
+}, testInfo) => {
   const stamp = Date.now();
-  await signup(page, `hover-page-${stamp}@rakazo.test`, "password12", "Hover Page");
+  await signup(page, `hover-attach-${stamp}@rakazo.test`, "password12", "Hover Attach");
   await completeOnboarding(page);
-
-  const parentText = `page-parent-${stamp}`;
-  const replyText = `page-reply-${stamp}`;
   const composer = page.getByRole("combobox", { name: /^Message/ });
   await expect(composer).toBeVisible();
-  await sendComposerMessage(page, composer, parentText);
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "notes.txt",
+    mimeType: "text/plain",
+    buffer: Buffer.from("meeting notes"),
+  });
+  await expect(page.getByRole("button", { name: "Remove notes.txt" })).toBeVisible();
+  const text = `hover-attach-${stamp}`;
+  await sendComposerMessage(page, composer, text);
 
-  const transcript = page.getByTestId("transcript");
-  const parentRow = transcript.locator(`[data-message-id]`).filter({ hasText: parentText }).first();
-  await expect(parentRow).toBeVisible({ timeout: 20_000 });
-  const parentId = await parentRow.getAttribute("data-message-id");
-  expect(parentId).toBeTruthy();
-
-  await parentRow.hover();
-  await parentRow.getByRole("button", { name: "Reply" }).click();
-  await sendComposerMessage(page, composer, replyText);
-
-  const replyRow = transcript.locator(`[data-message-id]`).filter({ hasText: replyText }).first();
-  await expect(replyRow).toBeVisible({ timeout: 20_000 });
-  await expect(replyRow.getByTestId("reply-parent-preview")).toContainText(parentText);
-
-  // Simulate a paginated snapshot where the parent is older than the loaded page.
-  // Bootstrap and threads/get both hydrate the transcript on reload.
-  const stripParent = (body: {
-    json?: {
-      messages?: Array<{ id: string }>;
-      olderCursor?: number | null;
-      thread?: { messages?: Array<{ id: string }>; olderCursor?: number | null };
-    };
-  }) => {
-    if (body.json?.messages) {
-      body.json.messages = body.json.messages.filter((message) => message.id !== parentId);
-      body.json.olderCursor = body.json.olderCursor ?? 1;
-    }
-    if (body.json?.thread?.messages) {
-      body.json.thread.messages = body.json.thread.messages.filter(
-        (message) => message.id !== parentId,
-      );
-      body.json.thread.olderCursor = body.json.thread.olderCursor ?? 1;
-    }
-  };
-
-  // One handler for both hydrate RPCs avoids overlapping globs racing on reload
-  // (Playwright "Route is already handled" when fulfill runs twice).
-  const hydrateRpc = /\/rpc\/(bootstrap|threads\/get)(?:\?|$)/;
-  const stripHydrate = async (route: Route) => {
-    try {
-      const response = await route.fetch();
-      const body = (await response.json()) as Parameters<typeof stripParent>[0];
-      stripParent(body);
-      await route.fulfill({
-        status: response.status(),
-        headers: response.headers(),
-        body: JSON.stringify(body),
-      });
-    } catch (error) {
-      // Reload can cancel an in-flight intercepted request after fetch returns.
-      if (/already handled|Target closed|Request context disposed/i.test(String(error))) return;
-      throw error;
-    }
-  };
-  await page.route(hydrateRpc, stripHydrate);
-
-  await page.reload({ waitUntil: "domcontentloaded" });
-  await expect(page.getByRole("combobox", { name: /^Message/ })).toBeVisible({ timeout: 20_000 });
-  await expect(page.locator(`[data-message-id="${parentId}"]`)).toHaveCount(0);
-  const offlinePreview = page
-    .locator(`[data-message-id]`)
-    .filter({ hasText: replyText })
-    .getByTestId("reply-parent-preview");
-  await expect(offlinePreview).toBeVisible();
-  await expect(offlinePreview).toHaveText("Earlier message");
-
-  await page.unroute(hydrateRpc, stripHydrate);
-  await offlinePreview.click();
-  await expect(page.locator(`[data-message-id="${parentId}"]`)).toBeVisible({ timeout: 20_000 });
-  await expect(page.locator(`[data-message-id="${parentId}"]`)).toContainText(parentText);
+  const row = page
+    .getByTestId("transcript")
+    .locator("[data-message-id]")
+    .filter({ hasText: text })
+    .first();
+  await expect(row).toBeVisible({ timeout: 20_000 });
+  await expect(row.getByText("notes.txt")).toBeVisible();
+  // Blocks in one message keep the same gap as separate messages instead of touching.
+  // Poll: the bot's reply can land and scroll the transcript between the two measurements.
+  await expect
+    .poll(async () => {
+      const bubbleBox = await row.getByTestId("message-user-bubble").boundingBox();
+      const fileBox = await row.getByRole("button", { name: /notes\.txt/ }).boundingBox();
+      return bubbleBox && fileBox ? fileBox.y - (bubbleBox.y + bubbleBox.height) : null;
+    })
+    .toBeGreaterThanOrEqual(6);
+  const rail = await revealHoverRail(row);
+  const bubble = row.getByTestId("message-user-bubble");
+  await expect
+    .poll(async () => {
+      const railBox = await rail.boundingBox();
+      const bubbleBox = await bubble.boundingBox();
+      if (!railBox || !bubbleBox) return null;
+      return Math.abs(railBox.y + railBox.height / 2 - (bubbleBox.y + bubbleBox.height / 2));
+    })
+    .toBeLessThan(2);
+  await captureScreenshot(page, testInfo, "message-attachment-actions-desktop");
 });
 
 test.describe("touch message actions", () => {
@@ -376,7 +422,16 @@ test.describe("touch message actions", () => {
       .first();
     const rail = row.getByTestId("message-hover-rail");
     await expect(rail).toHaveCSS("opacity", "1");
-    await expect(rail.getByRole("button", { name: "Reply", exact: true })).toBeHidden();
+    await expect(rail.getByRole("button", { name: "Reply", exact: true })).toBeVisible();
+    const botBubble = row.getByTestId("message-bot-bubble").first();
+    const bubbleBox = await botBubble.boundingBox();
+    const railBox = await rail.boundingBox();
+    expect(bubbleBox).not.toBeNull();
+    expect(railBox).not.toBeNull();
+    expect(railBox!.y).toBeGreaterThanOrEqual(bubbleBox!.y + bubbleBox!.height - 1);
+    expect(railBox!.x - bubbleBox!.x).toBeLessThan(8);
+    await expectNoTouchSideGutter(row.getByTestId("message-bubble-frame"));
+    await captureScreenshot(page, testInfo, "message-actions-touch-row");
     await rail.getByRole("button", { name: "React", exact: true }).tap();
     await expect(page.getByRole("button", { name: "🎉", exact: true })).toBeVisible();
     await captureScreenshot(page, testInfo, "message-reaction-picker-touch");
@@ -387,11 +442,69 @@ test.describe("touch message actions", () => {
     await expect(row.getByTestId("message-reactions")).toHaveText("🎉 2");
     await rail.getByRole("button", { name: "More" }).tap();
     await expect(page.getByRole("menuitem", { name: "Copy" })).toBeVisible();
-    await expect(row.getByTestId("message-hover-time")).toHaveCSS("opacity", "1");
-    await expect(row.getByTestId("message-hover-time")).toHaveText(/\d/);
+    await expect(page.getByRole("menu")).toBeVisible();
     await expect(page.getByRole("menu").locator("time")).toHaveCount(0);
     await captureScreenshot(page, testInfo, "message-actions-touch-menu");
-    await page.getByRole("menuitem", { name: "Reply", exact: true }).tap();
+    await page.keyboard.press("Escape");
+    const composer = page.getByRole("combobox", { name: /^Message/ });
+    await sendComposerMessage(page, composer, `touch-width-${Date.now()}`);
+    const userRow = page.locator("[data-message-id]").filter({ hasText: "touch-width-" }).first();
+    await expect(userRow).toBeVisible({ timeout: 20_000 });
+    await expectNoTouchSideGutter(userRow.getByTestId("message-bubble-frame"));
+    await rail.scrollIntoViewIfNeeded();
+    await rail.getByRole("button", { name: "Reply", exact: true }).tap();
     await expect(page.getByRole("button", { name: "Cancel reply" })).toBeVisible();
   });
+});
+
+test("a reaction receipt refreshes live work and exposes Stop", async ({ page }, testInfo) => {
+  await signup(page, `reaction-work-${Date.now()}@rakazo.test`, "password12", "Reaction Work");
+  await completeOnboarding(page);
+  await expect(page.getByText("What do you want me on first?", { exact: true })).toBeVisible({
+    timeout: 20_000,
+  });
+  await page.getByRole("button", { name: /Day-to-day work/ }).click();
+  const botText = page.getByText(/Got it\./);
+  await expect(botText).toBeVisible({ timeout: 20_000 });
+  const row = page
+    .getByTestId("transcript")
+    .locator("[data-message-id]")
+    .filter({ has: botText })
+    .first();
+  const botId = activeBotId(page);
+  let reacted = false;
+  // No run events are emitted: the receipt alone must refresh the active state.
+  await page.route("**/rpc/threads/react", async (route) => {
+    reacted = true;
+    await route.fulfill({ json: { json: { ok: true, runIds: ["reaction-run"] } } });
+  });
+  await page.route("**/rpc/threads/get", async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    if (reacted) {
+      const run = {
+        id: "reaction-run",
+        botId,
+        threadId: body.json.threadId,
+        taskId: "reaction-task",
+        status: "running",
+        trigger: "reaction",
+        routineId: null,
+        modelProvider: null,
+        modelId: null,
+        error: null,
+        startedAt: new Date().toISOString(),
+        completedAt: null,
+        createdAt: new Date().toISOString(),
+      };
+      body.json.run = run;
+      body.json.activeRuns = [run];
+    }
+    await route.fulfill({ response, json: body });
+  });
+  const rail = await revealHoverRail(row);
+  await rail.getByRole("button", { name: "React" }).click();
+  await page.getByRole("button", { name: "🎉", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Stop", exact: true })).toBeVisible();
+  await captureScreenshot(page, testInfo, "reaction-run-working");
 });

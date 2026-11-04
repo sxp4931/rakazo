@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { describeToolActivity } from "./pi-runtime.js";
+import { describeToolActivity } from "./pi-runtime-tools.js";
 
 describe("describeToolActivity", () => {
   it("summarizes builtin tools with their most informative argument", () => {
@@ -12,7 +12,14 @@ describe("describeToolActivity", () => {
     expect(describeToolActivity("write_file", { path: "out.csv", content: "…" })).toBe(
       "Writing out.csv",
     );
+    expect(describeToolActivity("list_fleet", {})).toBe("Checking your bots");
     expect(describeToolActivity("render_plot", { spec: {} })).toBe("Rendering a chart");
+    expect(describeToolActivity("save_page", { help: true })).toBe(
+      "Reading the page kit reference",
+    );
+    expect(describeToolActivity("save_page", { title: "Plan", source: "x" })).toBe(
+      "Writing the page code",
+    );
     expect(describeToolActivity("add_mcp_server", { name: "Linear" })).toBe(
       "Connecting MCP server: Linear",
     );

@@ -1,3 +1,4 @@
+import type { ExecFileException } from "node:child_process";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { access, lstat, open, readFile, rename, unlink } from "node:fs/promises";
@@ -5,8 +6,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 import type { ServerUpdateRun } from "@rakazo/contracts";
+import type { ComposeUpdateStep } from "@rakazo/core";
 import {
-  type ComposeUpdateStep,
   chooseUpdateStrategy,
   commitImageTag,
   composeUpArgv,
@@ -33,16 +34,19 @@ import {
   upsertEnvAssignments,
   validateUpdateRequest,
 } from "@rakazo/core";
-import { type Logger, SERVICE_NAMES } from "@rakazo/logging";
+import type { Logger } from "@rakazo/logging";
+import { SERVICE_NAMES } from "@rakazo/logging";
 import { createRootLogger } from "@rakazo/logging/axiom";
 import { requestLogging } from "@rakazo/logging/hono";
-import { type Context, Hono } from "hono";
+import type { Context } from "hono";
+import { Hono } from "hono";
+import type { UpdaterConfig } from "./updater-logic.js";
 import {
+  missingSecretAssignments,
   readTagState,
   resolveUpdaterConfig,
   truncateOutput,
   UpdateRefused,
-  type UpdaterConfig,
 } from "./updater-logic.js";
 
 const STEP_TIMEOUT_MS: Record<string, number> = {
@@ -51,14 +55,19 @@ const STEP_TIMEOUT_MS: Record<string, number> = {
   checkout: 60_000,
   merge: 60_000,
   pull: 600_000,
-  recreate: 1_800_000,
-  recover: 1_800_000,
+  // A recreate can build, wait up to the worker's 50-minute stop_grace_period for its running
+  // jobs, and then wait for the new services to become healthy.
+  recreate: 5_400_000,
+  recover: 5_400_000,
 };
 const DEFAULT_TIMEOUT_MS = 120_000;
 
 export interface CommandResult {
   ok: boolean;
   exitCode: number | null;
+  /** Complete machine-readable stdout, bounded by the child process maxBuffer. */
+  stdout: string;
+  /** Truncated stdout/stderr for diagnostics and update step logs. */
   output: string;
 }
 
@@ -97,14 +106,9 @@ export function commandEnvironment(
     const value = source[key];
     if (value !== undefined) env[key] = value;
   }
-  // The sidecar runs as root against a bind-mounted checkout that a non-root deploy user owns,
-  // which is the layout docs/self-host.md tells operators to use. Git refuses that with "detected
-  // dubious ownership" and exits 128, so every git call fails before it can read the current sha.
-  //
-  // Declaring the one directory safe here rather than in the Compose file is deliberate: this
-  // allowlist rebuilds the child environment from scratch, so anything set on the service is
-  // dropped before git ever runs. The value is the deployment directory the sidecar already
-  // trusts, and it is applied after `overrides` so a caller cannot widen it.
+  // Root against a checkout the deploy user owns makes git exit 128 with "detected dubious
+  // ownership". It is declared here, not in Compose, because this allowlist drops the service
+  // environment; it is applied after `overrides` so a caller cannot widen it.
   const deployDir = source.RAKAZO_DEPLOY_DIR?.trim();
   const gitOwnership =
     deployDir === undefined || deployDir === ""
@@ -124,43 +128,63 @@ export function commandEnvironment(
   };
 }
 
+function directArguments(args: readonly string[]): string[] | undefined {
+  if (!Array.isArray(args)) return undefined;
+  if (args.some((arg) => typeof arg !== "string" || arg.includes("\0"))) return undefined;
+  return [...args];
+}
+
 /**
- * Every command is argv with `shell: false`. A repository URL or a branch reaches git as one
- * argument and reaches Compose not at all, so there is no string a caller can craft that becomes
- * part of a command line, a build argument, or a service definition.
+ * git and docker only, each as argv with `shell: false`. A repository URL or a branch reaches
+ * git as one argument and reaches Compose not at all, so there is no string a caller can craft
+ * that becomes part of a command line, a build argument, or a service definition.
  */
-const runCommand: UpdaterCommandRunner = (
-  command: string,
-  args: string[],
-  options: { cwd: string; timeoutMs: number; env?: Record<string, string> },
-): Promise<CommandResult> =>
-  new Promise((resolve) => {
-    execFile(
-      command,
-      args,
-      {
-        cwd: options.cwd,
-        timeout: options.timeoutMs,
-        maxBuffer: 8 * 1024 * 1024,
-        windowsHide: true,
-        shell: false,
-        env: commandEnvironment(process.env, options.env),
-      },
-      (error, stdout, stderr) => {
-        const output = truncateOutput(`${stdout}${stderr}`);
-        if (!error) {
-          resolve({ ok: true, exitCode: 0, output });
-          return;
-        }
-        const exitCode = typeof error.code === "number" ? error.code : null;
-        const timedOut = "killed" in error && Boolean(error.killed);
-        const reason = timedOut
-          ? `Timed out after ${options.timeoutMs}ms (${"signal" in error && error.signal ? String(error.signal) : "killed"}).`
-          : error.message;
-        resolve({ ok: false, exitCode, output: output ? `${output}\n${reason}` : reason });
-      },
-    );
+export const runHostCommand: UpdaterCommandRunner = (command, args, options) => {
+  const argv = directArguments(args);
+  if ((command !== "git" && command !== "docker") || !argv) {
+    return Promise.resolve({
+      ok: false,
+      exitCode: null,
+      stdout: "",
+      output: "Refusing to run an unexpected program.",
+    });
+  }
+  return new Promise((resolve) => {
+    const execOptions = {
+      cwd: options.cwd,
+      timeout: options.timeoutMs,
+      maxBuffer: 8 * 1024 * 1024,
+      windowsHide: true,
+      shell: false as const,
+      env: commandEnvironment(process.env, options.env),
+    };
+    const done = (
+      error: ExecFileException | null,
+      stdout: string | Buffer,
+      stderr: string | Buffer,
+    ) => {
+      const output = truncateOutput(`${stdout}${stderr}`);
+      if (!error) {
+        resolve({ ok: true, exitCode: 0, stdout: String(stdout), output });
+        return;
+      }
+      const exitCode = typeof error.code === "number" ? error.code : null;
+      const timedOut = Boolean(error.killed);
+      const signal = error.signal ? String(error.signal) : "killed";
+      const reason = timedOut
+        ? `Timed out after ${options.timeoutMs}ms (${signal}).`
+        : error.message;
+      resolve({
+        ok: false,
+        exitCode,
+        stdout: String(stdout),
+        output: output ? `${output}\n${reason}` : reason,
+      });
+    };
+    if (command === "git") execFile("git", argv, execOptions, done);
+    else execFile("docker", argv, execOptions, done);
   });
+};
 
 export function createUpdaterApp(
   config: UpdaterConfig,
@@ -168,7 +192,7 @@ export function createUpdaterApp(
 ) {
   const app = new Hono();
   app.use("*", requestLogging(options.logger));
-  const run = options.run ?? runCommand;
+  const run = options.run ?? runHostCommand;
   const composeTarget = {
     composeFiles: config.composeFiles,
     envFiles: [config.envFile],
@@ -244,10 +268,10 @@ export function createUpdaterApp(
           upToDate: target.imageTag === tags.currentTag,
           checkout,
         };
-      })();
-      planInFlight = work.finally(() => {
+      })().finally(() => {
         planInFlight = null;
       });
+      planInFlight = work;
       return c.json(await work);
     } catch (error) {
       return refusal(c, error);
@@ -375,7 +399,7 @@ export function createUpdaterApp(
       git(gitStatusArgv()),
       git(gitUntrackedFilesArgv()),
     ]);
-    const porcelain = parseGitStatusPorcelain(status.ok ? status.output : "");
+    const porcelain = parseGitStatusPorcelain(status.ok ? status.stdout : "");
     let contentChanged: string[] = [];
     let contentDiffOk = true;
     if (status.ok && !porcelain.clean) {
@@ -385,22 +409,22 @@ export function createUpdaterApp(
       ]);
       contentDiffOk = worktree.ok && index.ok;
       contentChanged = [
-        ...parseGitNameOnly(worktree.ok ? worktree.output : ""),
-        ...parseGitNameOnly(index.ok ? index.output : ""),
+        ...parseGitNameOnly(worktree.ok ? worktree.stdout : ""),
+        ...parseGitNameOnly(index.ok ? index.stdout : ""),
       ];
     }
     const tracked = resolveTrackedDirtyPaths({
       porcelainChanged: porcelain.changed,
       contentChanged,
       contentDiffOk,
-      untrackedPaths: parseGitNameOnly(untracked.ok ? untracked.output : ""),
+      untrackedPaths: parseGitNameOnly(untracked.ok ? untracked.stdout : ""),
     });
     const stateReadable = status.ok && untracked.ok;
     return {
       present: true,
-      commit: head.ok ? head.output.trim() : null,
-      branch: branch.ok ? branch.output.trim() : null,
-      remoteUrl: remote.ok ? remote.output.trim() : null,
+      commit: head.ok ? head.stdout.trim() : null,
+      branch: branch.ok ? branch.stdout.trim() : null,
+      remoteUrl: remote.ok ? remote.stdout.trim() : null,
       dirty: stateReadable ? tracked.dirty : true,
       dirtyPaths: stateReadable
         ? tracked.dirtyPaths
@@ -417,7 +441,7 @@ export function createUpdaterApp(
     if (!listed.ok) {
       throw new UpdateRefused(`Could not read releases from ${repoUrl}: ${listed.output}`);
     }
-    const release = selectLatestRelease(parseLsRemoteReleases(listed.output));
+    const release = selectLatestRelease(parseLsRemoteReleases(listed.stdout));
     if (release === null) {
       throw new UpdateRefused(
         `${repoUrl} has no published release tags, so there is no image to pull.`,
@@ -440,7 +464,7 @@ export function createUpdaterApp(
     if (!listed.ok) {
       throw new UpdateRefused(`Could not read ${request.branch} from ${request.repoUrl}.`);
     }
-    const commit = listed.output.trim().split(/\s/)[0] ?? "";
+    const commit = listed.stdout.trim().split(/\s/)[0] ?? "";
     if (!isGitCommit(commit)) {
       throw new UpdateRefused(`${request.repoUrl} has no branch called ${request.branch}.`);
     }
@@ -641,7 +665,7 @@ export function createUpdaterApp(
       let toTag = input.toTag;
       if (input.strategy === "build") {
         const head = await git(["rev-parse", "HEAD"]);
-        const commit = head.ok ? head.output.trim() : "";
+        const commit = head.ok ? head.stdout.trim() : "";
         if (!isGitCommit(commit)) {
           record.error = "Could not read the commit to build.";
           return record;
@@ -657,6 +681,7 @@ export function createUpdaterApp(
 
       try {
         await writeEnvAssignments({
+          ...missingSecretAssignments(await readEnvFile()),
           [IMAGE_TAG_ENV]: toTag,
           [PREVIOUS_IMAGE_TAG_ENV]: input.fromTag,
         });

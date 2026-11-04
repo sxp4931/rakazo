@@ -4,14 +4,18 @@ import type {
   ThreadMessage,
   ThreadSnapshot,
 } from "@rakazo/contracts";
+import {
+  answerableAskMessageIds,
+  dismissableAskMessageIds,
+  withLiveStreamingProgress,
+} from "@rakazo/core";
 import { describe, expect, it } from "vitest";
 import {
   activeThreadRuns,
   applyThreadSendReceipt,
   clearActiveThreadRuns,
-  computerPanelAutoBoot,
-  computerPanelAutoUsesBoot,
   computerPanelNeedsMaintenance,
+  computerPanelNeedsScreen,
   computerTakeoverBlocked,
   isThreadSnapshotEvent,
   mergeThreadSnapshot,
@@ -19,6 +23,8 @@ import {
   reconcileRefreshedThread,
   reduceComputerStatus,
   reduceThreadSnapshot,
+  screenMissing,
+  screenReadLoaded,
   threadRunError,
   userHoldsComputerControl,
 } from "./thread-events.js";
@@ -41,6 +47,24 @@ describe("thread event reduction", () => {
     });
     expect(next?.activeRuns).toEqual([next?.run]);
     expect(next?.messages).toBe(initial.messages);
+  });
+
+  it("keeps a private card answerable through a new send receipt and run start", () => {
+    const paused = { ...threadRun("paused"), status: "waiting_input" as const };
+    const ask = {
+      ...message("ask", [{ kind: "ask", text: "Which city?", status: "pending" }], 1),
+      runId: paused.id,
+    };
+    const initial = { ...snapshot([ask]), run: paused, activeRuns: [paused] };
+    const receipt = applyThreadSendReceipt(initial, {
+      botId: "bot-1",
+      runId: "new",
+      taskId: "task-new",
+    });
+    expect(receipt?.activeRuns?.map((run) => run.id)).toEqual(["paused", "new"]);
+    const started = reduceThreadSnapshot(receipt, event({ type: "run.started", runId: "new" }));
+    expect(answerableAskMessageIds(started)).toEqual(new Set(["ask"]));
+    expect(started?.activeRuns?.map((run) => run.id)).toEqual(["paused", "new"]);
   });
 
   it("does not replace authoritative active or group run state with a send receipt", () => {
@@ -93,12 +117,14 @@ describe("thread event reduction", () => {
       event({
         type: "thread.message.created",
         seq: 4,
+        createdAt: "2026-10-08T12:00:00.000Z",
         payload: {
           messageId: "reply-1",
           role: "user",
           blocks: [{ kind: "text", text: "why this?" }],
           replyToMessageId: "message-1",
           replyQuote: "Done",
+          replyPreview: { role: "user", text: "Done" },
         },
       }),
     );
@@ -107,6 +133,27 @@ describe("thread event reduction", () => {
       role: "user",
       replyToMessageId: "message-1",
       replyQuote: "Done",
+      replyPreview: { role: "user", text: "Done" },
+      createdAt: "2026-10-08T12:00:00.000Z",
+    });
+
+    const updated = reduceThreadSnapshot(
+      next,
+      event({
+        type: "thread.message.updated",
+        seq: 5,
+        payload: {
+          messageId: "reply-1",
+          role: "user",
+          blocks: [{ kind: "text", text: "Updated" }],
+        },
+      }),
+    );
+    expect(updated?.messages.find((message) => message.id === "reply-1")).toMatchObject({
+      replyToMessageId: "message-1",
+      replyQuote: "Done",
+      replyPreview: { role: "user", text: "Done" },
+      createdAt: "2026-10-08T12:00:00.000Z",
     });
   });
 
@@ -184,6 +231,103 @@ describe("thread event reduction", () => {
       expect.objectContaining({
         id: "progress:run-1",
         blocks: [{ kind: "progress", text: "Hello" }],
+      }),
+    ]);
+  });
+
+  it("keeps hidden token progress so re-enabling streaming stays continuous", () => {
+    const initial = snapshot([]);
+    const afterTokens = reduceThreadSnapshot(
+      initial,
+      event({
+        type: "thread.progress",
+        seq: 4,
+        runId: "run-1",
+        payload: { text: "Lis", streaming: true },
+      }),
+    );
+    const afterDelta = reduceThreadSnapshot(
+      afterTokens,
+      event({
+        type: "thread.progress",
+        seq: 5,
+        runId: "run-1",
+        payload: { delta: "bon", streaming: true },
+      }),
+    );
+
+    expect(afterDelta?.cursor).toBe(5);
+    expect(afterDelta?.messages).toEqual([
+      expect.objectContaining({
+        id: "progress:run-1",
+        blocks: [{ kind: "progress", text: "Lisbon" }],
+      }),
+    ]);
+    expect(withLiveStreamingProgress(afterDelta, false)?.messages).toEqual([]);
+
+    const afterActivity = reduceThreadSnapshot(
+      afterDelta,
+      event({
+        type: "thread.progress",
+        seq: 6,
+        runId: "run-1",
+        payload: { text: "Using browser", activity: true },
+      }),
+    );
+    expect(withLiveStreamingProgress(afterActivity, false)?.messages).toEqual([
+      expect.objectContaining({
+        id: "progress:run-1",
+        blocks: [{ kind: "progress", text: "Using browser", activity: true }],
+      }),
+    ]);
+
+    const afterComplete = reduceThreadSnapshot(
+      afterActivity,
+      event({
+        type: "thread.message.created",
+        seq: 7,
+        runId: "run-1",
+        payload: {
+          messageId: "m-final",
+          role: "bot",
+          blocks: [{ kind: "text", text: "Lisbon" }],
+        },
+      }),
+    );
+    expect(afterComplete?.messages).toEqual([
+      expect.objectContaining({
+        id: "m-final",
+        blocks: [{ kind: "text", text: "Lisbon" }],
+      }),
+    ]);
+  });
+
+  it("resumes from retained tokens after streaming is turned back on mid-reply", () => {
+    const afterPrefix = reduceThreadSnapshot(
+      snapshot([]),
+      event({
+        type: "thread.progress",
+        seq: 4,
+        runId: "run-1",
+        payload: { text: "Lis", streaming: true },
+      }),
+    );
+    const hidden = withLiveStreamingProgress(afterPrefix, false);
+    expect(hidden?.messages).toEqual([]);
+
+    const afterResume = reduceThreadSnapshot(
+      afterPrefix,
+      event({
+        type: "thread.progress",
+        seq: 5,
+        runId: "run-1",
+        payload: { delta: "bon", streaming: true },
+      }),
+    );
+    expect(withLiveStreamingProgress(afterResume, true)?.messages).toEqual([
+      expect.objectContaining({
+        id: "progress:run-1",
+        blocks: [{ kind: "progress", text: "Lisbon" }],
       }),
     ]);
   });
@@ -343,6 +487,7 @@ describe("thread event reduction", () => {
     expect(isThreadSnapshotEvent(event({ type: "run.started" }))).toBe(true);
     expect(isThreadSnapshotEvent(event({ type: "run.completed" }))).toBe(true);
     expect(isThreadSnapshotEvent(event({ type: "computer.takeover.requested" }))).toBe(true);
+    expect(isThreadSnapshotEvent(event({ type: "computer.takeover.released" }))).toBe(true);
     expect(isThreadSnapshotEvent(event({ type: "agent.tool.completed" }))).toBe(true);
   });
 
@@ -379,6 +524,142 @@ describe("thread event reduction", () => {
     expect(progressed?.cursor).toBe(4);
   });
 
+  it.each([undefined, "group-1"])(
+    "preserves and hydrates the owner for waiting secret requests in %s",
+    (groupId) => {
+      const run = { ...threadRun("run-1"), userId: "owner" };
+      const ask = {
+        ...message("ask", [{ kind: "ask", text: "Secret", input: "secret", status: "pending" }]),
+        runId: run.id,
+      };
+      const initial = { ...snapshot([ask]), groupId, run, activeRuns: [run] };
+      const started = reduceThreadSnapshot(
+        initial,
+        event({ type: "run.started", seq: 4, runId: run.id }),
+      );
+      expect(started?.run?.userId).toBe("owner");
+      expect(started?.activeRuns?.[0]?.userId).toBe("owner");
+
+      const waiting = reduceThreadSnapshot(
+        started,
+        event({
+          type: "run.waiting_input",
+          seq: 5,
+          runId: run.id,
+          payload: { userId: "owner" },
+        }),
+      );
+      expect(waiting?.run?.userId).toBe("owner");
+      expect(waiting?.activeRuns?.[0]?.userId).toBe("owner");
+      expect(dismissableAskMessageIds(waiting, "owner")).toEqual(new Set(["ask"]));
+      expect(dismissableAskMessageIds(waiting, "other")).toEqual(new Set());
+    },
+  );
+
+  it("hydrates the matching already-waiting run without changing another run", () => {
+    const run = { ...threadRun("run-1"), status: "waiting_input" as const };
+    const other = { ...threadRun("run-2"), userId: "other" };
+    const initial = { ...snapshot([]), run, activeRuns: [run, other] };
+    const next = reduceThreadSnapshot(
+      initial,
+      event({
+        type: "run.waiting_input",
+        seq: 5,
+        runId: run.id,
+        payload: { userId: "owner" },
+      }),
+    );
+    expect(next?.run?.userId).toBe("owner");
+    expect(next?.activeRuns?.[0]?.userId).toBe("owner");
+    expect(next?.activeRuns?.[1]).toEqual(other);
+  });
+
+  it("keeps legacy waits closed and inserts an authoritative peer owner", () => {
+    const ask = {
+      ...message("ask", [{ kind: "ask", text: "Secret", input: "secret", status: "pending" }]),
+      runId: "peer",
+    };
+    const initial = { ...snapshot([ask]), groupId: "group-1" };
+    const legacy = reduceThreadSnapshot(
+      initial,
+      event({ type: "run.waiting_input", seq: 4, runId: "peer", payload: {} }),
+    );
+    expect(dismissableAskMessageIds(legacy, "owner")).toEqual(new Set());
+    const hydrated = reduceThreadSnapshot(
+      legacy,
+      event({
+        type: "run.waiting_input",
+        seq: 5,
+        runId: "peer",
+        payload: { userId: "owner" },
+      }),
+    );
+    expect(dismissableAskMessageIds(hydrated, "owner")).toEqual(new Set(["ask"]));
+    expect(dismissableAskMessageIds(hydrated, "other")).toEqual(new Set());
+    const laterLegacy = reduceThreadSnapshot(
+      hydrated,
+      event({ type: "run.waiting_input", seq: 6, runId: "peer", payload: {} }),
+    );
+    expect(laterLegacy?.activeRuns?.[0]?.userId).toBe("owner");
+  });
+
+  it("accepts a queued refresh after an answer update at the same cursor", () => {
+    const run = {
+      ...threadRun("run-1"),
+      status: "waiting_input" as const,
+      userId: "owner",
+    };
+    const ask = {
+      ...message("ask", [{ kind: "ask", text: "Secret", input: "secret", status: "pending" }]),
+      runId: run.id,
+    };
+    const local = { ...snapshot([ask]), run, activeRuns: [run] };
+    const answered = reduceThreadSnapshot(
+      local,
+      event({
+        type: "thread.message.updated",
+        seq: 10,
+        runId: run.id,
+        payload: {
+          messageId: "ask",
+          blocks: [
+            {
+              kind: "ask",
+              text: "Secret",
+              input: "secret",
+              status: "answered",
+            },
+          ],
+        },
+      }),
+    );
+    const queued = {
+      ...local,
+      cursor: 10,
+      run: { ...run, status: "queued" as const },
+      activeRuns: [{ ...run, status: "queued" as const }],
+    };
+    const result = reconcileRefreshedThread(answered, queued, null).snapshot;
+    expect(result.run?.status).toBe("queued");
+    expect(result.activeRuns?.[0]?.status).toBe("queued");
+  });
+
+  it("keeps background ticket runs out of the transcript while advancing the cursor", () => {
+    const started = reduceThreadSnapshot(
+      snapshot([]),
+      event({
+        type: "run.started",
+        seq: 7,
+        runId: "ticket-run-1",
+        payload: { trigger: "tickets" },
+      }),
+    );
+
+    expect(started?.run).toBeNull();
+    expect(started?.activeRuns ?? []).toEqual([]);
+    expect(started?.cursor).toBe(7);
+  });
+
   it("preserves bot_message when event-sourcing a peer run", () => {
     const started = reduceThreadSnapshot(
       snapshot([]),
@@ -405,6 +686,19 @@ describe("thread event reduction", () => {
     expect(started?.run?.trigger).toBe("webhook");
   });
 
+  it("preserves call_end when event-sourcing the wrap-up run", () => {
+    const started = reduceThreadSnapshot(
+      snapshot([]),
+      event({
+        type: "run.started",
+        runId: "call-end-run-1",
+        payload: { trigger: "call_end" },
+      }),
+    );
+
+    expect(started?.run?.trigger).toBe("call_end");
+  });
+
   it("marks the run as waiting when computer takeover is requested", () => {
     const run = threadRun("run-1");
     const initial: ThreadSnapshot = {
@@ -420,6 +714,39 @@ describe("thread event reduction", () => {
 
     expect(waiting?.run?.status).toBe("waiting_takeover");
     expect(waiting?.activeRuns?.[0]?.status).toBe("waiting_takeover");
+
+    const other = threadRun("run-2", "bot-2");
+    const released = reduceThreadSnapshot(
+      {
+        ...initial,
+        run: { ...run, status: "waiting_takeover" },
+        activeRuns: [
+          { ...run, status: "waiting_takeover" },
+          { ...other, status: "waiting_takeover" },
+        ],
+      },
+      event({
+        type: "computer.takeover.released",
+        seq: 6,
+        runId: run.id,
+        payload: { holder: "bot", reason: "released" },
+      }),
+    );
+    expect(released?.run?.status).toBe("queued");
+    expect(released?.activeRuns?.map((item) => [item.id, item.status])).toEqual([
+      [run.id, "queued"],
+      [other.id, "waiting_takeover"],
+    ]);
+
+    const running = reduceThreadSnapshot(
+      {
+        ...snapshot([]),
+        run: { ...run, status: "running" },
+        activeRuns: [{ ...run, status: "running" }],
+      },
+      event({ type: "computer.takeover.released", seq: 7, runId: run.id }),
+    );
+    expect(running?.run?.status).toBe("running");
   });
 
   it("inserts a peer takeover run that was absent from the open snapshot", () => {
@@ -479,6 +806,33 @@ describe("thread event reduction", () => {
     expect(computerTakeoverBlocked(reconciled.computer, reconciled.snapshot.run?.status)).toBe(
       false,
     );
+  });
+
+  it("accepts a newer refresh that queued the run after takeover release", () => {
+    const run = threadRun("run-1");
+    const waitingLocal: ThreadSnapshot = {
+      ...snapshot([]),
+      cursor: 10,
+      run: { ...run, status: "waiting_takeover" },
+      activeRuns: [{ ...run, status: "waiting_takeover" }],
+    };
+    const released: ThreadSnapshot = {
+      ...snapshot([]),
+      cursor: 12,
+      run: { ...run, status: "queued" },
+      activeRuns: [{ ...run, status: "queued" }],
+      computer: computer({ state: "running", busyBotName: "Chief", takeoverRequested: false }),
+    };
+
+    const reconciled = reconcileRefreshedThread(
+      waitingLocal,
+      released,
+      computer({ state: "running", takeoverRequested: true }),
+    );
+
+    expect(reconciled.snapshot.run?.status).toBe("queued");
+    expect(reconciled.snapshot.activeRuns?.[0]?.status).toBe("queued");
+    expect(reconciled.computer?.takeoverRequested).toBe(false);
   });
 
   it("ignores a refresh whose cursor is behind the event-sourced snapshot", () => {
@@ -1298,6 +1652,28 @@ describe("thread event reduction", () => {
     expect(next?.messages[0]?.blocks[0]).toMatchObject({ status: "answered", answer: "Paris" });
   });
 
+  it("titles the call marker in place when the wrap-up run names it", () => {
+    const initial = snapshot([
+      { ...message("marker-1", [{ kind: "voice_call", title: "", farewell: "" }]), callId: "c-1" },
+    ]);
+    const next = reduceThreadSnapshot(
+      initial,
+      event({
+        type: "thread.message.updated",
+        seq: 8,
+        payload: {
+          messageId: "marker-1",
+          role: "bot",
+          blocks: [{ kind: "voice_call", title: "Flight booked", farewell: "Talk soon" }],
+        },
+      }),
+    );
+
+    expect(next?.messages).toHaveLength(1);
+    expect(next?.messages[0]?.blocks[0]).toMatchObject({ title: "Flight booked" });
+    expect(next?.messages[0]?.callId).toBe("c-1");
+  });
+
   it("preserves botId on durable bot messages", () => {
     const initial = snapshot([]);
     const next = reduceThreadSnapshot(
@@ -1479,25 +1855,37 @@ describe("computer event reduction", () => {
     });
   });
 
-  it("auto-boots stopped computers and recovers a running screen that has no URL", () => {
-    expect(computerPanelAutoBoot("stopped")).toBe("boot");
-    expect(computerPanelAutoBoot("error")).toBe("boot");
-    expect(computerPanelAutoBoot(undefined)).toBe("boot");
-    expect(computerPanelAutoBoot("running", "https://screen.example")).toBe("wait");
-    expect(computerPanelAutoBoot("running", null)).toBe("recover-screen");
-    expect(computerPanelAutoBoot("booting")).toBe("wait");
-    expect(computerPanelAutoBoot("suspended")).toBe("wait");
+  it("only reconnects a running computer whose screen has no URL", () => {
+    expect(computerPanelNeedsScreen("running", null)).toBe(true);
+    expect(computerPanelNeedsScreen("running", "https://screen.example")).toBe(false);
+    expect(computerPanelNeedsScreen("stopped")).toBe(false);
+    expect(computerPanelNeedsScreen("error")).toBe(false);
+    expect(computerPanelNeedsScreen(undefined)).toBe(false);
+    expect(computerPanelNeedsScreen("booting")).toBe(false);
+    expect(computerPanelNeedsScreen("suspended")).toBe(false);
   });
 
-  it("maps recover-screen to computer.boot, not computer.recover", () => {
-    expect(computerPanelAutoUsesBoot("recover-screen")).toBe(true);
-    expect(computerPanelAutoUsesBoot("boot")).toBe(true);
-    expect(computerPanelAutoUsesBoot("wait")).toBe(false);
+  it("waits for this computer's screen read before diagnosing a missing screen", () => {
+    const options = {
+      state: "running" as const,
+      kind: undefined,
+      booting: false,
+      screenUrlLoaded: false,
+      embeddedUrl: null,
+    };
+    expect(screenMissing(options)).toBe(false);
+    expect(screenMissing({ ...options, screenUrlLoaded: true })).toBe(true);
+    expect(
+      screenMissing({ ...options, screenUrlLoaded: true, embeddedUrl: "https://screen.example" }),
+    ).toBe(false);
+    expect(screenMissing({ ...options, screenUrlLoaded: true, booting: true })).toBe(false);
+    expect(screenMissing({ ...options, screenUrlLoaded: true, kind: "desktop" })).toBe(false);
+    expect(screenMissing({ ...options, screenUrlLoaded: true, state: "error" })).toBe(false);
   });
 
-  it("shows maintenance only after a stopped or errored computer finishes booting", () => {
+  it("shows maintenance only for an errored computer that is not booting", () => {
     expect(computerPanelNeedsMaintenance("error", false)).toBe(true);
-    expect(computerPanelNeedsMaintenance("stopped", false)).toBe(true);
+    expect(computerPanelNeedsMaintenance("stopped", false)).toBe(false);
     expect(computerPanelNeedsMaintenance("error", true)).toBe(false);
     expect(computerPanelNeedsMaintenance("running", false)).toBe(false);
     expect(computerPanelNeedsMaintenance(undefined, false)).toBe(false);
@@ -1507,7 +1895,7 @@ describe("computer event reduction", () => {
     const panel = "computer";
     const booting = false;
     const showInSidePanel = (computerOpen: boolean) =>
-      panel === "computer" && !computerOpen && computerPanelNeedsMaintenance("stopped", booting);
+      panel === "computer" && !computerOpen && computerPanelNeedsMaintenance("error", booting);
 
     expect(showInSidePanel(false)).toBe(true);
     expect(showInSidePanel(true)).toBe(false);
@@ -1559,6 +1947,7 @@ function computer(overrides: Partial<ComputerStatus> = {}): ComputerStatus {
     homeRevision: null,
     busyBotName: null,
     canUpdate: true,
+    terminalAvailable: true,
     ...overrides,
   };
 }
@@ -1588,3 +1977,55 @@ function event(overrides: Partial<ProductEvent>): ProductEvent {
     ...overrides,
   };
 }
+
+describe("stale helper projection", () => {
+  it.each([
+    "run.waiting_input",
+    "computer.takeover.requested",
+    "run.completed",
+    "run.failed",
+    "run.cancelled",
+  ] as const)("settles helpers on %s without reviving them on resume", (type) => {
+    const base = {
+      id: "fixture",
+      threadId: "thread-1",
+      runId: "run-1",
+      seq: 1,
+      createdAt: "2026-01-01T00:00:00.000Z",
+    };
+    const helper = { agentId: "helper", name: "Helper", task: "Check", status: "running" };
+    let next = reduceThreadSnapshot(
+      snapshot([]),
+      event({ ...base, type: "thread.subagent", payload: helper }),
+    );
+    next = reduceThreadSnapshot(next, event({ ...base, seq: 2, type, payload: {} }));
+    expect(next?.messages.find((m) => m.id === "subagent:helper")?.blocks[0]).toMatchObject({
+      status: "failed",
+      result: "stopped",
+    });
+    next = reduceThreadSnapshot(next, event({ ...base, seq: 3, type: "run.started", payload: {} }));
+    next = reduceThreadSnapshot(
+      next,
+      event({
+        ...base,
+        seq: 4,
+        type: "thread.subagent",
+        payload: { ...helper, agentId: "resumed" },
+      }),
+    );
+    expect(next?.messages.find((m) => m.id === "subagent:helper")?.blocks[0]).toMatchObject({
+      status: "failed",
+    });
+    expect(next?.messages.find((m) => m.id === "subagent:resumed")?.blocks[0]).toMatchObject({
+      status: "running",
+    });
+  });
+});
+
+describe("screen read ownership", () => {
+  it("does not promote a booting read into a running-screen failure", () => {
+    expect(screenReadLoaded("booting", "running")).toBe(false);
+    expect(screenReadLoaded("running", "booting")).toBe(false);
+    expect(screenReadLoaded("running", "running")).toBe(true);
+  });
+});

@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type {
+  BrowserNotificationApi,
+  BrowserNotificationContext,
+} from "./browser-notifications.js";
 import {
-  type BrowserNotificationApi,
-  type BrowserNotificationContext,
   browserNotificationMessage,
   deliverBrowserNotification,
   requestBrowserNotificationPermission,
@@ -93,6 +95,17 @@ describe("browser notifications", () => {
       title: "Chief",
       body: "The pool is balanced.",
     });
+    expect(
+      browserNotificationMessage(
+        event({
+          payload: {
+            role: "bot",
+            blocks: [{ kind: "text", text: "| Pool | Total |\n| --- | --- |\n| main | **42** |" }],
+          },
+        }),
+        "Chief",
+      ),
+    ).toEqual({ title: "Chief", body: "Pool, Total main, 42" });
     expect(browserNotificationMessage(event({ type: "run.failed" }), "Chief")).toEqual({
       title: "Chief failed",
       body: "Failed.",
@@ -148,4 +161,8 @@ describe("browser notifications", () => {
     requestBrowserNotificationPermission(api);
     expect(requestPermission).toHaveBeenCalledTimes(2);
   });
+});
+
+it("uses a readable fallback for opaque notification names", () => {
+  expect(browserNotificationMessage(event(), "__TestTok1__").title).toBe("Bot");
 });

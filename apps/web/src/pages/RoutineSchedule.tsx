@@ -1,17 +1,20 @@
 import { t } from "@lingui/core/macro";
 import { Trans, useLingui } from "@lingui/react/macro";
+import type { CronFreq, CronPreset, CronUnit } from "@rakazo/core";
 import {
   CRON_FREQS,
-  type CronFreq,
-  type CronPreset,
-  type CronUnit,
+  clampIntervalAmount,
   cronFromPreset,
+  cronIntervalAmounts,
+  describeCronPreset,
+  localizedClock,
+  russianIntervalUnit,
 } from "@rakazo/core";
 import { Input, NativeSelect, NativeSelectOption } from "@rakazo/ui-web";
 import { Clock } from "lucide-react";
+import { cronLabels, cronUnitLabel } from "../lib/cron";
 
 const UNITS: CronUnit[] = ["minutes", "hours", "days"];
-const NUMBERS = [1, 2, 3, 5, 10, 15, 30, 45];
 const TIMES = [
   "6:00 AM",
   "7:00 AM",
@@ -25,7 +28,6 @@ const TIMES = [
 
 const TIMED: CronFreq[] = ["Every day", "Weekdays", "Every week", "Every month"];
 
-/** Translate a cron frequency into the active UI locale. */
 function cronFreqLabel(freq: CronFreq): string {
   switch (freq) {
     case "Every hour":
@@ -47,123 +49,12 @@ function cronFreqLabel(freq: CronFreq): string {
   }
 }
 
-/** Translate a cron interval unit in its plural form. */
-function cronUnitLabel(unit: CronUnit): string {
-  switch (unit) {
-    case "minutes":
-      return t`minutes`;
-    case "hours":
-      return t`hours`;
-    case "days":
-      return t`days`;
-    default:
-      return unit;
-  }
-}
-
-/** Translate a cron interval unit in its singular form. */
-function cronUnitLabelSingular(unit: CronUnit): string {
-  switch (unit) {
-    case "minutes":
-      return t`minute`;
-    case "hours":
-      return t`hour`;
-    case "days":
-      return t`day`;
-    default:
-      return unit;
-  }
-}
-
-/** Select the Russian noun form for a numeric interval. */
-function russianPluralForm(value: number, one: string, few: string, many: string): string {
-  const absolute = Math.abs(value);
-  const mod10 = absolute % 10;
-  const mod100 = absolute % 100;
-  if (mod10 === 1 && mod100 !== 11) return one;
-  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20)) return few;
-  return many;
-}
-
-/** Return the Russian interval unit with the case required after an amount. */
-function russianIntervalUnit(value: number, unit: CronUnit): string {
-  switch (unit) {
-    case "minutes":
-      return russianPluralForm(value, "минуту", "минуты", "минут");
-    case "hours":
-      return russianPluralForm(value, "час", "часа", "часов");
-    case "days":
-      return russianPluralForm(value, "день", "дня", "дней");
-    default:
-      return unit;
-  }
-}
-
-/** Return the Russian lead word for a recurring interval. */
-function russianIntervalLead(value: number, unit: CronUnit): string {
-  if (value !== 1) return "Каждые";
-  return unit === "minutes" ? "Каждую" : "Каждый";
-}
-
-/** Return the neutral lead used by the interval controls. */
 function russianIntervalControlLead(): string {
   // The amount select stays visible for 1, so use a construction that keeps
   // the number in the sentence grammatical: “Раз в 1 час”, “Раз в 2 часа”.
   return "Раз в";
 }
 
-/** Build the Russian summary shown above the interval controls. */
-function describeRussianInterval(
-  value: number,
-  unit: CronUnit,
-): {
-  lead: string;
-  detail: string;
-} {
-  return {
-    lead: russianIntervalLead(value, unit),
-    detail:
-      value === 1
-        ? russianIntervalUnit(value, unit)
-        : `${value} ${russianIntervalUnit(value, unit)}`,
-  };
-}
-
-/** Build the localized summary for any routine schedule preset. */
-function describeCronPresetLocalized(
-  preset: CronPreset,
-  locale: string,
-): { lead: string; detail: string } {
-  if (preset.freq === "Interval") {
-    if (locale === "ru") {
-      return describeRussianInterval(preset.n, preset.unit);
-    }
-    const unitLabel =
-      preset.n === 1 ? cronUnitLabelSingular(preset.unit) : cronUnitLabel(preset.unit);
-    return {
-      lead: t`Every`,
-      detail: t`${preset.n} ${unitLabel}`,
-    };
-  }
-  if (preset.freq === "Every hour") {
-    return { lead: t`Every hour`, detail: "" };
-  }
-  if (preset.freq === "Advanced") {
-    return { lead: t`Cron`, detail: preset.cron || "*/3 * * * *" };
-  }
-  if (preset.freq === "Weekdays") {
-    return { lead: t`Weekdays`, detail: t`at ${preset.time}` };
-  }
-  if (preset.freq === "Every week") {
-    return { lead: t`Every Monday`, detail: t`at ${preset.time}` };
-  }
-  if (preset.freq === "Every month") {
-    return { lead: t`Monthly`, detail: t`on the 1st at ${preset.time}` };
-  }
-  return { lead: t`Every day`, detail: t`at ${preset.time}` };
-}
-
-/** Render schedule selectors and the localized summary for a routine. */
 export function RoutineSchedule({
   value,
   onChange,
@@ -172,9 +63,9 @@ export function RoutineSchedule({
   onChange: (next: CronPreset) => void;
 }) {
   const { i18n, t } = useLingui();
-  const { lead, detail } = describeCronPresetLocalized(value, i18n.locale);
+  const { lead, detail } = describeCronPreset(value, cronLabels(i18n.locale));
   const times = TIMES.includes(value.time) ? TIMES : [...TIMES, value.time];
-  const numbers = NUMBERS.includes(value.n) ? NUMBERS : [...NUMBERS, value.n].sort((a, b) => a - b);
+  const numbers = cronIntervalAmounts(value.unit, value.n);
 
   function patch(partial: Partial<CronPreset>) {
     onChange({ ...value, ...partial });
@@ -200,7 +91,10 @@ export function RoutineSchedule({
       size="sm"
       value={value.unit}
       aria-label={t`Interval unit`}
-      onChange={(event) => patch({ unit: event.target.value as CronUnit })}
+      onChange={(event) => {
+        const unit = event.target.value as CronUnit;
+        patch({ unit, n: clampIntervalAmount(value.n, unit) });
+      }}
     >
       {UNITS.map((unit) => (
         <NativeSelectOption key={unit} value={unit}>
@@ -219,7 +113,7 @@ export function RoutineSchedule({
     >
       {times.map((time) => (
         <NativeSelectOption key={time} value={time}>
-          {time}
+          {localizedClock(time, i18n.locale)}
         </NativeSelectOption>
       ))}
     </NativeSelect>

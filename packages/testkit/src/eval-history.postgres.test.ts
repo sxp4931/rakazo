@@ -40,7 +40,7 @@ describe.skipIf(!databaseAvailable)("eval history accounting", () => {
       });
       const dataDir = await mkdtemp(path.join(tmpdir(), "rakazo-eval-history-"));
       try {
-        const { createApp } = await import("../../../apps/api/src/app.ts");
+        const { createApp } = await import("@rakazo/api/app");
         const result = await runTrial(
           {
             id: "cleared-history-fixture",
@@ -63,6 +63,8 @@ describe.skipIf(!databaseAvailable)("eval history accounting", () => {
               modelId: model.model.id,
               baseUrl: model.baseUrl,
               apiKey: fixtureKey,
+              contextWindow: 160_000,
+              maxTokens: 4096,
             },
             timeoutMs: 20_000,
             maxToolCalls,

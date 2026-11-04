@@ -4,8 +4,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { AgentRunRequest, AgentRuntimeEvent, ConnectorTool } from "@rakazo/adapter-kit";
 import { PiAgentRuntime } from "@rakazo/adapters";
-import { afterEach, describe, expect, it } from "vitest";
-import { type ModelEmulatorRequest, startModelEmulator } from "./model-emulator.js";
+import * as Core from "@rakazo/core";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { estimateTextTokens } from "../../adapters/src/context-selection.js";
+import type { ModelEmulatorRequest } from "./model-emulator.js";
+import { startModelEmulator } from "./model-emulator.js";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -50,6 +53,351 @@ function latestToolResult(request: ModelEmulatorRequest) {
 }
 
 describe("real Pi against an offline model HTTP endpoint", () => {
+  it("retries a dropped stream and an overloaded provider after tool work without replaying the effect", async () => {
+    const delay = vi.spyOn(Core, "abortableDelay").mockResolvedValue(undefined);
+    try {
+      let retryMessages: ModelEmulatorRequest["messages"] | undefined;
+      const assertRetryContext = (request: ModelEmulatorRequest) => {
+        expect(latestToolResult(request)?.tool_call_id).toBe("retry-write");
+        if (retryMessages) expect(request.messages).toEqual(retryMessages);
+        else retryMessages = request.messages;
+      };
+      const server = await startModelEmulator({
+        steps: [
+          {
+            expect() {},
+            response: {
+              type: "tool",
+              id: "retry-write",
+              name: "write_file",
+              arguments: { path: "notes.txt", content: "hello" },
+            },
+          },
+          { expect: assertRetryContext, response: { type: "disconnect" } },
+          {
+            expect: assertRetryContext,
+            response: {
+              type: "error",
+              status: 503,
+              message: "Codex error: Our servers are currently overloaded. Please try again later.",
+            },
+          },
+          { expect: assertRetryContext, response: { type: "text", text: "Saved." } },
+        ],
+      });
+      cleanups.push(() => server.close());
+      const executeTool = vi.fn(async () => ({ ok: true }));
+      const events = await collect(
+        new PiAgentRuntime({
+          modelCallObserver: {
+            beforeCall: async () => "fixture-reservation",
+            afterCall: async () => undefined,
+          },
+        }).run(runRequest(server.model, { executeTool })),
+      ).catch((error) => {
+        server.assertComplete();
+        throw error;
+      });
+      server.assertComplete();
+      expect(server.requests).toHaveLength(4);
+      expect(executeTool).toHaveBeenCalledOnce();
+      expect(events.filter((event) => event.type === "text")).toEqual([
+        { type: "text", text: "Saved." },
+      ]);
+      expect(events.at(-1)).toEqual({ type: "done", text: "Saved." });
+      expect(delay.mock.calls.map(([delayMs]) => delayMs)).toEqual([2_000, 8_000]);
+    } finally {
+      delay.mockRestore();
+    }
+  });
+
+  it.each([undefined, "retrieval", "snapshots", "cache-aware"] as const)(
+    "bounds actual initial and tool-loop requests with %s context",
+    async (contextStrategy) => {
+      const decisions: Array<{ droppedMessages: number; truncatedToolResults: number }> = [];
+      const assertBounded = (request: ModelEmulatorRequest) => {
+        expect(estimateTextTokens(JSON.stringify(request.messages))).toBeLessThan(7168);
+        expect(JSON.stringify(request.messages)).toContain("Save hello to notes.txt.");
+      };
+      const server = await startModelEmulator({
+        steps: [
+          {
+            expect: assertBounded,
+            response: {
+              type: "tool",
+              id: "bounded-tool",
+              name: "write_file",
+              arguments: { path: "notes.txt", content: "hello" },
+            },
+          },
+          {
+            expect(request) {
+              assertBounded(request);
+              expect(latestToolResult(request)?.tool_call_id).toBe("bounded-tool");
+              expect(String(latestToolResult(request)?.content)).toContain("truncated");
+              expect(
+                request.messages.findLast((message) => message.role === "assistant")
+                  ?.tool_calls?.[0]?.id,
+              ).toBe("bounded-tool");
+            },
+            response: { type: "text", text: "Saved." },
+          },
+        ],
+      });
+      cleanups.push(() => server.close());
+      const events = await collect(
+        new PiAgentRuntime({ onContextDecision: (decision) => decisions.push(decision) }).run(
+          runRequest(
+            { ...server.model, contextWindow: 8192, maxTokens: 1024 },
+            {
+              contextStrategy,
+              history: Array.from({ length: 100 }, (_, index) => ({
+                id: `old-${index}`,
+                role: "user" as const,
+                content: `Old message ${index} ${"filler ".repeat(80)}`,
+              })),
+              executeTool: async () => ({ original: "0".repeat(90_000) }),
+            },
+          ),
+        ),
+      ).catch((error) => {
+        server.assertComplete();
+        throw error;
+      });
+      server.assertComplete();
+      expect(events.some((event) => event.type === "done")).toBe(true);
+      expect(decisions).toHaveLength(2);
+      expect(decisions[0]!.droppedMessages).toBeGreaterThan(0);
+      expect(decisions[1]!.truncatedToolResults).toBe(1);
+    },
+  );
+
+  it("sends the same provider context for omitted and explicit retrieval when history tools are usable", async () => {
+    let firstMessages: ModelEmulatorRequest["messages"] | undefined;
+    let firstTools: ModelEmulatorRequest["tools"] | undefined;
+    const server = await startModelEmulator({
+      steps: [
+        {
+          expect(request) {
+            firstMessages = request.messages;
+            firstTools = request.tools;
+          },
+          response: { type: "text", text: "Done." },
+        },
+        {
+          expect(request) {
+            expect(request.messages).toEqual(firstMessages);
+            expect(request.tools).toEqual(firstTools);
+          },
+          response: { type: "text", text: "Done." },
+        },
+      ],
+    });
+    cleanups.push(() => server.close());
+    const history = Array.from({ length: 40 }, (_, index) => ({
+      id: `paired-${index}`,
+      role: "user" as const,
+      content: `Original ${index}: ${"bounded historical evidence ".repeat(20)}`,
+    }));
+    const tools = ["read_history", "search_history"].map((name) => ({
+      name,
+      description: name,
+      inputSchema: { type: "object" as const, properties: {} },
+    }));
+    for (const contextStrategy of [undefined, "retrieval"] as const)
+      await collect(
+        new PiAgentRuntime().run(
+          runRequest(
+            { ...server.model, contextWindow: 8192, maxTokens: 1024 },
+            { history, tools, executeTool: async () => ({}), contextStrategy },
+          ),
+        ),
+      );
+    server.assertComplete();
+    expect(JSON.stringify(firstMessages)).not.toContain("Original 0:");
+    expect(JSON.stringify(firstMessages)).toContain("Original 39:");
+  });
+
+  it("keeps fitting standalone originals under the shared default without unavailable history tools", async () => {
+    const history = Array.from({ length: 40 }, (_, index) => ({
+      id: `short-${index}`,
+      role: "user" as const,
+      content: `Standalone original ${index}: rare-${index}`,
+    }));
+    const assertOriginals = (request: ModelEmulatorRequest) => {
+      const wire = JSON.stringify(request.messages);
+      for (const item of history) expect(wire).toContain(item.content);
+      expect(wire).toContain("Save hello to notes.txt.");
+      expect(wire).not.toContain("Historical navigation snapshots");
+      expect(
+        request.tools?.some((tool) =>
+          ["read_history", "search_history"].includes(tool.function.name),
+        ),
+      ).toBe(false);
+    };
+    const server = await startModelEmulator({
+      steps: [
+        {
+          expect: assertOriginals,
+          response: {
+            type: "tool",
+            id: "standalone-write",
+            name: "write_file",
+            arguments: { path: "notes.txt", content: "hello" },
+          },
+        },
+        {
+          expect(request) {
+            assertOriginals(request);
+            expect(latestToolResult(request)?.tool_call_id).toBe("standalone-write");
+          },
+          response: { type: "text", text: "Saved." },
+        },
+      ],
+    });
+    cleanups.push(() => server.close());
+    await collect(
+      new PiAgentRuntime().run(
+        runRequest(
+          { ...server.model, contextWindow: 8192, maxTokens: 1024 },
+          { history, executeTool: async () => ({ ok: true }) },
+        ),
+      ),
+    );
+    server.assertComplete();
+  });
+
+  it.each([
+    {
+      name: "live request",
+      overrides: { prompt: "Required user request ".repeat(2000), tools: [] },
+      error: "Required context exceeds the model context budget",
+    },
+    {
+      name: "required instructions",
+      overrides: { instructions: "Required instructions ".repeat(2000), tools: [] },
+      error: "This model's context window is too small. Choose another model.",
+    },
+    {
+      name: "required tools",
+      overrides: { tools: [{ ...writeTool, description: "Required tool schema ".repeat(2000) }] },
+      error: "This model's context window is too small. Choose another model.",
+    },
+  ])(
+    "rejects oversized $name before invoking the model or reserving spend",
+    async ({ overrides, error }) => {
+      const server = await startModelEmulator({ steps: [] });
+      cleanups.push(() => server.close());
+      let reservations = 0;
+      const events: AgentRuntimeEvent[] = [];
+      await expect(
+        collect(
+          new PiAgentRuntime({
+            modelCallObserver: {
+              beforeCall: async () => {
+                reservations += 1;
+                return "reserved";
+              },
+              afterCall: async () => undefined,
+            },
+          }).run(
+            runRequest(
+              { ...server.model, contextWindow: 4096, maxTokens: 1024 },
+              {
+                contextStrategy: "retrieval",
+                ...overrides,
+              },
+            ),
+          ),
+          events,
+        ),
+      ).rejects.toThrow(error);
+      server.assertComplete();
+      expect(reservations).toBe(0);
+      expect(events.filter((event) => event.type === "usage")).toHaveLength(0);
+    },
+  );
+
+  it("enforces the same context budget inside a delegated tool loop", async () => {
+    const decisions: Array<{ agentId?: string; strategy?: string; truncatedToolResults: number }> =
+      [];
+    const server = await startModelEmulator({
+      steps: [
+        {
+          expect() {},
+          response: {
+            type: "tool",
+            id: "delegate",
+            name: "run_subagent",
+            arguments: { name: "helper", task: "Save hello to notes.txt." },
+          },
+        },
+        {
+          expect(request) {
+            expect(request.tools?.some((tool) => tool.function.name === "run_subagent")).toBe(
+              false,
+            );
+            expect(JSON.stringify(request.messages)).toContain("Save hello to notes.txt.");
+          },
+          response: {
+            type: "tool",
+            id: "child-write",
+            name: "write_file",
+            arguments: { path: "notes.txt", content: "hello" },
+          },
+        },
+        {
+          expect(request) {
+            expect(estimateTextTokens(JSON.stringify(request.messages))).toBeLessThan(7168);
+            expect(latestToolResult(request)?.tool_call_id).toBe("child-write");
+            expect(String(latestToolResult(request)?.content)).toContain("truncated");
+            expect(JSON.stringify(request.messages)).toContain("Save hello to notes.txt.");
+          },
+          response: { type: "text", text: "Saved." },
+        },
+        {
+          expect(request) {
+            expect(latestToolResult(request)?.tool_call_id).toBe("delegate");
+          },
+          response: { type: "text", text: "Finished." },
+        },
+      ],
+    });
+    cleanups.push(() => server.close());
+    await collect(
+      new PiAgentRuntime({ onContextDecision: (decision) => decisions.push(decision) }).run(
+        runRequest(
+          { ...server.model, contextWindow: 8192, maxTokens: 1024 },
+          {
+            tools: [
+              writeTool,
+              {
+                name: "run_subagent",
+                description: "Delegate a task",
+                inputSchema: {
+                  type: "object",
+                  properties: { name: { type: "string" }, task: { type: "string" } },
+                  required: ["task"],
+                },
+              },
+            ],
+            executeTool: async () => ({ original: "0".repeat(63_000) }),
+          },
+        ),
+      ),
+    ).catch((error) => {
+      server.assertComplete();
+      throw error;
+    });
+    server.assertComplete();
+    expect(decisions).toHaveLength(4);
+    expect(decisions.every((decision) => decision.strategy === "retrieval")).toBe(true);
+    expect(decisions.filter((decision) => decision.agentId)).toHaveLength(2);
+    expect(
+      decisions.some((decision) => decision.agentId && decision.truncatedToolResults === 1),
+    ).toBe(true);
+  });
+
   it("assembles fragmented tool arguments, executes the write, and sends its result back", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "rakazo-pi-offline-"));
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
@@ -61,7 +409,7 @@ describe("real Pi against an offline model HTTP endpoint", () => {
           expect(request) {
             expect(request.messages.at(-1)).toMatchObject({
               role: "user",
-              content: [{ type: "text", text: "Save hello to notes.txt." }],
+              content: "Save hello to notes.txt.",
             });
             expect(request.tools).toContainEqual(
               expect.objectContaining({
@@ -127,7 +475,11 @@ describe("real Pi against an offline model HTTP endpoint", () => {
     });
     server.assertComplete();
     expect(calls).toEqual([
-      { name: "write_file", args: { path: "notes.txt", content: "hello\n" }, id: "write-1" },
+      {
+        name: "write_file",
+        args: { path: "notes.txt", content: "hello\n" },
+        id: JSON.stringify(["pi-tool", "main", "write-1"]),
+      },
     ]);
     expect(await readFile(path.join(dir, "notes.txt"), "utf8")).toBe("hello\n");
     expect(events.at(-1)).toEqual({ type: "done", text: "Saved notes.txt." });
@@ -203,7 +555,11 @@ describe("real Pi against an offline model HTTP endpoint", () => {
 
   it("rejects an interrupted SSE response without emitting successful completion", async () => {
     const server = await startModelEmulator({
-      steps: [{ expect() {}, response: { type: "disconnect", text: "Working" } }],
+      // The cut reply is continued once; a continuation that is cut too fails the run.
+      steps: [
+        { expect() {}, response: { type: "disconnect", text: "Working" } },
+        { expect() {}, response: { type: "disconnect", text: " on it" } },
+      ],
     });
     cleanups.push(() => server.close());
     const events: AgentRuntimeEvent[] = [];

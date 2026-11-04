@@ -2,10 +2,15 @@
   "name": "@rakazo/mobile",
   "version": "0.1.0",
   "license": "Apache-2.0",
-  "main": "expo-router/entry",
+  "main": "index.ts",
   "expo": {
     "autolinking": {
-      "nativeModulesDir": "./modules"
+      "nativeModulesDir": "./modules",
+      "android": {
+        "buildFromSource": [
+          "expo-notifications"
+        ]
+      }
     }
   },
   "scripts": {
@@ -17,38 +22,49 @@
     "test:e2e": "maestro test .maestro/smoke.yaml"
   },
   "dependencies": {
-    "@expo/metro-runtime": "57.0.16",
+    "@expo/metro-runtime": "57.0.17",
+    "@expo/ui": "57.0.26",
     "@rakazo/chat-ui": "workspace:*",
     "@rakazo/contracts": "workspace:*",
     "@rakazo/core": "workspace:*",
+    "@rakazo/logging": "workspace:*",
     "@rakazo/ui-tokens": "workspace:*",
     "@react-native-vector-icons/ionicons": "13.1.4",
     "@react-native-vector-icons/material-design-icons": "13.1.4",
-    "expo": "57.0.24",
+    "@sentry/react-native": "7.11.0",
+    "@tanstack/react-query": "5.104.5",
+    "expo": "57.0.31",
     "expo-application": "57.0.3",
     "expo-audio": "57.0.5",
     "expo-clipboard": "57.0.2",
-    "expo-constants": "57.0.19",
-    "expo-document-picker": "57.0.2",
+    "expo-constants": "57.0.22",
+    "expo-document-picker": "57.0.3",
     "expo-file-system": "57.0.7",
     "expo-font": "57.0.4",
-    "expo-image-picker": "57.0.19",
-    "expo-linking": "57.0.10",
+    "expo-image-manipulator": "57.0.21",
+    "expo-image-picker": "57.0.20",
+    "expo-keep-awake": "57.0.2",
+    "expo-linking": "57.0.13",
     "expo-localization": "57.0.2",
-    "expo-modules-core": "57.0.18",
-    "expo-notifications": "57.0.20",
-    "expo-router": "57.0.22",
+    "expo-modules-core": "57.0.24",
+    "expo-notifications": "57.0.24",
+    "expo-router": "57.0.29",
     "expo-secure-store": "57.0.4",
-    "expo-sharing": "57.0.21",
-    "expo-splash-screen": "57.0.9",
+    "expo-sharing": "57.0.24",
+    "expo-speech": "57.0.3",
+    "expo-speech-recognition": "57.1.0",
+    "expo-splash-screen": "57.0.10",
     "expo-status-bar": "57.0.1",
     "expo-symbols": "57.0.3",
-    "expo-updates": "57.0.23",
+    "expo-updates": "57.0.26",
+    "expo-video": "57.0.5",
+    "expo-web-browser": "57.0.3",
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "react-native": "0.86.3",
     "react-native-gesture-handler": "2.32.0",
     "react-native-keyboard-controller": "1.21.9",
+    "react-native-passkeys": "0.4.2",
     "react-native-reanimated": "4.5.1",
     "react-native-safe-area-context": "5.7.0",
     "react-native-screens": "4.26.2",
@@ -59,8 +75,10 @@
   },
   "devDependencies": {
     "@react-native/metro-config": "0.86.3",
+    "@sentry/cli": "2.58.4",
     "@types/node": "24.13.3",
     "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.7",
     "typescript": "6.0.3",
     "vitest": "4.1.11"
   }

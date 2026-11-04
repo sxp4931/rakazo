@@ -1,13 +1,10 @@
-import {
-  type AdapterContext,
-  computerControlExpireJob,
-  type JobPublisher,
-  runContinueJob,
-  type SandboxProvider,
-} from "@rakazo/adapter-kit";
+import type { AdapterContext, JobPublisher, SandboxProvider } from "@rakazo/adapter-kit";
+import { computerControlExpireJob, runContinueJob } from "@rakazo/adapter-kit";
 import type { PrismaClient, ThreadEvents } from "@rakazo/db";
+import { recordComputerRunEnd } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
 import { toComputerRef } from "./computer-support.js";
+import { isSandboxGoneError } from "./sandbox-errors.js";
 
 export const DEFAULT_TAKEOVER_LEASE_MS = 15 * 60 * 1000;
 
@@ -32,6 +29,23 @@ export function hasActiveComputerControl(
       computer.controlLeaseId &&
       computer.controlLeaseExpiresAt &&
       computer.controlLeaseExpiresAt.getTime() > now.getTime(),
+  );
+}
+
+/** User takeover of this bot with no run bound to it. Maintenance may claim it. */
+export function isIdleOwnComputerTakeover(
+  computer:
+    | {
+        controlHolder: string;
+        controlBotId: string | null;
+        controlRunId: string | null;
+      }
+    | null
+    | undefined,
+  botId: string,
+): boolean {
+  return Boolean(
+    computer?.controlHolder === "user" && computer.controlBotId === botId && !computer.controlRunId,
   );
 }
 
@@ -124,6 +138,43 @@ export async function clearInactiveUserComputerControl(
   return cleared.count === 1;
 }
 
+/** Revoke provider screen control. Gone sandbox ⇒ already released; drop the stranded ref
+ * unless clearGoneRef: false (mid-replacement still names that ref for activation CAS). */
+export async function revokeScreenControl(
+  deps: { prisma: PrismaClient; sandbox: SandboxProvider | undefined },
+  computer: {
+    id: string;
+    homeKey: string;
+    kind: string;
+    providerRef: string | null;
+    runningSince?: Date | null;
+  },
+  context: AdapterContext,
+  leaseId: string | undefined,
+  opts?: { clearGoneRef?: boolean },
+): Promise<void> {
+  if (!computer.providerRef) return;
+  try {
+    await deps.sandbox?.setScreenControl?.(toComputerRef(computer), false, context, leaseId);
+  } catch (error) {
+    if (!isSandboxGoneError(error)) throw error;
+    if (opts?.clearGoneRef === false) return;
+    getLogger().warn(`computer ${computer.id} sandbox ${computer.providerRef} is gone`, { error });
+    // Fence by lease + skip booting/suspending so a stale gone-cleanup cannot clobber an
+    // in-flight replace/boot that still names this providerRef.
+    const cleared = await deps.prisma.computer.updateMany({
+      where: {
+        id: computer.id,
+        providerRef: computer.providerRef,
+        state: { notIn: ["booting", "suspending"] },
+        ...(leaseId != null ? { controlLeaseId: leaseId } : {}),
+      },
+      data: { state: "stopped", providerRef: null },
+    });
+    if (cleared.count === 1) await recordComputerRunEnd(deps.prisma, computer, "gone");
+  }
+}
+
 export async function expireComputerControl(
   deps: {
     prisma: PrismaClient;
@@ -161,7 +212,7 @@ export async function expireComputerControl(
         signal: new AbortController().signal,
       };
       try {
-        await deps.sandbox.setScreenControl?.(toComputerRef(computer), false, context, leaseId);
+        await revokeScreenControl(deps, computer, context, leaseId);
       } catch {
         // Keep the lease id and try to reschedule so reconciler/status can retry.
         try {
@@ -217,7 +268,7 @@ export async function expireComputerControl(
       botId,
       signal: new AbortController().signal,
     };
-    await deps.sandbox.setScreenControl?.(toComputerRef(computer), false, context, leaseId);
+    await revokeScreenControl(deps, computer, context, leaseId);
   }
 
   const released = await deps.events.finalizeComputerControlRelease({

@@ -1,9 +1,11 @@
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { Api, Message, Model } from "@earendil-works/pi-ai";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { builtinAgentTools } from "./builtin-tools.js";
+import type * as RuntimeContext from "./runtime-context.js";
 
 const fakeAgentState = vi.hoisted(() => ({
   thinkingLevels: [] as string[],
-  transforms: [] as Array<(messages: AgentMessage[]) => Promise<AgentMessage[]>>,
+  policies: [] as Array<ReturnType<typeof RuntimeContext.createRuntimeContextPolicy>>,
   models: [] as Array<{
     id: string;
     provider: string;
@@ -30,7 +32,6 @@ vi.mock("@earendil-works/pi-agent-core", () => ({
 
     constructor(options: {
       sessionId?: string;
-      transformContext: (messages: AgentMessage[]) => Promise<AgentMessage[]>;
       initialState: {
         thinkingLevel: string;
         tools: FakeAgentTool[];
@@ -38,7 +39,6 @@ vi.mock("@earendil-works/pi-agent-core", () => ({
       };
     }) {
       this.tools = options.initialState.tools;
-      fakeAgentState.transforms.push(options.transformContext);
       fakeAgentState.sessionIds.push(options.sessionId);
       fakeAgentState.thinkingLevels.push(options.initialState.thinkingLevel);
       fakeAgentState.models.push(options.initialState.model);
@@ -99,6 +99,18 @@ vi.mock("./pi-openai-compatible-provider.js", () => ({
   registerOpenAiCompatibleRuntime: (models: unknown) => models,
 }));
 
+vi.mock("./runtime-context.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof RuntimeContext>();
+  return {
+    ...actual,
+    createRuntimeContextPolicy: (...args: Parameters<typeof actual.createRuntimeContextPolicy>) => {
+      const policy = actual.createRuntimeContextPolicy(...args);
+      fakeAgentState.policies.push(policy);
+      return policy;
+    },
+  };
+});
+
 import { PiAgentRuntime } from "./pi-runtime.js";
 
 async function runWithModel(
@@ -117,6 +129,7 @@ async function runWithModel(
     thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | null;
   }>,
   maxImagesPerPrompt?: number,
+  limits?: { contextWindow?: number; maxTokens?: number },
 ) {
   const runtime = new PiAgentRuntime();
   for await (const _event of runtime.run(
@@ -127,8 +140,14 @@ async function runWithModel(
       prompt: "hello",
       instructions: "",
       history: [],
-      tools: [],
-      model: { provider, id: modelId, thinkingLevel, maxImagesPerPrompt },
+      tools: builtinAgentTools,
+      model: {
+        provider,
+        id: modelId,
+        thinkingLevel,
+        maxImagesPerPrompt,
+        ...limits,
+      },
       executeTool: vi.fn(async () => ({ ok: true })),
       resolveModel,
     },
@@ -146,9 +165,25 @@ async function runWithModel(
 }
 
 describe("Pi agent thinking level", () => {
+  it("uses saved generic limits for a configured newer model without environment selection", async () => {
+    await runWithModel(
+      "fixture/newer-model",
+      "openrouter",
+      new AbortController().signal,
+      undefined,
+      undefined,
+      undefined,
+      { contextWindow: 1000000, maxTokens: 8192 },
+    );
+    expect(fakeAgentState.models[0]).toMatchObject({
+      id: "fixture/newer-model",
+      contextWindow: 1000000,
+      maxTokens: 8192,
+    });
+  });
   beforeEach(() => {
     fakeAgentState.thinkingLevels = [];
-    fakeAgentState.transforms = [];
+    fakeAgentState.policies = [];
     fakeAgentState.models = [];
     fakeAgentState.sessionIds = [];
     fakeAgentState.subagentArgs = { name: "helper", task: "help" };
@@ -225,31 +260,54 @@ describe("Pi agent thinking level", () => {
         "test",
         new AbortController().signal,
         null,
-        async () => ({ provider: "test", id: "plain-model", maxImagesPerPrompt: childLimit }),
+        async () => ({
+          provider: "test",
+          id: "plain-model",
+          maxImagesPerPrompt: childLimit,
+        }),
         parentLimit,
       );
-      const screenshots: AgentMessage[] = [0, 1].map((index) => ({
-        role: "toolResult",
-        toolCallId: `capture-${index}`,
-        toolName: "computer_observe",
-        content: [{ type: "image", data: "fake-image", mimeType: "image/png" }],
-        details: { frameId: `frame-${index}` },
-        isError: false,
-        timestamp: index,
-      }));
-      const countImages = (messages: AgentMessage[]) =>
-        messages.reduce(
-          (count, message) =>
-            count +
-            ("content" in message && Array.isArray(message.content)
-              ? message.content.filter((part) => part.type === "image").length
-              : 0),
-          0,
-        );
-      const [parentTransform, childTransform] = fakeAgentState.transforms;
-      if (!parentTransform || !childTransform) throw new Error("missing agent transforms");
-      expect(countImages(await parentTransform(screenshots))).toBe(parentLimit);
-      expect(countImages(await childTransform(screenshots))).toBe(expected);
+      const screenshots: Message[] = [
+        { role: "user", content: "inspect screenshots", timestamp: 0 },
+        ...[0, 1].flatMap((index): Message[] => [
+          {
+            role: "assistant",
+            content: [
+              { type: "toolCall", id: `capture-${index}`, name: "computer_observe", arguments: {} },
+            ],
+            timestamp: index,
+          } as unknown as Message,
+          {
+            role: "toolResult",
+            toolCallId: `capture-${index}`,
+            toolName: "computer_observe",
+            content: [{ type: "image", data: "fake-image", mimeType: "image/png" }],
+            details: { frameId: `frame-${index}` },
+            isError: false,
+            timestamp: index,
+          },
+        ]),
+      ];
+      const contextModel = { id: "plain-model", contextWindow: 65_536, maxTokens: 4096 };
+      const imagesSent = (policy: (typeof fakeAgentState.policies)[number] | undefined) => {
+        if (!policy) throw new Error("missing context policy");
+        return policy
+          .prepareContext(
+            { systemPrompt: "", tools: [], messages: screenshots },
+            contextModel as Model<Api>,
+          )
+          .messages.reduce(
+            (count, message) =>
+              count +
+              (Array.isArray(message.content)
+                ? message.content.filter((part) => part.type === "image").length
+                : 0),
+            0,
+          );
+      };
+      const [parentPolicy, childPolicy] = fakeAgentState.policies;
+      expect(imagesSent(parentPolicy)).toBe(parentLimit);
+      expect(imagesSent(childPolicy)).toBe(expected);
     },
   );
 
@@ -265,7 +323,9 @@ describe("Pi agent thinking level", () => {
 
     expect(resolveModel).not.toHaveBeenCalled();
     expect(fakeAgentState.lastSubagentResult).toMatchObject({
-      details: { result: "Subagent failed: model_provider and model_id must both be set" },
+      details: {
+        result: "Subagent failed: model_provider and model_id must both be set",
+      },
     });
   });
 
@@ -305,7 +365,9 @@ describe("Pi agent thinking level", () => {
       provider: "openrouter",
       reasoning: true,
       contextWindow: 16_384,
-      maxTokens: 4_096,
+      // The unknown-model fallback reserves half the window for input, while
+      // the output allowance covers both reasoning and the reply.
+      maxTokens: 8192,
     });
     // Unknown OpenRouter PI_DEFAULT_MODEL must not force thinking off (#114).
     expect(levels).toEqual(["medium", "medium"]);

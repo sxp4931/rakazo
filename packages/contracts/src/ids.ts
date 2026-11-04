@@ -7,6 +7,7 @@ export const ActorSchema = z.object({
   userId: Id,
   spaceId: Id,
   email: z.string().email(),
+  /** Deprecated wire field. App accounts have no deployment role; always false. */
   isDeploymentOwner: z.boolean(),
 });
 export type Actor = z.infer<typeof ActorSchema>;
@@ -36,8 +37,34 @@ export type RunStatus = z.infer<typeof RunStatus>;
 export const EffectStatus = z.enum(["intended", "completed", "failed", "ambiguous", "reconciled"]);
 export type EffectStatus = z.infer<typeof EffectStatus>;
 
+export const ThinkingLevelSchema = z.enum([
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+]);
+export type ThinkingLevel = z.infer<typeof ThinkingLevelSchema>;
+
 export const MemoryScope = z.enum(["bot", "user"]);
 export type MemoryScope = z.infer<typeof MemoryScope>;
 
-export const SandboxKind = z.enum(["docker", "e2b", "daytona", "box", "desktop", "fake"]);
+export const SandboxKind = z.enum([
+  "none",
+  "docker",
+  "e2b",
+  "novita",
+  "daytona",
+  "createos",
+  "boat",
+  "boxd",
+  "railway",
+  "kubernetes",
+  "incus",
+  "wuying",
+  "desktop",
+  "fake",
+]);
 export type SandboxKind = z.infer<typeof SandboxKind>;

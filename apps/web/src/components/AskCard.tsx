@@ -1,162 +1,305 @@
 import { t } from "@lingui/core/macro";
 import { Trans, useLingui } from "@lingui/react/macro";
 import { ChatMarkdown } from "@rakazo/chat-ui/web";
-import type { ThreadMessage } from "@rakazo/contracts";
-import { isApprovalAskBlock, isSecretAskBlock, selectedAskActionLabel } from "@rakazo/core";
-import { Button, Input } from "@rakazo/ui-web";
+import type { LoginFieldInput, ThreadMessage } from "@rakazo/contracts";
+import { BOT_INSTRUCTIONS_MAX_LENGTH } from "@rakazo/contracts";
+import {
+  isApprovalAskBlock,
+  isSecretAskBlock,
+  resolveAskChoice,
+  selectedAskActionLabel,
+} from "@rakazo/core";
+import { Button, Input, Textarea } from "@rakazo/ui-web";
+import { Check } from "lucide-react";
 import { useState } from "react";
+import type { RpcClient } from "../lib/rpc";
+import { rpc as selectedSpaceRpc } from "../lib/rpc";
+import { errorText } from "../lib/user-error";
+import { BuiCard } from "./ai/primitives";
+import { OptionRow, optionLetter } from "./OptionRow";
+import { SecretAskCard } from "./SecretAskCard";
 
 export type AskBlock = Extract<ThreadMessage["blocks"][number], { kind: "ask" }>;
 
 function formatAnsweredState(
   answer: string | undefined,
   approval: boolean,
-  secret: boolean,
   outcome?: "created" | "cancelled",
   actions?: AskBlock["actions"],
 ): string {
-  if (secret) return t`Saved`;
   if (!answer) return t`Answered`;
-  if (!approval) return t`Answered: ${selectedAskActionLabel(answer, actions)}`;
+  if (!approval) return answer === "approved" ? t`Sent` : selectedAskActionLabel(answer, actions);
   if (outcome === "created") return t`Created`;
   if (outcome === "cancelled") return t`Cancelled`;
-  if (answer === "allow") return t`Allowed once`;
+  if (answer === "allow") return allowsSpace(actions) ? t`Allowed in this space` : t`Allowed once`;
   if (answer === "always") return t`Always allowed`;
   if (answer === "deny") return t`Denied`;
   return t`Answered: ${answer}`;
+}
+
+/**
+ * The server's labels on the user's-computer approval, whose "allow" covers the whole space. Cards
+ * from before it covered the space carry the older label.
+ */
+const ALLOW_IN_SPACE = new Set(["Allow in this space", "Allow for this chat"]);
+
+function allowsSpace(actions: AskBlock["actions"]): boolean {
+  return actions?.some((action) => ALLOW_IN_SPACE.has(action.label)) ?? false;
 }
 
 function approvalActionLabel(
   id: string,
   fallback: string,
   outcome?: "created" | "cancelled",
+  site?: string,
 ): string {
   if (outcome === "created") return t`Create space`;
   if (outcome === "cancelled") return t`Cancel`;
-  if (id === "allow") return t`Allow once`;
-  if (id === "always") return t`Always allow this tool`;
+  if (id === "allow") return ALLOW_IN_SPACE.has(fallback) ? t`Allow in this space` : t`Allow once`;
+  if (id === "always") return site ? t`Always allow ${site}` : t`Always allow this tool`;
   if (id === "deny") return t`Deny`;
   return fallback;
 }
 
-function secretFieldLabel(purpose: AskBlock["purpose"]): string {
-  if (purpose === "password") return t`Password`;
-  if (purpose === "api_key") return t`API key`;
-  return t`Code`;
-}
-
-export function AskCard({
-  block,
-  canAnswer,
-  onAnswer,
-}: {
+export type AskCardProps = {
   block: AskBlock;
   canAnswer: boolean;
-  onAnswer: (text: string) => Promise<void>;
-}) {
+  canDismiss: boolean;
+  /** A login card answers with its fields and an empty `text`; `remember` false uses it once. */
+  onAnswer: (text: string, fields?: LoginFieldInput[], remember?: false) => Promise<void>;
+  /** Turns down a secret request without a value. */
+  onDismiss: () => Promise<void>;
+  /** The chat's space; Undo goes there even if another tab selects a different space. */
+  rpc?: RpcClient;
+};
+
+/** A question, approval or protected-input request from the bot. */
+export function AskCard(props: AskCardProps) {
+  return isSecretAskBlock(props.block) ? (
+    <SecretAskCard {...props} />
+  ) : (
+    <PromptAskCard {...props} />
+  );
+}
+
+function PromptAskCard({ block, canAnswer, onAnswer, rpc = selectedSpaceRpc }: AskCardProps) {
   const { t } = useLingui();
   const [editing, setEditing] = useState(false);
-  const [answer, setAnswer] = useState("");
+  const [answer, setAnswer] = useState(block.instructionUpdate?.after ?? "");
+  const [acceptedAnswer, setAcceptedAnswer] = useState<string>();
+  const [undone, setUndone] = useState(false);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const submitting = pendingAction !== null;
+  const answered = block.status === "answered" || acceptedAnswer !== undefined;
+  const displayedAnswer = block.status === "answered" ? block.answer : acceptedAnswer;
   const approvalActions = isApprovalAskBlock(block) ? block.actions : undefined;
   const askActions = block.actions;
-  const secretInput = isSecretAskBlock(block);
-  const secretLabel = secretFieldLabel(block.purpose);
-
+  const displayActions = block.instructionUpdate
+    ? askActions?.flatMap((action) =>
+        action.id === "allow" ? [action, { id: "edit", label: t`Edit` }] : [action],
+      )
+    : askActions;
+  const optionQuestion =
+    !approvalActions && !block.instructionUpdate && Boolean(askActions?.length);
+  const chosenOption =
+    answered && displayedAnswer ? resolveAskChoice(displayedAnswer, askActions) : undefined;
+  // An edited draft is shown in the user's words, so the card reads as answered. A typed reply to
+  // options already shows as the user's message, so it only dims them.
+  const typedAnswer =
+    answered &&
+    !optionQuestion &&
+    !approvalActions &&
+    !block.instructionUpdate &&
+    displayedAnswer !== "approved"
+      ? displayedAnswer
+      : undefined;
   async function submitAnswer(value: string) {
-    if (submitting) return;
-    if (secretInput ? value.length === 0 : !value.trim()) return;
-    const submitValue = secretInput ? value : value.trim();
-    setPendingAction(secretInput ? "submit" : submitValue);
+    if (submitting || !value.trim()) return;
+    const submitValue = value.trim();
+    setPendingAction(submitValue);
     setError(null);
-    if (secretInput) setAnswer("");
     try {
       await onAnswer(submitValue);
+      setAcceptedAnswer(submitValue);
     } catch (err) {
-      setError(
-        !secretInput && err instanceof Error ? err.message : t`Could not submit this answer`,
-      );
+      setError(errorText(err, t`Could not submit this answer`));
     } finally {
       setPendingAction(null);
     }
   }
 
+  const { instructionUpdate, settingsUpdate } = block;
+  const undo = instructionUpdate?.undoVersionId
+    ? {
+        label: t`Instructions updated`,
+        run: () =>
+          rpc.bots.restoreInstructions({
+            botId: instructionUpdate.botId,
+            versionId: instructionUpdate.undoVersionId!,
+            expectedInstructions: instructionUpdate.after,
+            undo: true,
+          }),
+      }
+    : settingsUpdate
+      ? {
+          label: t`Settings updated`,
+          run: () =>
+            rpc.bots.update({
+              botId: settingsUpdate.botId,
+              ...settingsUpdate.before,
+              expectedSettings: settingsUpdate.after,
+            }),
+        }
+      : undefined;
+  if (undo)
+    return (
+      <BuiCard className="px-5 py-4">
+        <div className="flex items-center gap-2 text-sm">
+          {undo.label}
+          <Button
+            variant="link"
+            disabled={undone || submitting}
+            onClick={async () => {
+              setPendingAction("undo");
+              setError(null);
+              try {
+                await undo.run();
+                setUndone(true);
+              } catch (err) {
+                setError(errorText(err));
+              } finally {
+                setPendingAction(null);
+              }
+            }}
+          >
+            {undone ? <Trans>Restored</Trans> : <Trans>Undo</Trans>}
+          </Button>
+          {error ? <span className="text-destructive">{error}</span> : null}
+        </div>
+      </BuiCard>
+    );
+
   return (
-    <div
-      data-testid={secretInput ? "secret-ask-card" : undefined}
-      className="max-w-[74%] rounded-2xl border border-border bg-card px-5 py-4"
+    <BuiCard
+      data-testid={block.instructionUpdate ? "instruction-approval-card" : undefined}
+      className="w-full min-w-0 max-w-xl px-5 py-4"
     >
       <div className="text-[15.5px] leading-[1.5] text-foreground">
-        <ChatMarkdown>{block.text}</ChatMarkdown>
+        {block.instructionUpdate ? (
+          <Trans>Update instructions?</Trans>
+        ) : (
+          <ChatMarkdown>{block.text}</ChatMarkdown>
+        )}
       </div>
-      {secretInput && block.credential ? (
-        <div className="mt-2 break-all text-[13px] text-muted-foreground">
-          {block.credential.origin}
-        </div>
-      ) : null}
-      {block.detail && !secretInput ? (
-        <pre className="mt-3 max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-xl bg-muted px-3.5 py-3 font-mono text-[12.5px] leading-[1.7] text-muted-foreground">
+      {block.detail ? (
+        <pre
+          data-testid="ask-detail"
+          className={
+            block.detailFormat === "text"
+              ? "mt-3 max-h-72 overflow-auto whitespace-pre-wrap break-words font-sans text-[15.5px] leading-[1.5] text-foreground"
+              : "mt-2.5 max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-background px-3 py-2 font-mono text-[13px] leading-[1.6] text-foreground"
+          }
+        >
           {block.detail}
         </pre>
       ) : null}
-      {block.status === "answered" ? (
-        <div className="mt-3.5 text-[13.5px] font-medium text-success">
-          {formatAnsweredState(
-            block.answer,
-            Boolean(approvalActions),
-            secretInput,
-            approvalActions?.find((action) => action.id === block.answer)?.outcome,
-            askActions,
+      {block.instructionUpdate && editing && canAnswer && !answered ? (
+        <form
+          className="mt-3 space-y-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void submitAnswer(JSON.stringify({ instructions: answer }));
+          }}
+        >
+          <Textarea
+            aria-label={t`Instructions`}
+            maxLength={BOT_INSTRUCTIONS_MAX_LENGTH}
+            value={answer}
+            onChange={(event) => setAnswer(event.target.value)}
+          />
+          <Button type="submit" disabled={submitting}>
+            <Trans>Apply</Trans>
+          </Button>
+          <Button type="button" variant="outline" onClick={() => setEditing(false)}>
+            <Trans>Cancel</Trans>
+          </Button>
+        </form>
+      ) : optionQuestion ? (
+        // Options stay in place once answered: the chosen one is marked, the rest dim.
+        <div className="mt-2.5 space-y-0.5">
+          {askActions?.map((action, index) => (
+            <OptionRow
+              key={action.id}
+              letter={optionLetter(index)}
+              selected={chosenOption?.id === action.id}
+              disabled={answered || !canAnswer || submitting}
+              onClick={() => void submitAnswer(action.id)}
+            >
+              {pendingAction === action.id ? <Trans>Sending…</Trans> : action.label}
+            </OptionRow>
+          ))}
+        </div>
+      ) : typedAnswer ? (
+        <blockquote
+          data-testid="ask-answer"
+          className="mt-3 whitespace-pre-wrap break-words border-s-2 border-border ps-3 text-[15px] leading-[1.5] text-muted-foreground"
+        >
+          {typedAnswer}
+        </blockquote>
+      ) : answered ? (
+        <div className="mt-3.5 flex items-center gap-1.5 text-[13.5px] font-medium text-muted-foreground">
+          {displayedAnswer === "deny" ||
+          approvalActions?.find((action) => action.id === displayedAnswer)?.outcome ===
+            "cancelled" ? null : (
+            <Check aria-hidden className="size-4" />
           )}
+          {block.instructionUpdate
+            ? displayedAnswer === "deny"
+              ? t`Dismissed`
+              : t`Allowed once`
+            : formatAnsweredState(
+                displayedAnswer,
+                Boolean(approvalActions),
+                approvalActions?.find((action) => action.id === displayedAnswer)?.outcome,
+                askActions,
+              )}
         </div>
       ) : !canAnswer ? (
         <div className="mt-3.5 text-[13.5px] font-medium text-muted-foreground">
           <Trans>No longer active</Trans>
         </div>
-      ) : askActions?.length ? (
-        <div className="mt-3.5 space-y-1.5">
-          {askActions.map((action) => (
+      ) : displayActions?.length ? (
+        <div className="mt-3.5 flex flex-wrap gap-2">
+          {displayActions.map((action) => (
             <Button
               key={action.id}
-              variant={approvalActions && action.id === "allow" ? "default" : "outline"}
-              className="h-auto w-full justify-start whitespace-normal px-3.5 py-3 text-start font-normal"
+              variant={action.id === "allow" ? "default" : "outline"}
+              // Wraps long site names like the other cards' buttons.
+              className="h-auto min-h-8 min-w-0 whitespace-normal py-1 text-start"
               disabled={submitting}
-              onClick={() => void submitAnswer(action.id)}
+              onClick={() =>
+                action.id === "edit" && block.instructionUpdate
+                  ? setEditing(true)
+                  : void submitAnswer(action.id)
+              }
             >
               {pendingAction === action.id ? (
                 <Trans>Sending…</Trans>
-              ) : approvalActions ? (
-                approvalActionLabel(action.id, action.label, action.outcome)
-              ) : (
+              ) : action.id === "edit" ? (
                 action.label
+              ) : block.instructionUpdate ? (
+                action.id === "allow" ? (
+                  t`Apply`
+                ) : (
+                  t`Dismiss`
+                )
+              ) : (
+                approvalActionLabel(action.id, action.label, action.outcome, block.site)
               )}
             </Button>
           ))}
         </div>
-      ) : secretInput ? (
-        <form
-          className="mt-3.5 flex flex-col gap-2"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void submitAnswer(answer);
-          }}
-        >
-          <Input
-            aria-label={secretLabel}
-            type="password"
-            autoComplete="off"
-            spellCheck={false}
-            disabled={submitting}
-            value={answer}
-            onChange={(event) => setAnswer(event.target.value)}
-            placeholder={secretLabel}
-          />
-          <Button type="submit" className="self-start" disabled={answer.length === 0 || submitting}>
-            {submitting ? <Trans>Saving…</Trans> : <Trans>Save</Trans>}
-          </Button>
-        </form>
       ) : editing ? (
         <form
           className="mt-3.5 flex flex-col gap-2"
@@ -198,6 +341,6 @@ export function AskCard({
         </div>
       )}
       {error ? <p className="mt-3 text-[13px] text-destructive">{error}</p> : null}
-    </div>
+    </BuiCard>
   );
 }

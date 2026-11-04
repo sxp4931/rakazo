@@ -1,14 +1,16 @@
 import type { ComputerStatus } from "@rakazo/contracts";
-import { SCREEN_URL_RENEW_MS } from "./computer";
+import { isRetryableError } from "@rakazo/core";
+import { SCREEN_URL_RENEW_MS, screenRenewReadAt } from "./computer";
 
 export { SCREEN_URL_RENEW_MS };
 
 /**
- * Every `computer/screenUrl` call seals a fresh capability. Re-reading it on each poll would
- * rotate the URL every two seconds, so polls only read the screen when the status that shapes
- * it changed, when the held URL nears expiry, or after the viewer reported the current URL
- * unusable. The viewer keeps the connected source across incidental token rotation and applies
- * a URL fetched in the renew window so the live stream can outlive the original capability.
+ * Re-reading `computer/screenUrl` on each poll would rotate the URL every two seconds, so polls
+ * only read the screen when the status that shapes it changed, when the held URL nears expiry,
+ * or after the viewer reported the current URL unusable. Renewal is measured from the seal's
+ * own expiry, so a reused capability is refreshed before it expires. The viewer keeps the
+ * connected source across incidental token rotation and applies a URL fetched in the renew
+ * window so the live stream can outlive the original capability.
  */
 
 function screenKey(status: ComputerStatus) {
@@ -35,6 +37,7 @@ export function createComputerRefresh(options: {
   onInitialError: (error: unknown) => void;
 }) {
   let active = false;
+  let paused = false;
   let revision = 0;
   let lifetime = 0;
   let activeActions = 0;
@@ -62,7 +65,7 @@ export function createComputerRefresh(options: {
 
   function schedule() {
     clearTimeout(timer);
-    if (!active || activeActions > 0 || pendingRevision === revision) return;
+    if (!active || paused || activeActions > 0 || pendingRevision === revision) return;
     timer = setTimeout(() => void refresh({ poll: true }).catch(() => undefined), 2000);
   }
 
@@ -72,6 +75,7 @@ export function createComputerRefresh(options: {
     const requestRevision = revision;
     pendingRevision = requestRevision;
     const current = () => active && requestRevision === revision;
+    let failure: unknown;
     try {
       const status = await options.readStatus();
       if (!current()) return;
@@ -82,7 +86,7 @@ export function createComputerRefresh(options: {
           if (!current()) return;
           screenLoaded = true;
           screenStatus = screenKey(status);
-          screenReadAt = Date.now();
+          screenReadAt = screenRenewReadAt(url, Date.now());
           options.onScreen(url);
         } catch {
           // Keep the last URL after a failed read; a successful null clears it.
@@ -92,10 +96,12 @@ export function createComputerRefresh(options: {
       options.onReady();
       return status;
     } catch (error) {
+      failure = error;
       if (current()) throw error;
     } finally {
       if (pendingRevision === requestRevision) pendingRevision = undefined;
-      if (current()) schedule();
+      // A refused read (403, 404, 426...) is the server's answer: wait for an explicit refresh.
+      if (current() && isRetryableError(failure)) schedule();
     }
   }
 
@@ -106,6 +112,16 @@ export function createComputerRefresh(options: {
       screenLoaded = false;
     },
     isActive: () => active,
+    pause() {
+      paused = true;
+      invalidate();
+    },
+    resume() {
+      if (!active || !paused) return;
+      paused = false;
+      if (activeActions === 0) void refresh().catch(() => undefined);
+      else schedule();
+    },
     beginAction() {
       const started = active;
       const actionLifetime = lifetime;
@@ -130,6 +146,7 @@ export function createComputerRefresh(options: {
     },
     start() {
       active = true;
+      paused = false;
       const initial = refresh();
       const initialRevision = revision;
       void initial.catch((error) => {
@@ -141,6 +158,7 @@ export function createComputerRefresh(options: {
     },
     dispose() {
       active = false;
+      paused = false;
       lifetime += 1;
       activeActions = 0;
       screenLoaded = false;

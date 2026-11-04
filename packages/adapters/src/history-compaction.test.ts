@@ -7,18 +7,26 @@ import type {
 import { historyCompactJob } from "@rakazo/adapter-kit";
 import type { MessageBlock } from "@rakazo/contracts";
 import type { PrismaClient } from "@rakazo/db";
-import { createLogger, createTestSink, installLogger } from "@rakazo/logging";
+import { createLogger, createTestSink, installLogger, wrapJobPayload } from "@rakazo/logging";
 import { describe, expect, it, vi } from "vitest";
 import {
+  COMPACTION_BATCH_SIZE,
   compactHistory,
   formatCompactedSummary,
   formatRecalledMemory,
+  HISTORY_WINDOW_SIZE,
   historyWindowSize,
   MAX_COMPACTED_SUMMARY_CHARS,
+  MAX_SUMMARIZE_PROMPT_CHARS,
   MAX_TRANSCRIPT_CHARS,
   nextCompactionBatchRange,
+  recordHistoryCompactAttemptsExhausted,
+  SUMMARIZE_TIMEOUT_BASE_CHARS,
+  SUMMARIZE_TIMEOUT_MAX_MS,
+  SUMMARIZE_TIMEOUT_MIN_MS,
   selectCompactedHistory,
   shouldEnqueueCompaction,
+  summarizeTimeoutMs,
 } from "./history-compaction.js";
 
 describe("shouldEnqueueCompaction", () => {
@@ -137,6 +145,27 @@ describe("selectCompactedHistory", () => {
     expect(selected.history.map((message) => message.seq)).toEqual([0, 1, 2, 4]);
   });
 
+  it("keeps the summary past a message waiting for its own run, and leaves that message out", () => {
+    const loaded = messages(0, 3).map((message) => ({ ...message, waiting: message.seq === 2 }));
+    const selected = selectCompactedHistory({
+      messages: loaded,
+      summary: "facts through 0",
+      historyCompactedUpToSeq: 0,
+    });
+
+    expect(selected.usedLocalSummary).toBe(true);
+    expect(selected.summary).toBe("facts through 0");
+    expect(selected.history.map((message) => message.seq)).toEqual([1, 3]);
+    // Without a summary it is still left out.
+    expect(
+      selectCompactedHistory({
+        messages: loaded,
+        summary: null,
+        historyCompactedUpToSeq: null,
+      }).history.map((message) => message.seq),
+    ).toEqual([0, 1, 3]);
+  });
+
   it("does not use a cursor without its durable summary", () => {
     const selected = selectCompactedHistory({
       messages: messages(0, 10),
@@ -218,18 +247,23 @@ describe("formatRecalledMemory", () => {
 type HarnessMessage = {
   seq: number;
   role: string;
+  botId?: string;
   blocks: MessageBlock[];
 };
 
 function compactionHarness(
   options: {
     deploymentModelKey?: string;
+    deploymentModelConfigured?: boolean;
     settings?: { defaultModelProvider: string | null; defaultModelId: string | null } | null;
     messages?: HarnessMessage[];
+    /** Bots the space knows, archived or not; a message from any other bot id has no record. */
+    bots?: Array<{ id: string; name: string }>;
     nextMessageSeq?: number;
     historyCompactedUpToSeq?: number | null;
     historyCompactionSummary?: string | null;
     historyCompactionGeneration?: number;
+    historyCompactionRetryAfterSeq?: number;
     wasCleared?: boolean;
     resolveModel?: (scope: {
       userId: string;
@@ -259,6 +293,8 @@ function compactionHarness(
     historyCompactedUpToSeq: options.historyCompactedUpToSeq ?? (null as number | null),
     historyCompactionSummary: options.historyCompactionSummary ?? (null as string | null),
     historyCompactionGeneration: options.historyCompactionGeneration ?? 0,
+    historyCompactionRetryAfterSeq:
+      options.historyCompactionRetryAfterSeq ?? (null as number | null),
   };
   const memoryConfig =
     options.memoryConfig === undefined
@@ -269,8 +305,27 @@ function compactionHarness(
           }
       : options.memoryConfig;
   const prisma = {
+    $queryRaw: vi.fn(
+      async (
+        _strings: TemplateStringsArray,
+        batchSize: number,
+        threadId: string,
+        previousCursor: number | null,
+        previousGeneration: number,
+      ) => {
+        if (
+          thread.id !== threadId ||
+          thread.historyCompactedUpToSeq !== previousCursor ||
+          thread.historyCompactionGeneration !== previousGeneration
+        ) {
+          return [];
+        }
+        thread.historyCompactionRetryAfterSeq = thread.nextMessageSeq + batchSize;
+        return [{ historyCompactionRetryAfterSeq: thread.historyCompactionRetryAfterSeq }];
+      },
+    ),
     thread: {
-      findUniqueOrThrow: vi.fn(async () => thread),
+      findUniqueOrThrow: vi.fn(async () => ({ ...thread })),
       updateMany: vi.fn(
         async (args: {
           where: {
@@ -278,7 +333,7 @@ function compactionHarness(
             historyCompactedUpToSeq: number | null;
             historyCompactionGeneration: number;
           };
-          data: { historyCompactedUpToSeq: number; historyCompactionSummary: string };
+          data: Partial<typeof thread>;
         }) => {
           if (
             thread.historyCompactedUpToSeq !== args.where.historyCompactedUpToSeq ||
@@ -286,8 +341,7 @@ function compactionHarness(
           ) {
             return { count: 0 };
           }
-          thread.historyCompactedUpToSeq = args.data.historyCompactedUpToSeq;
-          thread.historyCompactionSummary = args.data.historyCompactionSummary;
+          Object.assign(thread, args.data);
           return { count: 1 };
         },
       ),
@@ -310,6 +364,13 @@ function compactionHarness(
           if (args.orderBy?.seq === "desc") ordered.reverse();
           return ordered.slice(0, args.take ?? ordered.length);
         },
+      ),
+    },
+    bot: {
+      findMany: vi.fn(async (args: { where: { id: { in: string[] } } }) =>
+        (options.bots ?? [{ id: "bot-1", name: "Anya" }]).filter((bot) =>
+          args.where.id.in.includes(bot.id),
+        ),
       ),
     },
     deploymentSettings: {
@@ -368,6 +429,8 @@ function compactionHarness(
     jobs: jobs as unknown as JobPublisher,
     memoryProviders,
     deploymentModelKey: options.deploymentModelKey,
+    deploymentModelConfigured:
+      options.deploymentModelConfigured ?? options.deploymentModelKey !== undefined,
     ...(options.resolveModel ? { resolveModel: options.resolveModel } : {}),
   };
   return {
@@ -383,6 +446,86 @@ function compactionHarness(
   };
 }
 
+describe("summarizeTimeoutMs", () => {
+  it("keeps the short timeout for a small prompt", () => {
+    expect(summarizeTimeoutMs(0)).toBe(SUMMARIZE_TIMEOUT_MIN_MS);
+    expect(summarizeTimeoutMs(SUMMARIZE_TIMEOUT_BASE_CHARS)).toBe(SUMMARIZE_TIMEOUT_MIN_MS);
+  });
+
+  it("reaches the cap once the transcript is as large as the batch budget", () => {
+    expect(summarizeTimeoutMs(MAX_TRANSCRIPT_CHARS)).toBe(SUMMARIZE_TIMEOUT_MAX_MS);
+    expect(summarizeTimeoutMs(MAX_SUMMARIZE_PROMPT_CHARS)).toBe(SUMMARIZE_TIMEOUT_MAX_MS);
+  });
+
+  it("scales between the short timeout and the cap", () => {
+    const midpoint = summarizeTimeoutMs(
+      SUMMARIZE_TIMEOUT_BASE_CHARS + (MAX_TRANSCRIPT_CHARS - SUMMARIZE_TIMEOUT_BASE_CHARS) / 2,
+    );
+    expect(midpoint).toBeGreaterThan(SUMMARIZE_TIMEOUT_MIN_MS);
+    expect(midpoint).toBeLessThan(SUMMARIZE_TIMEOUT_MAX_MS);
+    expect(midpoint).toBe((SUMMARIZE_TIMEOUT_MIN_MS + SUMMARIZE_TIMEOUT_MAX_MS) / 2);
+  });
+});
+
+function installCompactionLogger() {
+  const sink = createTestSink();
+  installLogger(createLogger({ service: "rakazo-worker", sinks: [sink] }));
+  return sink;
+}
+
+function silenceLogger() {
+  installLogger(createLogger({ service: "rakazo-worker", level: "off", sinks: [] }));
+}
+
+describe("recordHistoryCompactAttemptsExhausted", () => {
+  it("logs a permanent failure once retries are exhausted", () => {
+    const sink = installCompactionLogger();
+    try {
+      recordHistoryCompactAttemptsExhausted(
+        {
+          task_identifier: "history.compact",
+          payload: wrapJobPayload({ threadId: "thread-9" }),
+          attempts: 4,
+          max_attempts: 4,
+        },
+        new Error("The operation was aborted due to timeout"),
+      );
+    } finally {
+      silenceLogger();
+    }
+
+    expect(sink.events.at(-1)).toMatchObject({
+      level: "error",
+      message: "history.compact failed permanently",
+      "thread.id": "thread-9",
+      "history.compact.reason": "attempts_exhausted",
+      "history.compact.retryable": false,
+      "job.attempts": 4,
+      "job.max_attempts": 4,
+      error: expect.objectContaining({ message: "The operation was aborted due to timeout" }),
+    });
+  });
+
+  it("ignores jobs that are not history compaction", () => {
+    const sink = installCompactionLogger();
+    try {
+      recordHistoryCompactAttemptsExhausted(
+        {
+          task_identifier: "run.continue",
+          payload: wrapJobPayload({ runId: "run-1" }),
+          attempts: 25,
+          max_attempts: 25,
+        },
+        new Error("handler failed"),
+      );
+    } finally {
+      silenceLogger();
+    }
+
+    expect(sink.events).toHaveLength(0);
+  });
+});
+
 describe("compactHistory", () => {
   it("summarizes the next batch, saves it through the provider, and advances the cursor", async () => {
     const harness = compactionHarness({ deploymentModelKey: "openrouter-key" });
@@ -392,10 +535,11 @@ describe("compactHistory", () => {
     expect(harness.runtime.run).toHaveBeenCalledOnce();
     const [request] = harness.runtime.run.mock.calls[0]!;
     expect(request.instructions).toContain("Current date and time");
+    expect(request.instructions).toContain(`under ${MAX_COMPACTED_SUMMARY_CHARS} characters`);
     expect(request.tools).toEqual([]);
     expect(request.model).toEqual({
       provider: "openrouter",
-      id: "openai/gpt-5.6-luna",
+      id: "openai/gpt-6-luna",
       apiKey: "openrouter-key",
     });
     expect(request.prompt).toContain("message 0");
@@ -425,6 +569,7 @@ describe("compactHistory", () => {
       data: {
         historyCompactedUpToSeq: 49,
         historyCompactionSummary: "Summary of 50 messages.",
+        historyCompactionRetryAfterSeq: null,
       },
     });
   });
@@ -809,6 +954,24 @@ describe("compactHistory", () => {
     });
   });
 
+  it("summarizes with a deployment model that authenticates from the host, without a key", async () => {
+    const harness = compactionHarness({ deploymentModelConfigured: true });
+    vi.stubEnv("PI_DEFAULT_PROVIDER", "amazon-bedrock");
+    vi.stubEnv("PI_DEFAULT_MODEL", "eu.anthropic.claude-sonnet-5");
+    try {
+      await compactHistory(harness.deps, "thread-1");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+
+    const [request] = harness.runtime.run.mock.calls[0]!;
+    expect(request.model).toEqual({
+      provider: "amazon-bedrock",
+      id: "eu.anthropic.claude-sonnet-5",
+      apiKey: undefined,
+    });
+  });
+
   it("skips compaction entirely when nothing at all is configured, rather than summarizing with the scripted runtime", async () => {
     const harness = compactionHarness();
 
@@ -865,15 +1028,248 @@ describe("compactHistory", () => {
     expect(harness.thread.historyCompactedUpToSeq).toBeLessThan(49);
   });
 
-  it("keeps the cursor unchanged when the summary exceeds the safe context budget", async () => {
-    const harness = compactionHarness({ deploymentModelKey: "openrouter-key" });
-    harness.runtime.run.mockImplementation(async function* () {
-      yield { type: "done", text: "x".repeat(MAX_COMPACTED_SUMMARY_CHARS + 1) };
+  it("names the speakers in the transcript, and never the person", async () => {
+    const harness = compactionHarness({
+      deploymentModelKey: "openrouter-key",
+      bots: [
+        { id: "bot-1", name: "Anya" },
+        { id: "bot-2", name: "Boris" },
+      ],
+      messages: [
+        { seq: 0, role: "user", blocks: [{ kind: "text", text: "Pick a code name." }] },
+        { seq: 1, role: "bot", botId: "bot-1", blocks: [{ kind: "text", text: "Bluebird." }] },
+        { seq: 2, role: "bot", botId: "bot-2", blocks: [{ kind: "text", text: "Agreed." }] },
+        { seq: 3, role: "bot", botId: "gone", blocks: [{ kind: "text", text: "Hello." }] },
+        { seq: 4, role: "bot", blocks: [{ kind: "text", text: "Own reply." }] },
+        { seq: 5, role: "system", blocks: [{ kind: "text", text: "Note." }] },
+        {
+          seq: 6,
+          role: "user",
+          blocks: [
+            {
+              kind: "bot_message_received",
+              fromBotId: "bot-2",
+              fromBotName: "Boris",
+              text: "Ready.",
+            } as MessageBlock,
+          ],
+        },
+      ],
     });
 
     await compactHistory(harness.deps, "thread-1");
 
-    expect(harness.prisma.thread.updateMany).not.toHaveBeenCalled();
+    const [request] = harness.runtime.run.mock.calls[0]!;
+    expect(request.prompt).toBe(
+      [
+        "User: Pick a code name.",
+        "Anya: Bluebird.",
+        "Boris: Agreed.",
+        "another bot: Hello.",
+        "Anya: Own reply.",
+        "system: Note.",
+        "Boris: [from Boris] Ready.",
+      ].join("\n\n"),
+    );
+    expect(request.instructions).toContain("who said or decided each");
+  });
+
+  it("keeps a bot named like the person apart from the person in the transcript", async () => {
+    const harness = compactionHarness({
+      deploymentModelKey: "openrouter-key",
+      bots: [{ id: "bot-1", name: " user " }],
+      messages: [
+        { seq: 0, role: "user", blocks: [{ kind: "text", text: "Hi" }] },
+        { seq: 1, role: "bot", botId: "bot-1", blocks: [{ kind: "text", text: "Hello" }] },
+      ],
+    });
+
+    await compactHistory(harness.deps, "thread-1");
+
+    const [request] = harness.runtime.run.mock.calls[0]!;
+    expect(request.prompt).toBe("User: Hi\n\nUser (bot): Hello");
+  });
+
+  it("hands the previous summary to the summarizer unchanged next to the labelled messages", async () => {
+    const harness = compactionHarness({
+      deploymentModelKey: "openrouter-key",
+      historyCompactedUpToSeq: 0,
+      historyCompactionSummary: "Anya proposed Bluebird.",
+      messages: [
+        { seq: 0, role: "user", blocks: [{ kind: "text", text: "old" }] },
+        { seq: 1, role: "user", blocks: [{ kind: "text", text: "Thanks." }] },
+        { seq: 2, role: "bot", botId: "bot-1", blocks: [{ kind: "text", text: "Welcome." }] },
+      ],
+    });
+
+    await compactHistory(harness.deps, "thread-1");
+
+    const [request] = harness.runtime.run.mock.calls[0]!;
+    expect(request.prompt).toContain("Anya proposed Bluebird.");
+    expect(request.prompt).toMatch(/User: Thanks\.\n\nAnya: Welcome\.$/);
+  });
+
+  async function compactAfterTurns(harness: ReturnType<typeof compactionHarness>, turns: number) {
+    for (let turn = 0; turn < turns; turn += 1) {
+      for (const role of ["user", "bot"]) {
+        const seq = harness.thread.nextMessageSeq++;
+        harness.messages.push({ seq, role, blocks: [{ kind: "text", text: `message ${seq}` }] });
+      }
+      if (
+        shouldEnqueueCompaction(
+          harness.thread.nextMessageSeq,
+          harness.thread.historyCompactedUpToSeq,
+          HISTORY_WINDOW_SIZE,
+          COMPACTION_BATCH_SIZE,
+        )
+      ) {
+        await compactHistory(harness.deps, "thread-1");
+      }
+    }
+  }
+  const threadMessages = (from: number, count: number) =>
+    Array.from({ length: count }, (_, index) => ({
+      seq: from + index,
+      role: index % 2 === 0 ? "user" : "bot",
+      blocks: [{ kind: "text" as const, text: `message ${from + index}` }],
+    }));
+  const compactedThread = () =>
+    compactionHarness({
+      deploymentModelKey: "openrouter-key",
+      historyCompactedUpToSeq: 49,
+      historyCompactionSummary: "Earlier summary.",
+      messages: threadMessages(0, 150),
+    });
+  const oversized = "x".repeat(MAX_COMPACTED_SUMMARY_CHARS + 1);
+  const summarizerReplies = (harness: ReturnType<typeof compactionHarness>, texts: string[]) => {
+    let call = 0;
+    harness.runtime.run.mockImplementation(async function* () {
+      yield { type: "done", text: texts[Math.min(call++, texts.length - 1)]! };
+    });
+  };
+
+  it("waits for a batch of new messages after an oversized summary, then compacts again", async () => {
+    const harness = compactedThread();
+    summarizerReplies(harness, [oversized, "Summary that fits."]);
+    const sink = installCompactionLogger();
+
+    try {
+      await compactAfterTurns(harness, 1);
+    } finally {
+      silenceLogger();
+    }
+
+    expect(harness.runtime.run).toHaveBeenCalledOnce();
+    expect(harness.thread.historyCompactedUpToSeq).toBe(49);
+    expect(harness.thread.historyCompactionSummary).toBe("Earlier summary.");
+    expect(sink.events).toContainEqual(
+      expect.objectContaining({
+        level: "warn",
+        message: "history.compact summary too large; retry scheduled",
+        "thread.id": "thread-1",
+        "history.compact.retry_after_seq": 202,
+      }),
+    );
+
+    await compactAfterTurns(harness, 24);
+    expect(harness.runtime.run).toHaveBeenCalledOnce();
+
+    await compactAfterTurns(harness, 2);
+    expect(harness.runtime.run).toHaveBeenCalledTimes(3);
+    expect(harness.thread.historyCompactedUpToSeq).toBe(149);
+  });
+
+  it("schedules the retry from messages received during summarization", async () => {
+    const harness = compactedThread();
+    harness.runtime.run.mockImplementation(async function* () {
+      harness.thread.nextMessageSeq += COMPACTION_BATCH_SIZE;
+      yield { type: "done", text: oversized };
+    });
+    const sink = installCompactionLogger();
+
+    try {
+      await compactHistory(harness.deps, "thread-1");
+      expect(harness.thread.historyCompactionRetryAfterSeq).toBe(150 + 2 * COMPACTION_BATCH_SIZE);
+      expect(sink.events).toContainEqual(
+        expect.objectContaining({
+          "history.compact.retry_after_seq": 150 + 2 * COMPACTION_BATCH_SIZE,
+        }),
+      );
+      await compactHistory(harness.deps, "thread-1");
+      expect(harness.runtime.run).toHaveBeenCalledOnce();
+    } finally {
+      silenceLogger();
+    }
+  });
+
+  it("does not schedule a retry when the history generation changes meanwhile", async () => {
+    const harness = compactedThread();
+    harness.runtime.run.mockImplementation(async function* () {
+      harness.thread.historyCompactionGeneration += 1;
+      yield { type: "done", text: oversized };
+    });
+
+    await compactHistory(harness.deps, "thread-1");
+
+    expect(harness.thread.historyCompactionRetryAfterSeq).toBeNull();
+  });
+
+  it("does not schedule a retry when another job advanced the cursor meanwhile", async () => {
+    const harness = compactedThread();
+    harness.runtime.run.mockImplementation(async function* () {
+      harness.thread.historyCompactedUpToSeq = 99;
+      yield { type: "done", text: oversized };
+    });
+    const sink = installCompactionLogger();
+
+    try {
+      await compactHistory(harness.deps, "thread-1");
+    } finally {
+      silenceLogger();
+    }
+
+    expect(harness.runtime.run).toHaveBeenCalledOnce();
+    expect(harness.thread.historyCompactionRetryAfterSeq).toBeNull();
+    expect(sink.events.filter((event) => event.level === "warn")).toEqual([]);
+  });
+
+  it("clears a retry point when a job from the same cursor compacts", async () => {
+    const harness = compactedThread();
+    let call = 0;
+    harness.runtime.run.mockImplementation(async function* () {
+      call += 1;
+      if (call === 1) {
+        await compactHistory(harness.deps, "thread-1");
+        yield { type: "done", text: "Summary that fits." };
+      } else {
+        yield { type: "done", text: call === 2 ? oversized : "Next summary." };
+      }
+    });
+    installCompactionLogger();
+
+    try {
+      await compactHistory(harness.deps, "thread-1");
+    } finally {
+      silenceLogger();
+    }
+    expect(harness.thread.historyCompactedUpToSeq).toBe(99);
+
+    await compactHistory(harness.deps, "thread-1");
+
+    expect(harness.runtime.run).toHaveBeenCalledTimes(3);
+    expect(harness.thread.historyCompactedUpToSeq).toBe(149);
+  });
+
+  it("stops after one oversized summary when nothing has been compacted yet", async () => {
+    const harness = compactionHarness({
+      deploymentModelKey: "openrouter-key",
+      messages: threadMessages(0, 150),
+    });
+    summarizerReplies(harness, [oversized]);
+
+    await compactAfterTurns(harness, 5);
+
+    expect(harness.runtime.run).toHaveBeenCalledOnce();
     expect(harness.thread.historyCompactedUpToSeq).toBeNull();
   });
 
@@ -942,13 +1338,135 @@ describe("compactHistory", () => {
       yield { type: "text", text: "partial" };
       throw new Error("summarizer unavailable");
     });
+    const sink = installCompactionLogger();
 
-    await expect(compactHistory(harness.deps, "thread-1")).rejects.toThrow(
-      "summarizer unavailable",
-    );
+    try {
+      await expect(compactHistory(harness.deps, "thread-1")).rejects.toThrow(
+        "summarizer unavailable",
+      );
+    } finally {
+      silenceLogger();
+    }
 
     expect(harness.saveMemory).not.toHaveBeenCalled();
     expect(harness.prisma.thread.updateMany).not.toHaveBeenCalled();
+    expect(
+      sink.events.some((event) => event.message === "history.compact failed permanently"),
+    ).toBe(false);
+  });
+
+  it("uses the short summarizer timeout for a small transcript", async () => {
+    const timeout = vi
+      .spyOn(AbortSignal, "timeout")
+      .mockImplementation(() => new AbortController().signal);
+    const harness = compactionHarness({ deploymentModelKey: "openrouter-key" });
+
+    try {
+      await compactHistory(harness.deps, "thread-1");
+      const [request, context] = harness.runtime.run.mock.calls[0]!;
+      expect(request.prompt.length).toBeLessThanOrEqual(SUMMARIZE_TIMEOUT_BASE_CHARS);
+      expect(timeout).toHaveBeenCalledWith(SUMMARIZE_TIMEOUT_MIN_MS);
+      expect(context?.signal).toBe(timeout.mock.results[0]?.value);
+    } finally {
+      timeout.mockRestore();
+    }
+  });
+
+  it("gives a large transcript a longer summarizer timeout, still within the cap", async () => {
+    const timeout = vi
+      .spyOn(AbortSignal, "timeout")
+      .mockImplementation(() => new AbortController().signal);
+    const filler = "x".repeat(1_000);
+    const harness = compactionHarness({
+      deploymentModelKey: "openrouter-key",
+      messages: Array.from({ length: 50 }, (_, i) => ({
+        seq: i,
+        role: "user",
+        blocks: [{ kind: "text", text: `marker-${i} ${filler}` }],
+      })),
+    });
+
+    try {
+      await compactHistory(harness.deps, "thread-1");
+      const prompt = harness.runtime.run.mock.calls[0]![0].prompt;
+      expect(prompt.length).toBeGreaterThan(SUMMARIZE_TIMEOUT_BASE_CHARS);
+      expect(prompt.length).toBeLessThanOrEqual(MAX_TRANSCRIPT_CHARS);
+      const expected = summarizeTimeoutMs(prompt.length);
+      expect(expected).toBeGreaterThan(SUMMARIZE_TIMEOUT_MIN_MS);
+      expect(expected).toBeLessThanOrEqual(SUMMARIZE_TIMEOUT_MAX_MS);
+      expect(timeout).toHaveBeenCalledWith(expected);
+    } finally {
+      timeout.mockRestore();
+    }
+  });
+
+  it("refuses a prompt that cannot finish inside the timeout cap without calling the model", async () => {
+    const harness = compactionHarness({
+      deploymentModelKey: "openrouter-key",
+      historyCompactedUpToSeq: 49,
+      historyCompactionSummary: "<".repeat(MAX_COMPACTED_SUMMARY_CHARS),
+      messages: Array.from({ length: 50 }, (_, i) => ({
+        seq: i + 50,
+        role: "user",
+        blocks: [{ kind: "text", text: `message ${i + 50}` }],
+      })),
+      nextMessageSeq: 100,
+    });
+    const sink = installCompactionLogger();
+
+    try {
+      await compactHistory(harness.deps, "thread-1");
+    } finally {
+      silenceLogger();
+    }
+
+    expect(harness.runtime.run).not.toHaveBeenCalled();
+    expect(harness.prisma.thread.updateMany).not.toHaveBeenCalled();
+    expect(harness.thread.historyCompactedUpToSeq).toBe(49);
+    expect(harness.thread.historyCompactionSummary).toBe("<".repeat(MAX_COMPACTED_SUMMARY_CHARS));
+    const failure = sink.events.find(
+      (event) => event.message === "history.compact failed permanently",
+    );
+    expect(failure).toMatchObject({
+      level: "error",
+      "thread.id": "thread-1",
+      "history.compact.reason": "prompt_exceeds_timeout_budget",
+      "history.compact.retryable": false,
+    });
+    expect(failure?.["history.compact.prompt_chars"]).toBeGreaterThan(MAX_SUMMARIZE_PROMPT_CHARS);
+  });
+
+  it("fails permanently when the next message cannot fit the transcript budget", async () => {
+    const harness = compactionHarness({
+      deploymentModelKey: "openrouter-key",
+      messages: [
+        {
+          seq: 0,
+          role: "user",
+          blocks: [{ kind: "text", text: "x".repeat(MAX_TRANSCRIPT_CHARS + 1) }],
+        },
+      ],
+    });
+    const sink = installCompactionLogger();
+
+    try {
+      await compactHistory(harness.deps, "thread-1");
+    } finally {
+      silenceLogger();
+    }
+
+    expect(harness.runtime.run).not.toHaveBeenCalled();
+    expect(harness.prisma.thread.updateMany).not.toHaveBeenCalled();
+    expect(harness.thread.historyCompactedUpToSeq).toBeNull();
+    expect(sink.events).toContainEqual(
+      expect.objectContaining({
+        level: "error",
+        message: "history.compact failed permanently",
+        "thread.id": "thread-1",
+        "history.compact.reason": "message_exceeds_transcript_budget",
+        "history.compact.retryable": false,
+      }),
+    );
   });
 
   it("keeps local compaction when the optional provider save fails", async () => {

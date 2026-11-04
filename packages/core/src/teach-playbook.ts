@@ -8,7 +8,16 @@ export type TeachRecordingEvent = {
   key?: string;
   text?: string;
   summary?: string;
+  sensitive?: boolean;
 };
+
+export function sanitizeTeachRecordingEvent(event: TeachRecordingEvent): TeachRecordingEvent {
+  if (!event.sensitive) return event;
+  const sanitized = { ...event };
+  delete sanitized.key;
+  delete sanitized.text;
+  return sanitized;
+}
 
 export type TeachSnapshot = {
   at: string;
@@ -46,18 +55,26 @@ function describePointer(event: TeachRecordingEvent): string {
   return `${action === "click" ? "Click" : action} ${button} button at (${event.x ?? 0}, ${event.y ?? 0}).`;
 }
 
-function describeScroll(event: TeachRecordingEvent): string {
-  const direction = event.type === "up" ? "up" : "down";
-  const amount = Number(event.text ?? 3);
-  return Number.isFinite(amount) && amount > 1
-    ? `Scroll ${direction} ${amount} times.`
-    : `Scroll ${direction}.`;
+/** The way a scroll goes; anything else scrolls down. */
+export function scrollDirection(value: unknown): "up" | "down" | "left" | "right" {
+  return value === "up" || value === "left" || value === "right" ? value : "down";
 }
+
+function describeScroll(event: TeachRecordingEvent): string {
+  const direction = scrollDirection(event.type);
+  const amount = Number(event.text ?? 3);
+  const at = event.x !== undefined && event.y !== undefined ? ` at (${event.x}, ${event.y})` : "";
+  return Number.isFinite(amount) && amount > 1
+    ? `Scroll ${direction} ${amount} times${at}.`
+    : `Scroll ${direction}${at}.`;
+}
+
+const REDACTED_INPUT = "[redacted input]";
 
 function redactSensitiveText(text: string): string {
   const trimmed = text.trim();
-  if (/password|secret|token|api[_-]?key/i.test(trimmed)) return "[redacted input]";
-  return trimmed;
+  if (/password|secret|token|api[_-]?key/i.test(trimmed)) return REDACTED_INPUT;
+  return text;
 }
 
 function isTypedCharacter(key: string): boolean {
@@ -71,6 +88,7 @@ export function buildPlaybookFromRecording(
 ): SkillPlaybook {
   const steps: string[] = [];
   let typed = "";
+  let typedSensitive = false;
   let drag: { button: string; fromX: number; fromY: number; toX: number; toY: number } | null =
     null;
 
@@ -79,6 +97,17 @@ export function buildPlaybookFromRecording(
     const text = redactSensitiveText(typed);
     if (text) steps.push(`Type ${JSON.stringify(text)}.`);
     typed = "";
+  }
+
+  function flushSensitiveTyped() {
+    if (!typedSensitive) return;
+    steps.push(`Type ${JSON.stringify(REDACTED_INPUT)}.`);
+    typedSensitive = false;
+  }
+
+  function flushPendingInput() {
+    flushTyped();
+    flushSensitiveTyped();
   }
 
   function flushDrag() {
@@ -94,18 +123,25 @@ export function buildPlaybookFromRecording(
 
   for (const event of events) {
     if (event.kind === "key") {
+      if (event.sensitive) {
+        flushDrag();
+        flushTyped();
+        typedSensitive = true;
+        continue;
+      }
       const key = event.key;
       if (!key) continue;
       flushDrag();
       if (isTypedCharacter(key)) {
+        flushSensitiveTyped();
         typed += key;
         continue;
       }
-      flushTyped();
+      flushPendingInput();
       steps.push(`Press key: ${key}.`);
       continue;
     }
-    flushTyped();
+    flushPendingInput();
     if (event.kind === "pointer") {
       const action = event.type ?? "click";
       const button = event.button ?? "left";
@@ -135,7 +171,11 @@ export function buildPlaybookFromRecording(
       steps.push(describePointer(event));
     } else if (event.kind === "clipboard") {
       flushDrag();
-      const text = event.text ? redactSensitiveText(event.text) : "";
+      const text = event.sensitive
+        ? REDACTED_INPUT
+        : event.text
+          ? redactSensitiveText(event.text)
+          : "";
       if (text) steps.push(`Paste or type: ${text}.`);
     } else if (event.kind === "scroll") {
       flushDrag();
@@ -144,7 +184,7 @@ export function buildPlaybookFromRecording(
       flushDrag();
     }
   }
-  flushTyped();
+  flushPendingInput();
   flushDrag();
 
   if (steps.length === 0) {

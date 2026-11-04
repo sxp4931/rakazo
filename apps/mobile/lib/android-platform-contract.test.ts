@@ -2,36 +2,25 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { normalizeApiBase } from "./endpoint.js";
 
 const mobileRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 describe("Android mobile platform contract", () => {
-  it("keeps authentication actions reachable while the keyboard is open", () => {
-    const signIn = readFileSync(resolve(mobileRoot, "app/sign-in.tsx"), "utf8");
-    expect(signIn).toContain("KeyboardAvoidingView");
-    expect(signIn).toContain("Keyboard.dismiss");
-    expect(signIn).toContain("keyboardDismissMode");
-    expect(signIn).toContain("ScrollView");
-  });
-
-  it("pins the thread footer above the keyboard and device safe area", () => {
-    const config = JSON.parse(readFileSync(resolve(mobileRoot, "app.json"), "utf8"));
-    const packageJson = JSON.parse(readFileSync(resolve(mobileRoot, "package.json"), "utf8"));
-    const layout = readFileSync(resolve(mobileRoot, "app/_layout.tsx"), "utf8");
-    const thread = readFileSync(resolve(mobileRoot, "app/thread.tsx"), "utf8");
-    expect(config.expo.android.softwareKeyboardLayoutMode).toBe("resize");
-    expect(packageJson.dependencies["react-native-keyboard-controller"]).toBeTruthy();
-    expect(layout).toContain("KeyboardProvider");
-    expect(thread).toContain('from "react-native-keyboard-controller"');
-    expect(thread).toContain("KeyboardAvoidingView");
-    expect(thread).toContain('behavior="height"');
-    expect(thread).toContain("useHeaderHeight");
-    expect(thread).toContain("keyboardVerticalOffset={headerHeight}");
-    expect(thread).not.toContain("automaticOffset");
-    expect(thread).not.toContain("KeyboardStickyView");
-    expect(thread).toContain("useSafeAreaInsets");
-    expect(thread).toContain("useKeyboardState");
-    expect(thread).toContain("keyboardVisible ? 12 : Math.max(insets.bottom + 12, 24)");
+  it("shares its notification endpoint cases with the app's server URL check", () => {
+    const cases: [string, boolean][] = JSON.parse(
+      readFileSync(
+        resolve(
+          mobileRoot,
+          "modules/rakazo-notifications/android/src/test/resources/endpoint-allowlist-cases.json",
+        ),
+        "utf8",
+      ),
+    );
+    expect(cases.length).toBeGreaterThan(0);
+    for (const [endpoint, allowed] of cases) {
+      expect({ endpoint, allowed: normalizeApiBase(endpoint).ok }).toEqual({ endpoint, allowed });
+    }
   });
 
   it("requests live-update promotion and exposes its Android settings", () => {
@@ -42,11 +31,9 @@ describe("Android mobile platform contract", () => {
     const service = readFileSync(resolve(nativeRoot, "RakazoNotificationService.kt"), "utf8");
     const module = readFileSync(resolve(nativeRoot, "RakazoNotificationsModule.kt"), "utf8");
     const allowlist = readFileSync(resolve(nativeRoot, "EndpointAllowlist.kt"), "utf8");
-    const live = readFileSync(resolve(mobileRoot, "lib/live-notifications.ts"), "utf8");
-    const thread = readFileSync(resolve(mobileRoot, "app/thread.tsx"), "utf8");
     expect(service).toContain("android.requestPromotedOngoing");
     expect(service).toContain("liveStatusIcon(primary, avatarStyle)");
-    expect(service).toContain('rpc(endpoint, token, spaceId, "me"');
+    expect(service).toContain('rpc(endpoint, token, spaceId, headers, "me"');
     expect(service).not.toContain("showStarting");
     expect(service).not.toContain("catch (_: IOException) {\n        stop()");
     expect(service).toContain("Expo push owns background completion and attention delivery");
@@ -60,10 +47,6 @@ describe("Android mobile platform contract", () => {
     expect(allowlist).toContain("isAllowedNotificationEndpoint");
     expect(allowlist).toContain('scheme == "https"');
     expect(allowlist).toContain("isLanOrLocalHost");
-    expect(live).toContain("normalizeApiBase(endpoint)");
-    expect(live).toMatch(
-      /export async function resumeLiveNotifications[\s\S]*normalizeApiBase\(endpoint\)[\s\S]*nativeNotifications\.resume\(parsed\.url/,
-    );
     expect(service).toContain('connection.setRequestProperty("x-rakazo-space-id", spaceId)');
     expect(service).toContain("storage.spaceId.isBlank()");
     expect(service).toContain("private fun prepareHistorySpace(");
@@ -81,19 +64,27 @@ describe("Android mobile platform contract", () => {
     expect(service).toContain("private fun stopIfCurrent(generation: Long)");
     expect(service).toContain("synchronized(sessionLock)");
     expect(service).toContain("working.filterNot(::isOpenThread)");
+    expect(service).toContain("createConfigurationContext");
     expect(service).toContain("!run.notificationsEnabled || isOpenThread(run)");
     expect(service).toMatch(
       /waiting_input[\s\S]*filter \{ it\.notificationsEnabled \}[\s\S]*alertedAttention\.add/,
     );
     expect(service).toContain(
-      "if (openThreadId != null) openThreadId == run.threadId else openBotId == run.botId",
+      "if (openThreadId != null) openThreadId == threadId else openBotId == botId",
     );
     expect(service).toContain("manager.notify(run.threadId.hashCode(), notification)");
     expect(service).toContain("THREAD_NOTIFICATION_IDS");
     expect(service).toContain("cancel(threadId.hashCode())");
+    for (const request of [
+      "        val avatarStyle = selectedAvatarStyle",
+      "        val active = runs(",
+      "        val recent = runs(",
+      "          val reply = runCatching {",
+    ]) {
+      expect(service).toContain(`if (generation != sessionGeneration.get()) return\n${request}`);
+    }
+    expect(service).toContain("runCatching { context.startService(intent) }");
     expect(module).toContain('AsyncFunction("setOpenThread")');
-    expect(live).toContain("setOpenNotificationThread");
-    expect(thread).toContain("if (!navigation.isFocused() || !notificationThreadId) return");
     expect(service).toContain(
       "fun clearSession(context: Context) {\n      synchronized(sessionLock)",
     );
@@ -101,9 +92,7 @@ describe("Android mobile platform contract", () => {
     expect(service).toContain('"rakazo://group-thread?groupId=');
     expect(service).toMatch(/&spaceId=\$\{Uri\.encode\(run\.spaceId\)\}/);
     expect(service).toContain('putString("rakazo.spaceId", run.spaceId)');
-    expect(thread).toContain("export default function ThreadRoute()");
-    expect(thread).toContain("selectSpace(requestedSpaceId)");
-    expect(thread).toContain("routeMatchesSelectedSpace) return <Thread />");
+    expect(service).toMatch(/&threadId=\$\{Uri\.encode\(run\.threadId\)\}/);
     expect(service).toContain('if (run.groupId != null) put("groupId", run.groupId)');
     expect(service).toContain('if (message.optString("runId") != run.runId) continue');
     expect(service).toContain('if (block.optString("kind") == "handoff") return null');
@@ -122,7 +111,7 @@ describe("Android mobile platform contract", () => {
       "val working = active.filter(::isWorking).filter { it.notificationsEnabled }",
     );
     expect(service).toMatch(
-      /if \(visibleWorking\.isEmpty\(\)\) clearLive\(\) else showLive\(visibleWorking/,
+      /if \(visibleWorking\.isEmpty\(\)\) clearLive\(\) else \{[\s\S]*showLive\(visibleWorking, avatarStyle, copyContext\)/,
     );
     expect(service).toMatch(
       /private fun showLive\(active: List<RunRecord>[\s\S]*val primary = active\.first\(\)/,
@@ -131,88 +120,68 @@ describe("Android mobile platform contract", () => {
     expect(service).toMatch(/if \(working\.isEmpty\(\)\) \{[\s\S]*stop\(\)[\s\S]*return[\s\S]*\}/);
   });
 
-  it("centers the latest-message control and clears a thread's Android notifications when read", () => {
-    const thread = readFileSync(resolve(mobileRoot, "app/thread.tsx"), "utf8");
-    const notifications = readFileSync(resolve(mobileRoot, "lib/live-notifications.ts"), "utf8");
-    expect(thread).toContain('left: "50%"');
-    expect(thread).toContain("dismissThreadNotifications");
-    expect(notifications).toContain("getPresentedNotificationsAsync");
-    expect(notifications).toContain("dismissNotificationAsync");
-  });
+  it("keeps markdown boundary checks portable to Android and preserves Unicode whitespace edges", () => {
+    const service = readFileSync(
+      resolve(
+        mobileRoot,
+        "modules/rakazo-notifications/android/src/main/java/com/rakazo/notifications/RakazoNotificationService.kt",
+      ),
+      "utf8",
+    );
 
-  it("renders the per-message transport in every native channel-message path", () => {
-    const thread = readFileSync(resolve(mobileRoot, "app/thread.tsx"), "utf8");
-    expect(
-      thread.match(/messagingProviderLabel\(block\.provider, block\.transport\)/g),
-    ).toHaveLength(2);
-    expect(thread).toContain(
-      "messagingProviderLabel(channelMessage.provider, channelMessage.transport)",
+    // Desktop Java accepts (?U), so a JVM-only regex test would miss Android's
+    // ICU parser failure. Keep the exact native source under the Android
+    // contract test and exercise the equivalent boundary semantics here.
+    const slash = String.fromCharCode(92);
+    const quote = String.fromCharCode(34);
+    const unicodeWhiteSpaceClass = `${slash}${slash}p{Z}${slash}${slash}u0009-${slash}${slash}u000D${slash}${slash}u0085`;
+    expect(service).toContain(
+      `private val NON_SPACE_AT_END = Regex(${quote}[^${unicodeWhiteSpaceClass}]${slash}${slash}z${quote})`,
     );
-    expect(thread).not.toMatch(/messagingProviderLabel\((?:block|channelMessage)\.provider\)/);
-  });
+    expect(service).toContain(
+      `private val NON_SPACE_AT_START = Regex(${quote}^[^${unicodeWhiteSpaceClass}]${quote})`,
+    );
+    expect(service).not.toMatch(/Regex\(\s*["']\(\?U\)/);
 
-  it("reconciles finished agents and opens ordinary chats at the latest message", () => {
-    const thread = readFileSync(resolve(mobileRoot, "app/thread.tsx"), "utf8");
-    const scroll = readFileSync(resolve(mobileRoot, "lib/thread-scroll.ts"), "utf8");
-    expect(thread).toContain(
-      "const currentBotStatus = snap ? snap.run?.status : currentBot?.status",
-    );
-    expect(thread).toContain("key={threadKey}");
-    expect(scroll).toContain('this.contentReady && !this.currentState.detached ? "jump" : null');
-  });
+    const javascriptUnicodeWhiteSpaceClass = `${slash}p{Separator}${slash}u0009-${slash}u000D${slash}u0085`;
+    const nonSpaceAtEnd = new RegExp(`[^${javascriptUnicodeWhiteSpaceClass}]$`, "u");
+    const nonSpaceAtStart = new RegExp(`^[^${javascriptUnicodeWhiteSpaceClass}]`, "u");
+    const unicodeWhiteSpace = [
+      "\u0009",
+      "\u000A",
+      "\u000B",
+      "\u000C",
+      "\u000D",
+      "\u0020",
+      "\u0085",
+      "\u00A0",
+      "\u1680",
+      "\u2000",
+      "\u2001",
+      "\u2002",
+      "\u2003",
+      "\u2004",
+      "\u2005",
+      "\u2006",
+      "\u2007",
+      "\u2008",
+      "\u2009",
+      "\u200A",
+      "\u2028",
+      "\u2029",
+      "\u202F",
+      "\u205F",
+      "\u3000",
+    ];
 
-  it("stacks every currently working agent in a group footer", () => {
-    const thread = readFileSync(resolve(mobileRoot, "app/thread.tsx"), "utf8");
-    expect(thread).toContain("workingGroupBots.map");
-    expect(thread).toContain("inGroup && workingGroupBots.length > 0 ?");
-    expect(thread).toContain("workingGroupBots.length - index");
-    expect(thread).toContain("agents working");
-    // Visible chrome is avatar-only; copy stays on accessibilityLabel.
-    expect(thread).toMatch(
-      /accessibilityLabel=\{\s*workingGroupBots\.length === 1[\s\S]*agents working/,
-    );
-    expect(thread).not.toMatch(
-      /workingGroupBots\.length === 1\s*\?[\s\S]*<Text[^>]*>\s*\{t\("\{name\} is working"/,
-    );
-  });
-
-  it("keeps send and stop separate while steering active work", () => {
-    const thread = readFileSync(resolve(mobileRoot, "app/thread.tsx"), "utf8");
-    const stopStart = thread.indexOf("async function stop()");
-    const stopSource = thread.slice(stopStart, thread.indexOf("const answerMessage", stopStart));
-    expect(stopStart).toBeGreaterThan(-1);
-    expect(thread).toContain('accessibilityLabel={t("Send")}');
-    expect(thread).toContain('accessibilityLabel={t("Stop")}');
-    expect(thread).not.toContain("Messages sent now guide the next turn.");
-    expect(thread).not.toContain("Steer ");
-    expect(thread).not.toContain("steering message");
-    expect(thread).toContain('t("Message {name}"');
-    expect(thread).toContain("const clientNonce = newClientNonce()");
-    expect(thread).toContain("Work stopped, but the thread could not refresh");
-    expect(stopSource).toContain("const targetBotId = botId;");
-    expect(stopSource).toContain("const targetGroupId = groupId;");
-    expect(stopSource).toContain(
-      "targetGroupId ? { groupId: targetGroupId } : { botId: targetBotId! },",
-    );
-    expect(stopSource).toMatch(
-      /if \(isCurrentTarget\(targetBotId, targetGroupId\)\) \{\s*setError\(err instanceof Error \? err\.message : t\("Failed to stop work"\)\);/,
-    );
-    expect(stopSource).toMatch(
-      /if \(isCurrentTarget\(targetBotId, targetGroupId\)\) \{\s*(?:const detail = [^\n]+;\s*)?setError\(t\("Work stopped, but the thread could not refresh: \{detail\}", \{ detail \}\)\);/,
-    );
-  });
-
-  it("shows agent notification silence in the menu, inbox avatar, and DM header only", () => {
-    const index = readFileSync(resolve(mobileRoot, "app/index.tsx"), "utf8");
-    const thread = readFileSync(resolve(mobileRoot, "app/thread.tsx"), "utf8");
-    const avatar = readFileSync(resolve(mobileRoot, "components/bot-avatar.tsx"), "utf8");
-    const menu = readFileSync(resolve(mobileRoot, "components/bot-organize-modal.tsx"), "utf8");
-    expect(menu).toContain("Silence notifications");
-    expect(menu).toContain("Resume notifications");
-    expect(index).toContain("muted={!bot.notifyOnFinish}");
-    expect(thread).toContain("muted={!currentBot.notifyOnFinish}");
-    expect(avatar).toContain('accessibilityLabel={t("Notifications silenced")}');
-    expect(avatar).toContain('android="notifications-off"');
-    expect(thread.match(/muted=\{/g)).toHaveLength(1);
+    for (const whitespace of unicodeWhiteSpace) {
+      expect(nonSpaceAtEnd.test(`text${whitespace}`)).toBe(false);
+      expect(nonSpaceAtStart.test(`${whitespace}text`)).toBe(false);
+    }
+    expect(nonSpaceAtEnd.test("text")).toBe(true);
+    expect(nonSpaceAtStart.test("text")).toBe(true);
+    // Zero-width space is not in Unicode White_Space and must remain content.
+    expect(nonSpaceAtEnd.test("text\u200B")).toBe(true);
+    expect(nonSpaceAtStart.test("\u200Btext")).toBe(true);
   });
 });

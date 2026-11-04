@@ -12,27 +12,29 @@ overwrite an existing `.env` without an explicit backup and operator consent.**
 
 | Key | Installer fill | Role |
 | --- | --- | --- |
-| `POSTGRES_PASSWORD` | `openssl rand -hex 16` | Postgres role password inside Compose |
+| `POSTGRES_PASSWORD` | `openssl rand -hex 16` | Postgres owner password inside Compose (migrations) |
+| `POSTGRES_APP_PASSWORD` | `openssl rand -hex 16` | Password of the app's `rakazo_app` login, which row-level security applies to |
 | `BETTER_AUTH_SECRET` | `openssl rand -hex 32` | Auth/session signing |
 | `ENCRYPTION_KEY` | `openssl rand -hex 32` | Encrypts stored credentials at rest |
 | `SCREEN_PROXY_SECRET` | `openssl rand -hex 32` | Signs short-lived `/novnc/*` screen capabilities |
 | `SANDBOX_SUPERVISOR_TOKEN` | `openssl rand -hex 32` | API ↔ sandbox supervisor auth |
 
-Re-runs **preserve** an existing `.env` (they do not rotate secrets). Empty
+Re-runs **preserve** an existing `.env` (they do not rotate secrets); they only append
+`POSTGRES_APP_PASSWORD` when an older `.env` lacks it. Empty
 required keys still fail closed at Compose validate time
 (`${VAR:?Set … in .env}`).
 
 Manual generation (same shapes the installer uses):
 
 ```bash
-openssl rand -hex 16   # POSTGRES_PASSWORD
+openssl rand -hex 16   # POSTGRES_PASSWORD, POSTGRES_APP_PASSWORD
 openssl rand -hex 32   # BETTER_AUTH_SECRET, ENCRYPTION_KEY, SCREEN_PROXY_SECRET, SANDBOX_SUPERVISOR_TOKEN
 ```
 
-Source-checkout `.env.example` also requires `POSTGRES_PASSWORD` (same
-`openssl rand -hex 16` shape) for `infra/compose/docker-compose.yml`. Put the
-same value in host-side `DATABASE_URL` when using the optional
-`docker-compose.postgres-host.yml` overlay. Keep the password URI-safe: Compose
+Source-checkout `.env.example` also requires `POSTGRES_PASSWORD` and
+`POSTGRES_APP_PASSWORD` (same `openssl rand -hex 16` shape) for
+`infra/compose/docker-compose.yml`. Put them in host-side `DATABASE_MIGRATION_URL`
+and `DATABASE_URL` when using the optional `docker-compose.postgres-host.yml` overlay. Keep the password URI-safe: Compose
 interpolates it into `DATABASE_URL` the same way the images stack does. Hex from
 `openssl rand` is safe; characters such as `@ : / ? # %` are not.
 
@@ -63,6 +65,17 @@ Rotating `ENCRYPTION_KEY` after credentials were stored makes old ciphertext
 unreadable. Keep the original key for an existing deployment unless you
 intentionally wipe encrypted material.
 
+`ENCRYPTION_KEY` also derives the default master key for chat, memory and file
+encryption, so changing it also makes that content unreadable. To move content
+off it, set `ENCRYPTION_MASTER_KEYS` and run the rotation in
+[content-encryption.md](content-encryption.md), which re-wraps the space keys
+without stranding content. Keep `ENCRYPTION_KEY` unchanged afterwards: stored
+credentials still depend on it.
+
+With `MASTER_KEY_PROVIDER=aws-kms`, these and the other API and worker
+secrets can be kept in `.env` wrapped by the key manager instead of in
+plaintext ([wrapped settings](content-encryption.md#wrapped-settings)).
+
 ## Optional keys (leave blank if unused)
 
 From `.env.images.example` (images installer). Leave blank if unused:
@@ -72,9 +85,13 @@ From `.env.images.example` (images installer). Leave blank if unused:
 | `OPENROUTER_API_KEY` | Deployment-wide OpenRouter models |
 | `TYPESAFE_API_KEY` | Optional TypeSafe Jev Auto Review verifier (`RAKAZO_AUTO_REVIEW_PROVIDER=jev`) |
 | `COMPOSIO_API_KEY` | Composio managed catalog |
-| `E2B_API_KEY` / `DAYTONA_API_KEY` / `BOX_API_KEY` | Remote computers when `SANDBOX_PROVIDER` is not `docker` |
-| `SMTP_URL` / `EMAIL_FROM` | Password-recovery email |
+| `E2B_API_KEY` / `DAYTONA_API_KEY` / `BOAT_API_KEY` | Remote computers when `SANDBOX_PROVIDER` is not `docker` |
+| `EMAIL_PROVIDER` / `EMAIL_API_KEY` / `SMTP_URL` / `EMAIL_FROM` | Optional account email via Resend API or SMTP |
+| `EXPO_ACCESS_TOKEN` | Mobile push when the Expo project enables enhanced push security |
 | Messaging tokens (Slack, Telegram, …) | Only if you enable those surfaces |
+
+Optional `APNS_VOIP_KEY_ID`, `APNS_VOIP_TEAM_ID`, and `APNS_VOIP_PRIVATE_KEY` enable
+[iOS VoIP ringing](./self-host-clients.md#mobile-incoming-calls). Keep the `.p8` contents in the secret manager.
 
 Blank optional keys are normal for a minimal published-images boot. Pipedream
 Connect keys appear only in source/Compose `.env.example`, not the images
@@ -86,10 +103,10 @@ example.
 bash install-images.sh --prepare-only   # creates .env + fills empties
 # inspect key NAMES only if debugging; never log values
 bash install-images.sh                  # pull + up; preserves .env
-curl -fsS http://127.0.0.1:3100/health
+curl -fsS http://127.0.0.1:3100/internal/health
 ```
 
-If `sandbox` in `/health` is `"none"` or the supervisor never becomes healthy,
+If `sandbox` in `/internal/health` is `"none"` or the supervisor never becomes healthy,
 check that `SANDBOX_SUPERVISOR_TOKEN` is set and non-empty for the Docker
 computer path. A missing token is a setup failure, not an "optional tighten
 later" item.
@@ -107,3 +124,10 @@ later" item.
 ## Related
 
 - [Self-hosting](./self-host.md)
+- [Configuration](./self-host-configuration.md)
+- [Storage and encryption](./self-host-storage.md)
+
+## Optional credential storage
+
+Stored credentials can use self-hosted Infisical while short-lived secrets stay
+encrypted in Postgres. See [Infisical setup, migration, and rollback](./infisical-secrets.md).

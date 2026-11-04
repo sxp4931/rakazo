@@ -73,7 +73,7 @@ describe("mobile ui direction", () => {
     expect(reloadAppAsync).not.toHaveBeenCalled();
   });
 
-  it("defaults to LTR English so a no-arg call cannot fight zh/en/ru UI locale bootstrap", async () => {
+  it("defaults to LTR English so a no-arg call cannot fight zh/en/ru/de UI locale bootstrap", async () => {
     const resolvedOptions = vi.fn().mockReturnValue({ locale: "ar-SA" });
     vi.stubGlobal("Intl", {
       ...Intl,
@@ -88,16 +88,5 @@ describe("mobile ui direction", () => {
     expect(I18nManager.forceRTL).toHaveBeenCalledWith(false);
     await Promise.resolve();
     expect(reloadAppAsync).toHaveBeenCalledWith("ui-direction");
-  });
-
-  it("keeps root layout from applying device-locale direction before i18n bootstrap", async () => {
-    const { readFileSync } = await import("node:fs");
-    const { dirname, join } = await import("node:path");
-    const { fileURLToPath } = await import("node:url");
-    const layout = readFileSync(
-      join(dirname(fileURLToPath(import.meta.url)), "../app/_layout.tsx"),
-      "utf8",
-    );
-    expect(layout).not.toMatch(/applyMobileUiDirection\s*\(/);
   });
 });

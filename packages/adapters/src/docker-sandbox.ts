@@ -15,8 +15,15 @@ import type {
   SandboxProvider,
   ScreenRequest,
   ScreenSession,
+  TerminalRequest,
 } from "@rakazo/adapter-kit";
-import { boundedSandboxCommandTimeoutMs, resolveSupervisorToken } from "@rakazo/core";
+import { INVALID_BROWSER_REQUEST, SandboxRequestRejectedError } from "@rakazo/adapter-kit";
+import {
+  boundedSandboxCommandTimeoutMs,
+  cancelResponseBody,
+  requestDeadline,
+  resolveSupervisorToken,
+} from "@rakazo/core";
 import { outgoingCorrelationHeaders } from "@rakazo/logging";
 import {
   boundedComputerActions,
@@ -24,7 +31,9 @@ import {
   computerObservation,
   normalizeWorkspacePath,
 } from "./computer-support.js";
+import { sandboxCommandArgv } from "./sandbox-command-environment.js";
 import { readBodyCapped, withAbort } from "./web-ssrf.js";
+import { shouldSkipPortableWorkspaceFile } from "./workspace-save-policy.js";
 
 export const MAX_SANDBOX_ERROR_RESPONSE_BYTES = 8 * 1024;
 export const MAX_SANDBOX_SUCCESS_RESPONSE_BYTES = 16 * 1024 * 1024;
@@ -46,14 +55,6 @@ async function safeBody(res: Response, signal?: AbortSignal): Promise<string> {
     return new TextDecoder().decode(bytes).slice(0, 200);
   } catch {
     return "";
-  }
-}
-
-function cancelResponseBody(res: Response): void {
-  try {
-    void Promise.resolve(res.body?.cancel()).catch(() => undefined);
-  } catch {
-    // Error diagnostics are best-effort and must not delay the operation failure.
   }
 }
 
@@ -163,14 +164,23 @@ export class DockerSandboxProvider implements SandboxProvider {
       }
       throw new Error(`sandbox provision failed: ${res.status} ${detail}`.trim());
     }
-    const body = await readSandboxJson<{ id: string; resumed?: boolean }>(res, context.signal);
+    const body = await readSandboxJson<{ id: string; resumed?: boolean; started?: boolean }>(
+      res,
+      context.signal,
+    );
     return {
       id: body.id,
       botId: request.botId,
       kind: "docker",
       providerRef: body.id,
       fresh: body.resumed !== true,
+      ...(body.started === true ? { started: true } : {}),
     };
+  }
+
+  async isRunning(computer: ComputerRef, context: AdapterContext): Promise<boolean> {
+    if (computer.kind !== "docker") return false;
+    return (await this.containerRunning(computer, context)) === true;
   }
 
   async prepare(_computer: ComputerRef, _context: AdapterContext): Promise<void> {}
@@ -180,25 +190,47 @@ export class DockerSandboxProvider implements SandboxProvider {
     request: CommandRequest,
     context: AdapterContext,
   ): AsyncIterable<ProcessEvent> {
+    const timeoutMs = boundedSandboxCommandTimeoutMs(request.timeoutMs);
     const res = await fetch(this.url(`/computers/${computer.id}/exec`), {
       method: "POST",
       headers: { ...this.headers(context, computer.botId), "content-type": "application/json" },
       body: JSON.stringify({
         ...request,
+        argv: sandboxCommandArgv(request),
         cwd: dockerCwd(request.cwd),
-        timeoutMs: boundedSandboxCommandTimeoutMs(request.timeoutMs),
+        timeoutMs,
       }),
       signal: context.signal,
     });
     if (!res.ok) {
+      cancelResponseBody(res);
+      // A stopped container cannot run anything; report it gone so the computer is booted again.
+      if ((await this.containerRunning(computer, context)) === false) {
+        throw sandboxGoneError(computer);
+      }
       yield { type: "stderr", data: `exec failed: ${res.status}` };
       yield { type: "exit", code: 1 };
+      return;
+    }
+    const contentType = res.headers.get("content-type") ?? "";
+    if (contentType.includes("ndjson")) {
+      // The command may keep running after the first bytes (device-code logins).
+      // Don't apply the short JSON body timeout; the server enforces timeoutMs.
+      const streamSignal = AbortSignal.any([
+        context.signal,
+        AbortSignal.timeout(timeoutMs + 15_000),
+      ]);
+      yield* readNdjsonProcessEvents(res, streamSignal);
       return;
     }
     const body = await readSandboxJson<{ stdout: string; stderr: string; code: number }>(
       res,
       context.signal,
     );
+    // The supervisor answers a missing container with Docker's 404 as the command's stderr.
+    if (body.code !== 0 && /no such container/i.test(body.stderr)) {
+      throw sandboxGoneError(computer);
+    }
     if (body.stdout) yield { type: "stdout", data: body.stdout };
     if (body.stderr) yield { type: "stderr", data: body.stderr };
     yield { type: "exit", code: body.code };
@@ -216,7 +248,16 @@ export class DockerSandboxProvider implements SandboxProvider {
       redirect: "error",
       signal: context.signal,
     });
-    if (!res.ok) throw new Error(`page browser failed: ${res.status}`);
+    if (!res.ok) {
+      // Only the supervisor's own refusal of a malformed request proves nothing ran.
+      if (res.status === 400) {
+        const refused = await readSandboxJson<{ code?: unknown }>(res, context.signal, 4096).catch(
+          () => undefined,
+        );
+        if (refused?.code === INVALID_BROWSER_REQUEST) throw new SandboxRequestRejectedError();
+      }
+      throw new Error(`page browser failed: ${res.status}`);
+    }
     return readSandboxJson<PageBrowserResult>(res, context.signal, 512 * 1024);
   }
 
@@ -225,6 +266,9 @@ export class DockerSandboxProvider implements SandboxProvider {
     request: ScreenRequest,
     context: AdapterContext,
   ): Promise<ScreenSession> {
+    if (request.interactive && !request.controlToken) {
+      throw new Error("interactive screen requires a control token");
+    }
     const res = await fetch(this.url(`/computers/${computer.id}/screen-mode`), {
       method: "POST",
       headers: { ...this.headers(context, computer.botId), "content-type": "application/json" },
@@ -245,14 +289,35 @@ export class DockerSandboxProvider implements SandboxProvider {
       if ((await this.containerRunning(computer, context)) === false) {
         throw sandboxGoneError(computer);
       }
+      if (request.interactive) {
+        throw new Error(`sandbox screen mode failed: ${res.status} ${detail}`.trim());
+      }
       return { url: null, mimeType: "text/html", close: async () => undefined };
     }
     const body = await readSandboxJson<{ screenUrl?: string }>(res, context.signal);
+    if (request.interactive && !body.screenUrl) {
+      throw new Error("control screen failed to start");
+    }
     return {
       url: body.screenUrl ?? this.url(`/computers/${computer.id}/screen`),
       mimeType: "text/html",
       close: async () => undefined,
     };
+  }
+
+  async connectTerminal(computer: ComputerRef, request: TerminalRequest, context: AdapterContext) {
+    const res = await fetch(this.url(`/computers/${computer.id}/terminal`), {
+      method: "POST",
+      headers: { ...this.headers(context, computer.botId), "content-type": "application/json" },
+      body: JSON.stringify({ controlToken: request.controlToken, cwd: request.cwd ?? "" }),
+      signal: context.signal,
+    });
+    if (!res.ok) {
+      const detail = await safeBody(res, context.signal);
+      throw new Error(`sandbox terminal failed: ${res.status} ${detail}`.trim());
+    }
+    const body = await readSandboxJson<{ terminalUrl: string }>(res, context.signal);
+    return { url: body.terminalUrl };
   }
 
   async setScreenControl(
@@ -269,6 +334,10 @@ export class DockerSandboxProvider implements SandboxProvider {
     });
     if (!res.ok) {
       const detail = await safeBody(res, context.signal);
+      // A deleted Docker container is reported by the supervisor as a 400
+      // containing Docker's 404. Preserve the gone signal so lease cleanup can
+      // clear the stale providerRef instead of retrying the same dead container.
+      if (/no such container/i.test(detail)) throw sandboxGoneError(computer);
       if ((await this.containerRunning(computer, context)) === false) {
         // The screen died with its container: a revoke has nothing left to release, while
         // an interactive grant needs the computer booted first.
@@ -454,7 +523,10 @@ export class DockerSandboxProvider implements SandboxProvider {
     files: AsyncIterable<PortableFile>,
     context: AdapterContext,
   ) {
-    for await (const file of files) await this.writeFile(computer, file, context);
+    for await (const file of files) {
+      if (shouldSkipPortableWorkspaceFile(file.path)) continue;
+      await this.writeFile(computer, file, context);
+    }
   }
 
   async snapshot(computer: ComputerRef, _context: AdapterContext) {
@@ -469,14 +541,22 @@ export class DockerSandboxProvider implements SandboxProvider {
       const res = await withAbort(
         fetch(this.url(`/computers/${computer.id}/screen`), {
           method: "DELETE",
-          headers: this.headers(context, computer.botId),
+          headers: {
+            ...this.headers(context, computer.botId),
+            ...(context.keepScreenWarm && !context.cancelRunWork && !context.signal.aborted
+              ? { "x-rakazo-preserve-screen": "1" }
+              : {}),
+          },
           signal: deadline.signal,
         }),
         deadline.signal,
       );
-      if (!res.ok && res.status !== 404) {
-        throw new Error(`sandbox screen release failed: ${res.status}`);
-      }
+      if (res.ok) return;
+      const body = await safeBody(res, deadline.signal);
+      // 404 is only an already-missing computer. A teardown failure, including
+      // one wrongly labeled 404, must stay a release failure.
+      if (res.status === 404 && body.includes("computer not found")) return;
+      throw new Error(`sandbox screen release failed: ${res.status} ${body}`.trim());
     } finally {
       deadline.dispose();
     }
@@ -502,11 +582,11 @@ export class DockerSandboxProvider implements SandboxProvider {
       headers: this.headers(context, computer.botId),
       signal: context.signal,
     });
-    if (!res.ok && res.status !== 404) {
-      throw new Error(
-        `sandbox destroy failed: ${res.status} ${await safeBody(res, context.signal)}`.trim(),
-      );
-    }
+    if (res.ok) return;
+    const body = await safeBody(res, context.signal);
+    // Only the supervisor's missing-computer answer means already deleted.
+    if (res.status === 404 && body.includes("computer not found")) return;
+    throw new Error(`sandbox destroy failed: ${res.status} ${body}`.trim());
   }
 
   private async *walkWorkspace(
@@ -514,7 +594,9 @@ export class DockerSandboxProvider implements SandboxProvider {
     directory: string,
     context: AdapterContext,
   ): AsyncIterable<PortableFile> {
-    const entries = await this.listFiles(computer, directory, context);
+    const entries = (await this.listFiles(computer, directory, context)).filter(
+      (entry) => !shouldSkipPortableWorkspaceFile(entry.path, entry.kind === "dir"),
+    );
     for (let index = 0; index < entries.length; ) {
       const entry = entries[index]!;
       if (entry.kind === "dir") {
@@ -539,15 +621,86 @@ export class DockerSandboxProvider implements SandboxProvider {
   }
 }
 
-function requestDeadline(timeoutMs: number, message: string) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(new Error(message)), timeoutMs);
-  return {
-    signal: controller.signal,
-    dispose() {
-      clearTimeout(timer);
-    },
-  };
+async function* readNdjsonProcessEvents(
+  res: Response,
+  signal: AbortSignal,
+): AsyncIterable<ProcessEvent> {
+  const reader = res.body?.getReader();
+  if (!reader) {
+    yield { type: "stderr", data: "exec failed: empty response\n" };
+    yield { type: "exit", code: 1 };
+    return;
+  }
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let bytes = 0;
+  let sawExit = false;
+  try {
+    while (!sawExit) {
+      if (signal.aborted) throw signal.reason ?? new Error("command aborted");
+      const { done, value } = await withAbort(reader.read(), signal);
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > MAX_SANDBOX_SUCCESS_RESPONSE_BYTES) {
+        yield { type: "stderr", data: "exec failed: response too large\n" };
+        yield { type: "exit", code: 1 };
+        return;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      const parsed = takeProcessLines(buffer);
+      buffer = parsed.rest;
+      for (const event of parsed.events) {
+        if (event.type === "exit") sawExit = true;
+        yield event;
+      }
+    }
+    buffer += decoder.decode();
+    if (!sawExit && buffer.trim()) {
+      const parsed = takeProcessLines(`${buffer}\n`);
+      for (const event of parsed.events) {
+        if (event.type === "exit") sawExit = true;
+        yield event;
+      }
+    }
+    if (!sawExit) yield { type: "exit", code: 1 };
+  } finally {
+    void reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+  }
+}
+
+function takeProcessLines(buffer: string): { events: ProcessEvent[]; rest: string } {
+  const lines = buffer.split("\n");
+  const rest = lines.pop() ?? "";
+  const events: ProcessEvent[] = [];
+  for (const line of lines) {
+    const event = parseProcessLine(line);
+    if (event) events.push(event);
+  }
+  return { events, rest };
+}
+
+function parseProcessLine(line: string): ProcessEvent | undefined {
+  const trimmed = line.trim();
+  if (!trimmed) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return { type: "stderr", data: `${trimmed}\n` };
+  }
+  if (!parsed || typeof parsed !== "object") return undefined;
+  const record = parsed as { type?: unknown; data?: unknown; code?: unknown };
+  if (record.type === "stdout" && typeof record.data === "string") {
+    return { type: "stdout", data: record.data };
+  }
+  if (record.type === "stderr" && typeof record.data === "string") {
+    return { type: "stderr", data: record.data };
+  }
+  if (record.type === "exit" && typeof record.code === "number" && Number.isFinite(record.code)) {
+    return { type: "exit", code: record.code };
+  }
+  return undefined;
 }
 
 function dockerCwd(cwd: string | undefined) {

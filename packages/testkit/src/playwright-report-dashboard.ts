@@ -1,5 +1,5 @@
 const MAX_HISTORY_LENGTH = 100;
-export const MAX_PLAYWRIGHT_SCREENSHOT_COUNT = 300;
+export const MAX_PLAYWRIGHT_SCREENSHOT_COUNT = 1_000;
 export const MAX_PLAYWRIGHT_SCREENSHOT_BYTES = 250 * 1024 * 1024;
 const SHARED_PAGE_STYLES = `
     :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; background: #09090b; color: #fafafa; }
@@ -43,7 +43,8 @@ export type PlaywrightScreenshot = {
 export type PlaywrightScreenshotManifest = {
   attempt?: number;
   id?: string;
-  screenshots: PlaywrightScreenshotMetadata[];
+  // Older manifests predate fileName; it lets agents link a run's images.
+  screenshots: Array<PlaywrightScreenshotMetadata & { fileName?: string }>;
   version: 1;
 };
 
@@ -85,8 +86,9 @@ export function createScreenshotManifest(
 ): PlaywrightScreenshotManifest {
   return {
     ...(run === undefined ? {} : { attempt: run.attempt, id: run.id }),
-    screenshots: screenshots.map(({ captureType, hash, source, testId, title }) => ({
+    screenshots: screenshots.map(({ captureType, fileName, hash, source, testId, title }) => ({
       captureType,
+      fileName,
       hash,
       source,
       testId,
@@ -153,7 +155,7 @@ export function shouldPublishStableMainBaseline(input: {
 }): boolean {
   const history = Array.isArray(input.history) ? input.history.filter(isPlaywrightRun) : [];
   const latestMain = history.find(
-    (run) => run.event === "push" && run.branch === "main" && run.result === "success",
+    (run) => run.event !== "pull_request" && run.branch === "main" && run.result === "success",
   );
   if (
     latestMain === undefined ||

@@ -1,8 +1,23 @@
 import type { MessageBlock, ThreadMessage, ThreadMessagePage } from "@rakazo/contracts";
-import { isPeerReceiptBlocks } from "@rakazo/core";
+import { MessageBlock as MessageBlockSchema } from "@rakazo/contracts";
+import {
+  BACKGROUND_RUN_TRIGGERS,
+  callIdFromClientNonce,
+  isBackgroundInputBlock,
+  isBackgroundRunTrigger,
+  isPeerReceiptBlocks,
+} from "@rakazo/core";
+import { messageReplyPreview } from "@rakazo/core/message-quote";
 import type { Prisma, PrismaClient } from "@rakazo/db";
 
 type MessageDb = PrismaClient | Prisma.TransactionClient;
+
+const replySelection = {
+  threadId: true,
+  role: true,
+  botId: true,
+  blocks: true,
+} as const;
 
 export async function loadMessagePage(
   prisma: MessageDb,
@@ -30,19 +45,23 @@ export async function loadMessagePage(
         where: { threadId, seq: { gte: minSeq, lte: maxSeq } },
         orderBy: { seq: "asc" },
         take: pageSize,
+        include: { replyTo: { select: replySelection } },
       });
+      const truncated = rows.length >= pageSize;
+      const coveredThroughSeq = truncated ? (rows[rows.length - 1]?.seq ?? maxSeq) : maxSeq;
       const first = rows[0];
       const hasOlder = first
         ? (await prisma.message.count({ where: { threadId, seq: { lt: first.seq } } })) > 0
         : false;
-      // Peer text/activity stays out of the normal transcript (including the
-      // around target). Receipts remain via withoutPeerRunMessages; full peer
-      // history belongs in the bot-messages overlay (includePeerRuns).
+      // Peer activity stays out of the normal transcript (including the
+      // around target). Full peer history belongs in the bot-messages overlay
+      // (includePeerRuns).
       const messages = includePeerRuns ? rows : await withoutPeerRunMessages(prisma, rows);
       return {
         threadId,
         messages: messages.map(toThreadMessage),
         olderCursor: hasOlder ? (first?.seq ?? null) : null,
+        coveredThroughSeq,
       };
     }
   }
@@ -56,6 +75,7 @@ export async function loadMessagePage(
       },
       orderBy: { seq: "desc" },
       take: pageSize + 1,
+      include: { replyTo: { select: replySelection } },
     });
     const hasOlder = rows.length > pageSize;
     const pageRows = rows.slice(0, pageSize).reverse();
@@ -93,27 +113,46 @@ export async function loadAllMessages(
   return pages.reverse().flat();
 }
 
-async function withoutPeerRunMessages<T extends { runId: string | null; blocks: Prisma.JsonValue }>(
-  prisma: MessageDb,
-  rows: T[],
-): Promise<T[]> {
+async function withoutPeerRunMessages<
+  T extends {
+    runId: string | null;
+    blocks: Prisma.JsonValue;
+  },
+>(prisma: MessageDb, rows: T[]): Promise<T[]> {
   const runIds = [...new Set(rows.flatMap((row) => (row.runId ? [row.runId] : [])))];
   if (runIds.length === 0) return rows;
-  const peerRuns = await prisma.run.findMany({
-    where: { id: { in: runIds }, trigger: "bot_message" },
-    select: { id: true },
+  const runs = await prisma.run.findMany({
+    where: {
+      id: { in: runIds },
+      trigger: { in: ["bot_message", ...BACKGROUND_RUN_TRIGGERS] },
+    },
+    select: { id: true, trigger: true },
   });
-  const peerRunIds = new Set(peerRuns.map((run) => run.id));
+  const backgroundRunIds = new Set(
+    runs.filter((run) => isBackgroundRunTrigger(run.trigger)).map((r) => r.id),
+  );
+  const peerRunIds = new Set(
+    runs.filter((run) => !backgroundRunIds.has(run.id)).map((run) => run.id),
+  );
   return rows.filter((row) => {
-    if (!row.runId || !peerRunIds.has(row.runId)) return true;
-    // Keep peer receipts (chips), ask cards, and the bot's own text reply.
+    if (!row.runId) return true;
     const blocks = row.blocks as MessageBlock[];
+    if (backgroundRunIds.has(row.runId)) {
+      // Ticket work stays off the transcript except existing user-input cards.
+      return blocks.some(isBackgroundInputBlock);
+    }
+    if (!peerRunIds.has(row.runId)) return true;
+    // Keep peer receipts (chips), ask cards, and the bot's text, chart, page or attachment reply.
     return blocks.some(
       (block) =>
         block.kind === "bot_message_sent" ||
         block.kind === "bot_message_received" ||
         block.kind === "ask" ||
-        block.kind === "text",
+        block.kind === "text" ||
+        block.kind === "chart" ||
+        block.kind === "file" ||
+        block.kind === "image" ||
+        block.kind === "page",
     );
   });
 }
@@ -134,7 +173,23 @@ export async function isPeerRun(
   return peerRun;
 }
 
-/** Peer-run SSE events that must still reach an open thread (terminals, waits, receipts, asks, text). */
+export async function isBackgroundRun(
+  prisma: MessageDb,
+  runId: string | undefined,
+  cache: Map<string, Promise<boolean>>,
+): Promise<boolean> {
+  if (!runId) return false;
+  let backgroundRun = cache.get(runId);
+  if (!backgroundRun) {
+    backgroundRun = prisma.run
+      .findUnique({ where: { id: runId }, select: { trigger: true } })
+      .then((run) => isBackgroundRunTrigger(run?.trigger));
+    cache.set(runId, backgroundRun);
+  }
+  return backgroundRun;
+}
+
+/** Peer-run SSE events that must still reach an open thread (terminals, waits, receipts, asks, text, charts, attachments). */
 export function shouldForwardPeerThreadEvent(event: {
   type: string;
   payload: { blocks?: unknown };
@@ -162,9 +217,39 @@ export function shouldForwardPeerThreadEvent(event: {
         (block.kind === "bot_message_received" ||
           block.kind === "bot_message_sent" ||
           block.kind === "ask" ||
-          block.kind === "text"),
+          block.kind === "text" ||
+          block.kind === "chart" ||
+          block.kind === "file" ||
+          block.kind === "image" ||
+          block.kind === "page"),
     )
   );
+}
+
+/**
+ * A background run's chatter stays off the transcript: no starts, progress, steps,
+ * or final text. An open thread still receives the state it needs to answer without
+ * a reload — waiting input, computer takeover, and terminal run events — plus the
+ * existing user-input cards.
+ */
+export function shouldForwardBackgroundThreadEvent(event: {
+  type: string;
+  payload: { blocks?: unknown };
+}): boolean {
+  if (
+    event.type === "run.completed" ||
+    event.type === "run.failed" ||
+    event.type === "run.cancelled" ||
+    event.type === "run.waiting_input" ||
+    event.type === "computer.takeover.requested"
+  ) {
+    return true;
+  }
+  if (event.type !== "thread.message.created" && event.type !== "thread.message.updated") {
+    return false;
+  }
+  const blocks = event.payload.blocks;
+  return Array.isArray(blocks) && blocks.some(isBackgroundInputBlock);
 }
 
 function toThreadMessage(row: {
@@ -176,9 +261,28 @@ function toThreadMessage(row: {
   botId: string | null;
   replyToMessageId: string | null;
   replyQuote: string | null;
+  replyTo?: {
+    threadId: string;
+    role: string;
+    botId: string | null;
+    blocks: Prisma.JsonValue;
+  } | null;
   runId: string | null;
+  clientNonce?: string | null;
   createdAt: Date;
 }): ThreadMessage {
+  const parent = row.replyTo?.threadId === row.threadId ? row.replyTo : null;
+  const parsed = parent ? MessageBlockSchema.array().safeParse(parent.blocks) : undefined;
+  const replyPreview =
+    parent && parsed?.success
+      ? messageReplyPreview(
+          parsed.data,
+          parent.role as ThreadMessage["role"],
+          parent.botId ?? undefined,
+        )
+      : row.replyToMessageId || row.replyQuote != null
+        ? null
+        : undefined;
   return {
     id: row.id,
     threadId: row.threadId,
@@ -188,7 +292,9 @@ function toThreadMessage(row: {
     botId: row.botId ?? undefined,
     replyToMessageId: row.replyToMessageId ?? undefined,
     replyQuote: row.replyQuote ?? undefined,
+    replyPreview,
     runId: row.runId ?? undefined,
+    callId: callIdFromClientNonce(row.clientNonce),
     createdAt: row.createdAt.toISOString(),
   };
 }

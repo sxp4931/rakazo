@@ -9,6 +9,7 @@ export type DemoMessage =
   | { type: "user"; text: string }
   | { type: "bot"; text: string }
   | { type: "typing" }
+  | { type: "computer"; text: string }
   | { type: "card"; lines: DemoCardLine[] };
 
 export type DemoRoutine = {
@@ -112,6 +113,7 @@ export const DEMO_BOTS: DemoBot[] = [
         type: "bot",
         text: "understood. i will research, score, and draft. everything lands in a review list at 6am.",
       },
+      { type: "computer", text: "Scoring the list in HubSpot." },
       { type: "meta", text: "Created routine ◷ Overnight sourcing" },
       { type: "time", text: "3:10 AM" },
       {
@@ -151,6 +153,7 @@ export const DEMO_BOTS: DemoBot[] = [
         type: "bot",
         text: "on it. 41 unread since friday. archiving the noise, drafting the rest.",
       },
+      { type: "computer", text: "Sweeping Gmail back to friday." },
       { type: "time", text: "12:11 AM" },
       {
         type: "card",
@@ -304,56 +307,5 @@ export const DEMO_BOTS: DemoBot[] = [
       },
     ],
     reply: "i will reproduce it and attach the steps to the issue.",
-  },
-];
-
-export const DEMO_ROSTER: RosterBot[] = [
-  {
-    name: "Sales Outbound",
-    color: "#F5A03C",
-    slug: "rakazo/sales-outbound",
-    desc: "Researches accounts overnight, scores intent, drafts in your voice, leaves a review list.",
-  },
-  {
-    name: "Inbox Manager",
-    color: "#6A6BF5",
-    slug: "rakazo/inbox-manager",
-    desc: "Archives the noise, replies to routine threads, parks drafts that need your read.",
-  },
-  {
-    name: "Talent Scout",
-    color: "#3B82F6",
-    slug: "rakazo/talent-scout",
-    desc: "Reads every applicant, shortlists against your bar, writes the intro emails.",
-  },
-  {
-    name: "Expense Manager",
-    color: "#F2622A",
-    slug: "rakazo/expense-manager",
-    desc: "Matches receipts to charges, files the report, asks before guessing.",
-  },
-  {
-    name: "Bug Triage",
-    color: "#D9508A",
-    slug: "rakazo/bug-triage",
-    desc: "Reproduces reports in a real browser and attaches steps to the issue.",
-  },
-  {
-    name: "Account Manager",
-    color: "#9B5CF6",
-    slug: "rakazo/account-manager",
-    desc: "Keeps renewal context, answers known questions, escalates the rest.",
-  },
-  {
-    name: "Paid Media",
-    color: "#3EC5A8",
-    slug: "rakazo/paid-media",
-    desc: "Watches spend daily, pauses what is not converting, reports what changed.",
-  },
-  {
-    name: "Chief of Staff",
-    color: "#8B93A8",
-    slug: "rakazo/chief-of-staff",
-    desc: "Runs the week: briefings, bookings, and handoffs between your other bots.",
   },
 ];

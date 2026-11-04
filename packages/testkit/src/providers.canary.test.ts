@@ -1,22 +1,33 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { BoxSandboxProvider, E2BSandboxProvider, PiAgentRuntime } from "@rakazo/adapters";
+import {
+  BoatSandboxProvider,
+  BoxdSandboxProvider,
+  CreateOSSandboxProvider,
+  E2BSandboxProvider,
+  NovitaSandboxProvider,
+  PiAgentRuntime,
+} from "@rakazo/adapters";
 import type { RunStatus } from "@rakazo/contracts";
 import { isTerminal } from "@rakazo/core";
 import { loadRootEnv } from "@rakazo/core/node/load-root-env";
 import { afterAll, describe, expect, it } from "vitest";
 import { sessionCookieHeader } from "./index.js";
 
-if (process.env.VERIFY_PROVIDERS) loadRootEnv();
+if (process.env.VERIFY_PROVIDERS) loadRootEnv({ allowInTests: true });
 
 const liveE2b = Boolean(process.env.VERIFY_PROVIDERS && process.env.E2B_API_KEY);
-const liveBox = Boolean(process.env.VERIFY_PROVIDERS && process.env.BOX_API_KEY);
+const liveBoat = Boolean(process.env.VERIFY_PROVIDERS && process.env.BOAT_API_KEY);
+const liveBoxd = Boolean(process.env.VERIFY_PROVIDERS && process.env.BOXD_API_KEY);
+const liveCreateos = Boolean(process.env.VERIFY_PROVIDERS && process.env.CREATEOS_SANDBOX_API_KEY);
 const livePi = Boolean(process.env.VERIFY_PROVIDERS && process.env.OPENROUTER_API_KEY);
 const livePiApp = Boolean(livePi && process.env.DATABASE_URL);
 
 const describeE2b = liveE2b ? describe : describe.skip;
-const describeBox = liveBox ? describe : describe.skip;
+const describeBoat = liveBoat ? describe : describe.skip;
+const describeBoxd = liveBoxd ? describe : describe.skip;
+const describeCreateos = liveCreateos ? describe : describe.skip;
 const describePi = livePi ? describe : describe.skip;
 const describePiApp = livePiApp ? describe : describe.skip;
 
@@ -48,29 +59,29 @@ describeE2b("live E2B canary", () => {
   }, 120_000);
 });
 
-describeBox("live Box canary", () => {
+describeBoat("live Boat canary", () => {
   it("provisions a desktop, observes it, preserves a file across stop/resume, and destroys it", async () => {
-    const sandbox = new BoxSandboxProvider({
-      apiKey: process.env.BOX_API_KEY!,
-      apiUrl: process.env.BOX_API_URL ?? process.env.BOX_BASE_URL,
+    const sandbox = new BoatSandboxProvider({
+      apiKey: process.env.BOAT_API_KEY!,
+      apiUrl: process.env.BOAT_API_URL,
     });
     const ctx = {
-      operationId: "box-canary",
-      traceId: "box-canary",
-      spaceId: "box-canary",
-      userId: "box-canary",
+      operationId: "boat-canary",
+      traceId: "boat-canary",
+      spaceId: "boat-canary",
+      userId: "boat-canary",
       signal: new AbortController().signal,
     };
-    const request = { botId: "box-canary", homePath: "/home/user/rakazo-home" };
+    const request = { botId: "boat-canary", homePath: "/home/user/rakazo-home" };
     let computer = await sandbox.provision(request, ctx);
     try {
       await sandbox.prepare(computer, ctx);
       let stdout = "";
-      for await (const event of sandbox.execute(computer, { argv: ["echo", "box-ok"] }, ctx)) {
+      for await (const event of sandbox.execute(computer, { argv: ["echo", "boat-ok"] }, ctx)) {
         if (event.type === "stdout") stdout += event.data;
         if (event.type === "exit") expect(event.code).toBe(0);
       }
-      expect(stdout).toContain("box-ok");
+      expect(stdout).toContain("boat-ok");
       await sandbox.writeFile(
         computer,
         { path: "canary.txt", content: new TextEncoder().encode("preserved") },
@@ -92,6 +103,173 @@ describeBox("live Box canary", () => {
       await sandbox.destroy(computer, ctx);
     }
   }, 240_000);
+});
+
+describeBoxd("live boxd canary", () => {
+  it("provisions a desktop, observes it, keeps a file and a running process across stop/resume, and destroys it", async () => {
+    const sandbox = new BoxdSandboxProvider({
+      apiKey: process.env.BOXD_API_KEY!,
+      org: process.env.BOXD_ORG,
+    });
+    const ctx = {
+      operationId: "boxd-canary",
+      traceId: "boxd-canary",
+      spaceId: "boxd-canary",
+      userId: "boxd-canary",
+      signal: new AbortController().signal,
+    };
+    const run = async (argv: string[]) => {
+      let stdout = "";
+      for await (const event of sandbox.execute(computer, { argv }, ctx)) {
+        if (event.type === "stdout") stdout += event.data;
+        if (event.type === "exit") expect(event.code).toBe(0);
+      }
+      return stdout;
+    };
+    const request = { botId: "boxd-canary", homePath: "/home/boxd/rakazo-home" };
+    let computer = await sandbox.provision(request, ctx);
+    try {
+      await sandbox.prepare(computer, ctx);
+      expect(await run(["echo", "boxd-ok"])).toContain("boxd-ok");
+      await sandbox.writeFile(
+        computer,
+        { path: "canary.txt", content: new TextEncoder().encode("preserved") },
+        ctx,
+      );
+      await run(["bash", "-c", "nohup sleep 600 >/dev/null 2>&1 & echo $! > canary.pid"]);
+      expect((await sandbox.observe(computer, ctx)).image.byteLength).toBeGreaterThan(0);
+
+      await sandbox.stop(computer);
+      expect(await sandbox.isStopped(computer)).toBe(true);
+      computer = await sandbox.provision(
+        { ...request, providerRef: computer.providerRef, providerKind: computer.kind },
+        ctx,
+      );
+      expect(computer).toMatchObject({ fresh: false, started: true });
+      await sandbox.prepare(computer, ctx);
+      expect(new TextDecoder().decode(await sandbox.readFile(computer, "canary.txt", ctx))).toBe(
+        "preserved",
+      );
+      // A suspend keeps memory, so the process is still running after the resume.
+      expect(await run(["bash", "-c", "kill -0 $(cat canary.pid) && echo alive"])).toContain(
+        "alive",
+      );
+    } finally {
+      await sandbox.destroy(computer, ctx);
+    }
+  }, 600_000);
+});
+
+describe.skipIf(!process.env.VERIFY_PROVIDERS || !process.env.NOVITA_API_KEY)(
+  "live Novita canary",
+  () => {
+    it("provisions a desktop, observes it, preserves a file across stop/resume, and destroys it", async () => {
+      const sandbox = new NovitaSandboxProvider({
+        apiKey: process.env.NOVITA_API_KEY!,
+        template: process.env.SANDBOX_TEMPLATE,
+      });
+      const ctx = {
+        operationId: "novita-canary",
+        traceId: "novita-canary",
+        spaceId: "novita-canary",
+        userId: "novita-canary",
+        signal: new AbortController().signal,
+      };
+      const request = { botId: "novita-canary", homePath: "/home/user/rakazo-home" };
+      let computer = await sandbox.provision(request, ctx);
+      try {
+        await sandbox.prepare(computer, ctx);
+        let stdout = "";
+        for await (const event of sandbox.execute(computer, { argv: ["echo", "novita-ok"] }, ctx)) {
+          if (event.type === "stdout") stdout += event.data;
+          if (event.type === "exit") expect(event.code).toBe(0);
+        }
+        expect(stdout).toContain("novita-ok");
+        await sandbox.writeFile(
+          computer,
+          { path: "canary.txt", content: new TextEncoder().encode("preserved") },
+          ctx,
+        );
+        expect((await sandbox.observe(computer, ctx)).image.byteLength).toBeGreaterThan(0);
+
+        await sandbox.stop(computer, ctx);
+        computer = await sandbox.provision(
+          { ...request, providerRef: computer.providerRef, providerKind: computer.kind },
+          ctx,
+        );
+        expect(computer.fresh).toBe(false);
+        await sandbox.prepare(computer, ctx);
+        expect(new TextDecoder().decode(await sandbox.readFile(computer, "canary.txt", ctx))).toBe(
+          "preserved",
+        );
+      } finally {
+        await sandbox.destroy(computer, ctx);
+      }
+    }, 240_000);
+  },
+);
+
+describeCreateos("live CreateOS canary", () => {
+  it("provisions a desktop, exports GUI-only work, survives pause, and destroys it", async () => {
+    const sandbox = new CreateOSSandboxProvider({
+      apiKey: process.env.CREATEOS_SANDBOX_API_KEY!,
+      baseUrl: process.env.CREATEOS_SANDBOX_BASE_URL,
+      shape: process.env.CREATEOS_SANDBOX_SHAPE,
+      rootfs: process.env.CREATEOS_SANDBOX_ROOTFS,
+    });
+    const ctx = {
+      operationId: "createos-canary",
+      traceId: "createos-canary",
+      spaceId: "createos-canary",
+      userId: "createos-canary",
+      signal: new AbortController().signal,
+    };
+    const request = { botId: "createos-canary", homePath: "/home/desktop/rakazo-home" };
+    let computer = await sandbox.provision(request, ctx);
+    try {
+      await sandbox.prepare(computer, ctx);
+      let stdout = "";
+      for await (const event of sandbox.execute(
+        computer,
+        { argv: ["echo", "createos-ok"], cwd: "notes", env: { CANARY: "works" } },
+        ctx,
+      )) {
+        if (event.type === "stdout") stdout += event.data;
+        if (event.type === "exit") expect(event.code).toBe(0);
+      }
+      expect(stdout).toContain("createos-ok");
+
+      expect((await sandbox.observe(computer, ctx)).image.byteLength).toBeGreaterThan(0);
+      expect(
+        (await sandbox.connectScreen(computer, { view: "stream", interactive: true }, ctx)).url,
+      ).toBeTruthy();
+
+      await sandbox.writeFile(
+        computer,
+        { path: "canary.txt", content: new TextEncoder().encode("preserved") },
+        ctx,
+      );
+
+      // A GUI-only action must still mark the workspace exportable.
+      await sandbox.act(computer, { actions: [{ kind: "wait", ms: 0 }], observe: false }, ctx);
+      const exported: string[] = [];
+      for await (const file of sandbox.exportWorkspace(computer, ctx)) exported.push(file.path);
+      expect(exported).toContain("canary.txt");
+
+      await sandbox.stop(computer, ctx);
+      computer = await sandbox.provision(
+        { ...request, providerRef: computer.providerRef, providerKind: computer.kind },
+        ctx,
+      );
+      expect(computer.fresh).toBe(false);
+      await sandbox.prepare(computer, ctx);
+      expect(new TextDecoder().decode(await sandbox.readFile(computer, "canary.txt", ctx))).toBe(
+        "preserved",
+      );
+    } finally {
+      await sandbox.destroy(computer, ctx);
+    }
+  }, 600_000);
 });
 
 describePi("live OpenRouter / Pi canary", () => {
@@ -142,7 +320,7 @@ describePiApp("live OpenRouter product journey", () => {
   });
 
   it("completes a bot turn through the API with the live model", async () => {
-    const { createApp } = await import("../../../apps/api/src/app.ts");
+    const { createApp } = await import("@rakazo/api/app");
     dataDir = mkdtempSync(path.join(tmpdir(), "rakazo-pi-"));
     const handles = await createApp({
       databaseUrl: process.env.DATABASE_URL!,
@@ -191,7 +369,7 @@ describePiApp("live OpenRouter product journey", () => {
   }, 120_000);
 });
 
-type App = { request: (input: string, init?: RequestInit) => Promise<Response> };
+type App = { request: (input: string, init?: RequestInit) => Response | Promise<Response> };
 type Snap = {
   messages: Array<{ role: string; blocks: unknown[] }>;
   run: { status: string } | null;

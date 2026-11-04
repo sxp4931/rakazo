@@ -2,33 +2,13 @@ import { dateLocaleForUi } from "./i18n";
 
 const DAY_MS = 86_400_000;
 
-export function filterBots<T extends { name: string; title: string; preview: string }>(
+export function filterBots<T extends { name: string; preview: string }>(
   bots: T[],
   query: string,
 ): T[] {
   const needle = query.trim().toLowerCase();
   if (!needle) return bots;
-  return bots.filter((bot) =>
-    `${bot.name} ${bot.title} ${bot.preview}`.toLowerCase().includes(needle),
-  );
-}
-
-export function botTag(title: string, name: string, maxLength = 22) {
-  const tag = title.trim();
-  if (!tag || tag.toLowerCase() === name.trim().toLowerCase()) return "";
-  if (tag.length > maxLength) return "";
-  return tag;
-}
-
-export function userInitials(name: string) {
-  const initials = name
-    .split(/\s+/)
-    .filter(Boolean)
-    .map((part) => part[0])
-    .join("")
-    .slice(0, 2)
-    .toUpperCase();
-  return initials || "?";
+  return bots.filter((bot) => `${bot.name} ${bot.preview}`.toLowerCase().includes(needle));
 }
 
 export function formatThreadTime(iso: string, now = new Date()) {

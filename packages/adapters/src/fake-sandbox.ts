@@ -11,6 +11,7 @@ import type {
   SandboxProvider,
   ScreenRequest,
   ScreenSession,
+  TerminalRequest,
 } from "@rakazo/adapter-kit";
 import { canReleaseScreenLease, canTakeScreenLease } from "@rakazo/core";
 import { ComputerScreenUnavailableError, screenSessionKey } from "./computer-screens.js";
@@ -19,7 +20,11 @@ import {
   boundedComputerActions,
   normalizeWorkspacePath,
   placeholderObservation,
+  workspacePath,
 } from "./computer-support.js";
+import { FakeScreenServer } from "./fake-screen.js";
+import { FakeTerminalGateway } from "./fake-terminal.js";
+import { sandboxCommandEnvironment } from "./sandbox-command-environment.js";
 
 export interface FakeBox {
   ref: ComputerRef;
@@ -31,6 +36,8 @@ export interface FakeBox {
 
 export class FakeSandboxProvider implements SandboxProvider {
   readonly boxes = new Map<string, FakeBox>();
+  private readonly terminals = new FakeTerminalGateway();
+  private readonly screenServer = new FakeScreenServer();
 
   describe() {
     return {
@@ -75,6 +82,10 @@ export class FakeSandboxProvider implements SandboxProvider {
     return ref;
   }
 
+  async isRunning(computer: ComputerRef, _context: AdapterContext): Promise<boolean> {
+    return this.boxes.get(computer.id)?.running === true;
+  }
+
   async prepare(_computer: ComputerRef, _context: AdapterContext): Promise<void> {}
 
   async *execute(
@@ -88,8 +99,19 @@ export class FakeSandboxProvider implements SandboxProvider {
       yield { type: "exit", code: 1 };
       return;
     }
-    const cmd = request.argv.join(" ");
-    if (request.argv[0] === "echo") {
+    if (request.argv[0] === "printenv") {
+      const value = sandboxCommandEnvironment(request)[request.argv[1] ?? ""];
+      if (value !== undefined) yield { type: "stdout", data: `${value}\n` };
+      yield { type: "exit", code: value === undefined ? 1 : 0 };
+      return;
+    }
+    // The shell tool wraps the model's command in a background-work launcher; answer the command.
+    const wrapped =
+      request.argv[3] === "rakazo-background-launch" ? request.argv.at(-1) : undefined;
+    const cmd = wrapped ?? request.argv.join(" ");
+    if (wrapped?.startsWith("echo ")) {
+      yield { type: "stdout", data: `${wrapped.slice(5)}\n` };
+    } else if (request.argv[0] === "echo") {
       yield { type: "stdout", data: `${request.argv.slice(1).join(" ")}\n` };
     } else if (cmd.startsWith("cat ")) {
       const file = normalizeWorkspacePath(request.argv[1] ?? "");
@@ -117,10 +139,32 @@ export class FakeSandboxProvider implements SandboxProvider {
     const key = screenSessionKey(context);
     this.screenSlot(this.requiredBox(computer), key, context.screenLeaseId);
     return {
-      url: `fake://screen/${computer.id}/${key}`,
-      mimeType: "text/plain",
+      url: await this.screenServer.url(computer.id, key),
+      mimeType: "text/html",
       close: async () => undefined,
     };
+  }
+
+  async connectTerminal(computer: ComputerRef, request: TerminalRequest, _context: AdapterContext) {
+    this.requiredBox(computer);
+    if (!request.controlToken) throw new Error("terminal requires screen control");
+    return {
+      url: await this.terminals.open(
+        computer.id,
+        request.controlToken,
+        workspacePath("/home/rakazo", request.cwd ?? ""),
+      ),
+    };
+  }
+
+  /** Releasing control ends that lease's terminal, as on real computers. */
+  async setScreenControl(
+    computer: ComputerRef,
+    interactive: boolean,
+    _context: AdapterContext,
+    controlToken?: string,
+  ) {
+    if (!interactive) this.terminals.revoke(computer.id, controlToken);
   }
 
   async sendInput(
@@ -248,10 +292,17 @@ export class FakeSandboxProvider implements SandboxProvider {
   async stop(computer: ComputerRef, _context: AdapterContext): Promise<void> {
     const box = this.boxes.get(computer.id);
     if (box) box.running = false;
+    this.terminals.revoke(computer.id);
   }
 
   async destroy(computer: ComputerRef, _context: AdapterContext): Promise<void> {
     this.boxes.delete(computer.id);
+    this.terminals.revoke(computer.id);
+  }
+
+  close() {
+    this.screenServer.close();
+    this.terminals.close();
   }
 
   private requiredBox(computer: ComputerRef): FakeBox {

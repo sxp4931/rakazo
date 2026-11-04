@@ -11,6 +11,22 @@ export class ComputerScreenUnavailableError extends Error {
   }
 }
 
+/** The browser stopped, but clearing its screen slot failed afterward. */
+export class BrowserStoppedReleaseError extends Error {
+  constructor(message = "browser stopped") {
+    super(message);
+    this.name = "BrowserStoppedReleaseError";
+  }
+}
+
+/** A browser was open again on a profile a save was about to copy, so the save waits. */
+export class BrowserStillRunningError extends Error {
+  constructor(message = "browser still running") {
+    super(message);
+    this.name = "BrowserStillRunningError";
+  }
+}
+
 export function screenSessionKey(context: AdapterContext): string {
   return context.botId ?? "default";
 }

@@ -8,6 +8,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
@@ -20,6 +21,8 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
+import android.os.SystemClock
+import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -28,28 +31,17 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import org.json.JSONException
 import org.json.JSONObject
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.Locale
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
-
-private data class RunRecord(
-  val runId: String,
-  val spaceId: String,
-  val botId: String,
-  val botName: String,
-  val groupId: String?,
-  val groupName: String?,
-  val threadId: String,
-  val status: String,
-  val prompt: String,
-  val trigger: String,
-  val notificationsEnabled: Boolean,
-)
+import kotlin.random.Random
 
 private class ApiException(val status: Int) : IOException()
 
@@ -58,8 +50,11 @@ class RakazoNotificationService : Service() {
   private lateinit var manager: NotificationManager
   private var pollJob: Job? = null
   private val knownCompleted = mutableSetOf<String>()
+  private val completions = PollCompletions(knownCompleted)
   private val alertedAttention = mutableSetOf<String>()
   private var historySpaceId: String? = null
+  private val tokenCache = PollTokenCache()
+  private val historyWrites = PollHistoryWrites()
 
   override fun onCreate() {
     super.onCreate()
@@ -69,11 +64,22 @@ class RakazoNotificationService : Service() {
       manager.cancelAll()
       state.edit().putBoolean(THREAD_NOTIFICATION_IDS, true).apply()
     }
-    createChannels()
+    createRakazoChannels(this)
   }
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+    // Channel names follow the current locale; recreating an existing channel updates its copy.
+    createRakazoChannels(this)
     val generation = synchronized(sessionLock) {
+      if (intent?.getBooleanExtra(EXTRA_RESET_TOKEN, false) == true) tokenCache.reset()
+      intent?.getStringExtra(EXTRA_MUTED_BOT_ID)?.let { botId ->
+        // Only a seeded poll can hold pending replies, and a discard always changes the
+        // seen set, so the mute persists here instead of waiting for the next poll.
+        completions.muteBot(botId) {
+          val stored = getSharedPreferences(STATE_PREFERENCES, MODE_PRIVATE).getString(SEEN_RUNS_SPACE_ID, null)
+          if (ownsStoredHistory(stored, historySpaceId)) persistCompleted(seeded = true)
+        }
+      }
       sessionGeneration.incrementAndGet().also {
         if (intent?.action == ACTION_THREAD_CHANGED && (openBotId != null || openThreadId != null)) {
           clearLive()
@@ -88,64 +94,64 @@ class RakazoNotificationService : Service() {
   override fun onBind(intent: Intent?): IBinder? = null
 
   override fun onDestroy() {
+    tokenCache.reset()
     scope.cancel()
     super.onDestroy()
   }
 
   private suspend fun poll(generation: Long) {
     var selectedAvatarStyle: String? = null
+    val startedAt = SystemClock.elapsedRealtime()
+    val cadence = PollCadence()
     while (scope.isActive) {
       val storage = NotificationStorage(this)
       val settings = storage.settings
       if (
         !settings.liveConnection ||
         storage.endpoint.isBlank() ||
-        storage.token.isBlank() ||
         storage.spaceId.isBlank() ||
         !isAllowedNotificationEndpoint(storage.endpoint)
       ) {
         stopIfCurrent(generation)
         return
       }
-      val seeded = prepareHistorySpace(generation, storage.spaceId) ?: return
+      val token = tokenCache.getOrLoad({ storage.token }) { cache ->
+        runIfCurrent(generation, cache)
+      } ?: return
+      if (token.isBlank()) {
+        stopIfCurrent(generation)
+        return
+      }
+      val seeded = prepareHistorySpace(generation, storage.endpoint, storage.spaceId, token) ?: return
+      val copyContext = localizedContext(this, storage.locale)
+      var recentPageBusy = true
       try {
+        if (generation != sessionGeneration.get()) return
         val avatarStyle = selectedAvatarStyle
-          ?: avatarStyle(storage.endpoint, storage.token, storage.spaceId)
+          ?: avatarStyle(storage.endpoint, token, storage.spaceId, storage.headers)
             .also { selectedAvatarStyle = it }
-        val active = runs(storage.endpoint, storage.token, storage.spaceId, "active")
+        if (generation != sessionGeneration.get()) return
+        val active = runs(storage.endpoint, token, storage.spaceId, storage.headers, "active")
         val working = active.filter(::isWorking).filter { it.notificationsEnabled }
-        val recent = runs(storage.endpoint, storage.token, storage.spaceId, "recent")
-        val replyLookups = mutableListOf<Pair<RunRecord, Boolean>>()
+        if (generation != sessionGeneration.get()) return
+        val recent = runs(storage.endpoint, token, storage.spaceId, storage.headers, "recent")
+        var replyLookups = emptyList<RunRecord>()
         val immediate = mutableListOf<Pair<RunRecord, NotificationCopy>>()
         if (!runIfCurrent(generation) {
+            recentPageBusy = recent.size >= RECENT_LIMIT && recent.any { it.runId !in knownCompleted }
             val visibleWorking = working.filterNot(::isOpenThread)
-            if (visibleWorking.isEmpty()) clearLive() else showLive(visibleWorking, avatarStyle)
-            if (!seeded) {
-              knownCompleted += recent.map { it.runId }
-            } else {
-              recent.asReversed().filter { knownCompleted.add(it.runId) }.forEach { run ->
-                when {
-                  !run.notificationsEnabled || isOpenThread(run) -> Unit
-                  run.status == "failed" && settings.needsAttention ->
-                    immediate += run to attentionCopy(run)
-                  run.status != "completed" -> Unit
-                  run.trigger == "routine" && settings.scheduledTasks ->
-                    replyLookups += run to true
-                  run.trigger != "routine" && settings.messages ->
-                    replyLookups += run to false
-                }
-              }
+            if (visibleWorking.isEmpty()) clearLive() else {
+              showLive(visibleWorking, avatarStyle, copyContext)
             }
-            knownCompleted.retainAll(recent.map { it.runId }.toSet())
-            getSharedPreferences(STATE_PREFERENCES, MODE_PRIVATE).edit()
-              .putStringSet(SEEN_RUNS, knownCompleted.toSet())
-              .putBoolean(SEEN_RUNS_SEEDED, true)
-              .apply()
+            replyLookups = completions.prepare(recent, seeded, settings, ::isOpenThread) { run ->
+              immediate += run to attentionCopy(copyContext, run)
+            }
+            persistCompleted(seeded)
             if (settings.needsAttention) {
               active.filter { it.status == "waiting_input" || it.status == "waiting_takeover" }
                 .filter { it.notificationsEnabled }
                 .filter { alertedAttention.add("${it.runId}:${it.status}") }
-                .forEach { immediate += it to attentionCopy(it) }
+                .forEach { immediate += it to attentionCopy(copyContext, it) }
             }
             alertedAttention.retainAll(active.map { "${it.runId}:${it.status}" }.toSet())
             immediate.forEach { (run, copy) -> post(run, copy) }
@@ -153,24 +159,35 @@ class RakazoNotificationService : Service() {
         ) {
           return
         }
-        for ((run, scheduled) in replyLookups) {
+        for (run in replyLookups) {
+          if (generation != sessionGeneration.get()) return
           val reply = runCatching {
-            latestReply(storage.endpoint, storage.token, storage.spaceId, run)
+            latestReply(storage.endpoint, token, storage.spaceId, storage.headers, run)
           }.getOrDefault("")
-          if (reply == null) continue
           if (!runIfCurrent(generation) {
-              post(
-                run,
-                NotificationCopy(
-                  title = when {
-                    scheduled -> "${run.botName} · Scheduled task"
-                    run.groupName != null -> "${run.botName} replied in ${run.groupName}"
-                    else -> "${run.botName} replied"
-                  },
-                  body = reply.ifBlank { run.prompt },
-                  channel = if (scheduled) Channels.SCHEDULED else Channels.MESSAGES,
-                ),
-              )
+              completions.complete(run, alreadyPosted = {
+                manager.activeNotifications.any {
+                  it.notification.extras.getString(EXTRA_RUN_ID) == run.runId
+                }
+              }) {
+                if (reply != null) {
+                  post(
+                    run,
+                    NotificationCopy(
+                      title = when {
+                        run.trigger == "routine" ->
+                          copyContext.getString(R.string.rakazo_scheduled_title, run.botName)
+                        run.groupName != null ->
+                          copyContext.getString(R.string.rakazo_replied_group, run.botName, run.groupName)
+                        else -> copyContext.getString(R.string.rakazo_replied, run.botName)
+                      },
+                      body = reply.ifBlank { run.prompt },
+                      channel = if (run.trigger == "routine") Channels.SCHEDULED else Channels.MESSAGES,
+                    ),
+                  )
+                }
+              }
+              persistCompleted(true)
             }
           ) {
             return
@@ -182,15 +199,24 @@ class RakazoNotificationService : Service() {
           stopIfCurrent(generation)
           return
         }
+        cadence.success()
       } catch (error: ApiException) {
         if (error.status == 401) {
           stopIfCurrent(generation)
           return
         }
+        cadence.failure()
       } catch (_: IOException) {
+        cadence.failure()
       } catch (_: RuntimeException) {
+        cadence.failure()
       }
-      delay(POLL_INTERVAL_MS)
+      val delayMs = cadence.delayMs(
+        SystemClock.elapsedRealtime() - startedAt,
+        recentPageBusy,
+        if (cadence.hasFailures) Random.nextLong(0, 1_000) else 0,
+      )
+      delay(delayMs)
     }
   }
 
@@ -202,13 +228,24 @@ class RakazoNotificationService : Service() {
     }
   }
 
-  private fun prepareHistorySpace(generation: Long, spaceId: String): Boolean? =
+  private fun persistCompleted(seeded: Boolean) {
+    historyWrites.persistIfChanged(seeded, knownCompleted) { seen ->
+      getSharedPreferences(STATE_PREFERENCES, MODE_PRIVATE).edit()
+        .putStringSet(SEEN_RUNS, seen)
+        .putBoolean(SEEN_RUNS_SEEDED, true)
+        .apply()
+    }
+  }
+
+  private fun prepareHistorySpace(generation: Long, endpoint: String, spaceId: String, token: String): Boolean? =
     synchronized(sessionLock) {
       if (generation != sessionGeneration.get()) return null
+      completions.useSession(endpoint, spaceId, token, sessionEpoch)
       val state = getSharedPreferences(STATE_PREFERENCES, MODE_PRIVATE)
       if (historySpaceId != spaceId) {
         knownCompleted.clear()
         alertedAttention.clear()
+        historyWrites.reset()
         if (state.getString(SEEN_RUNS_SPACE_ID, null) == spaceId) {
           knownCompleted += state.getStringSet(SEEN_RUNS, emptySet()).orEmpty()
         } else {
@@ -232,6 +269,7 @@ class RakazoNotificationService : Service() {
       .setStyle(Notification.BigTextStyle().bigText(copy.body))
       .setContentIntent(openApp(run))
       .addExtras(Bundle().apply {
+        if (run.status == "completed") putString(EXTRA_RUN_ID, run.runId)
         putString("rakazo.spaceId", run.spaceId)
         putString("rakazo.botId", run.botId)
         putString("rakazo.threadId", run.threadId)
@@ -242,11 +280,11 @@ class RakazoNotificationService : Service() {
     manager.notify(run.threadId.hashCode(), notification)
   }
 
-  private fun showLive(active: List<RunRecord>, avatarStyle: String) {
+  private fun showLive(active: List<RunRecord>, avatarStyle: String, context: Context) {
     val primary = active.first()
     val title = when (active.size) {
-      1 -> "${primary.botName} is working"
-      else -> "${primary.botName} and ${active.size - 1} more are working"
+      1 -> context.getString(R.string.rakazo_live_one, primary.botName)
+      else -> context.getString(R.string.rakazo_live_many, primary.botName, active.size - 1)
     }
     val body = when {
       active.size == 1 -> primary.prompt
@@ -265,7 +303,7 @@ class RakazoNotificationService : Service() {
       .setCategory(Notification.CATEGORY_SERVICE)
     if (Build.VERSION.SDK_INT >= 36) {
       liveBuilder.extras.putBoolean(PROMOTED_ONGOING_EXTRA, true)
-      liveBuilder.setShortCriticalText("Working")
+      liveBuilder.setShortCriticalText(context.getString(R.string.rakazo_live_working))
     }
     val notification = liveBuilder.build()
     if (Build.VERSION.SDK_INT >= 34) {
@@ -311,9 +349,7 @@ class RakazoNotificationService : Service() {
     manager.cancel(LIVE_NOTIFICATION_ID)
   }
 
-  private fun isOpenThread(run: RunRecord): Boolean = synchronized(sessionLock) {
-    if (openThreadId != null) openThreadId == run.threadId else openBotId == run.botId
-  }
+  private fun isOpenThread(run: RunRecord): Boolean = isOpenThread(run.botId, run.threadId)
 
   @Suppress("DEPRECATION")
   private fun builder(channel: String): Notification.Builder =
@@ -324,9 +360,9 @@ class RakazoNotificationService : Service() {
       packageManager.getLaunchIntentForPackage(packageName) ?: Intent(Intent.ACTION_VIEW, Uri.parse("rakazo://"))
     } else {
       val destination = if (run.groupId != null) {
-        "rakazo://group-thread?groupId=${Uri.encode(run.groupId)}&name=${Uri.encode(run.groupName.orEmpty())}&spaceId=${Uri.encode(run.spaceId)}"
+        "rakazo://group-thread?groupId=${Uri.encode(run.groupId)}&name=${Uri.encode(run.groupName.orEmpty())}&spaceId=${Uri.encode(run.spaceId)}&threadId=${Uri.encode(run.threadId)}"
       } else {
-        "rakazo://thread?botId=${Uri.encode(run.botId)}&name=${Uri.encode(run.botName)}&spaceId=${Uri.encode(run.spaceId)}"
+        "rakazo://thread?botId=${Uri.encode(run.botId)}&name=${Uri.encode(run.botName)}&spaceId=${Uri.encode(run.spaceId)}&threadId=${Uri.encode(run.threadId)}"
       }
       Intent(
         Intent.ACTION_VIEW,
@@ -341,16 +377,6 @@ class RakazoNotificationService : Service() {
     )
   }
 
-  private fun createChannels() {
-    if (Build.VERSION.SDK_INT < 26) return
-    listOf(
-      NotificationChannel(Channels.LIVE, "Live agent status", NotificationManager.IMPORTANCE_LOW),
-      NotificationChannel(Channels.MESSAGES, "Agent messages", NotificationManager.IMPORTANCE_DEFAULT),
-      NotificationChannel(Channels.SCHEDULED, "Scheduled tasks", NotificationManager.IMPORTANCE_DEFAULT),
-      NotificationChannel(Channels.ATTENTION, "Needs attention", NotificationManager.IMPORTANCE_HIGH),
-    ).forEach(manager::createNotificationChannel)
-  }
-
   private fun stop() {
     stopForeground(STOP_FOREGROUND_REMOVE)
     stopSelf()
@@ -361,27 +387,40 @@ class RakazoNotificationService : Service() {
   }
 
   companion object {
+    private const val TAG = "RakazoNotifications"
     private const val LIVE_NOTIFICATION_ID = 1101
     private const val ACTION_THREAD_CHANGED = "com.rakazo.notifications.THREAD_CHANGED"
     private const val PROMOTED_ONGOING_EXTRA = "android.requestPromotedOngoing"
-    private const val POLL_INTERVAL_MS = 8_000L
+    private const val RECENT_LIMIT = 20 // Keep in sync with apps/api/src/runs.ts.
+    private const val EXTRA_RESET_TOKEN = "com.rakazo.notifications.RESET_TOKEN"
+    private const val EXTRA_MUTED_BOT_ID = "com.rakazo.notifications.MUTED_BOT_ID"
     private const val STATE_PREFERENCES = "com.rakazo.notification_state"
     private const val SEEN_RUNS = "seen_runs"
     private const val SEEN_RUNS_SEEDED = "seen_runs_seeded"
     private const val SEEN_RUNS_SPACE_ID = "seen_runs_space_id"
+    internal const val EXTRA_RUN_ID = "rakazo.runId"
     private const val THREAD_NOTIFICATION_IDS = "thread_notification_ids"
     private val sessionLock = Any()
     private val sessionGeneration = AtomicLong()
+    private var sessionEpoch = 0L
     private var openBotId: String? = null
     private var openThreadId: String? = null
 
-    fun start(context: Context) {
+    fun start(context: Context, resetToken: Boolean = true, action: String? = null, mutedBotId: String? = null) {
       val intent = Intent(context, RakazoNotificationService::class.java)
-      context.startService(intent)
+        .putExtra(EXTRA_RESET_TOKEN, resetToken)
+      if (action != null) intent.action = action
+      if (mutedBotId != null) intent.putExtra(EXTRA_MUTED_BOT_ID, mutedBotId)
+      runCatching { context.startService(intent) }
+        .onFailure { error -> Log.w(TAG, "Could not start notification poller", error) }
     }
 
     fun stop(context: Context) {
       context.stopService(Intent(context, RakazoNotificationService::class.java))
+    }
+
+    fun isOpenThread(botId: String, threadId: String): Boolean = synchronized(sessionLock) {
+      if (openThreadId != null) openThreadId == threadId else openBotId == botId
     }
 
     fun setOpenThread(context: Context, botId: String?, threadId: String?) {
@@ -390,16 +429,17 @@ class RakazoNotificationService : Service() {
         openThreadId = threadId
       }
       if (threadId != null) {
-        context.getSystemService(NotificationManager::class.java).cancel(threadId.hashCode())
+        val manager = context.getSystemService(NotificationManager::class.java)
+        manager.cancel(threadId.hashCode())
+        manager.cancel(SenderPush.notificationId(threadId))
       }
-      context.startService(
-        Intent(context, RakazoNotificationService::class.java).setAction(ACTION_THREAD_CHANGED),
-      )
+      start(context, resetToken = false, action = ACTION_THREAD_CHANGED)
     }
 
     fun clearSession(context: Context) {
       synchronized(sessionLock) {
         sessionGeneration.incrementAndGet()
+        sessionEpoch++
         openBotId = null
         openThreadId = null
         stop(context)
@@ -412,25 +452,39 @@ class RakazoNotificationService : Service() {
 
 private data class NotificationCopy(val title: String, val body: String, val channel: String)
 
-private fun attentionCopy(run: RunRecord): NotificationCopy = when (run.status) {
-  "failed" -> NotificationCopy("${run.botName} hit a problem", run.prompt, Channels.ATTENTION)
-  "waiting_takeover" -> NotificationCopy(
-    "${run.botName} needs you on screen",
+private fun attentionCopy(context: Context, run: RunRecord): NotificationCopy = when (run.status) {
+  "failed" -> NotificationCopy(
+    context.getString(R.string.rakazo_attention_failed, run.botName),
     run.prompt,
     Channels.ATTENTION,
   )
-  else -> NotificationCopy("${run.botName} needs your input", run.prompt, Channels.ATTENTION)
+  "waiting_takeover" -> NotificationCopy(
+    context.getString(R.string.rakazo_attention_takeover, run.botName),
+    run.prompt,
+    Channels.ATTENTION,
+  )
+  else -> NotificationCopy(
+    context.getString(R.string.rakazo_attention_input, run.botName),
+    run.prompt,
+    Channels.ATTENTION,
+  )
 }
 
-private object Channels {
+internal object Channels {
   const val LIVE = "rakazo_live"
   const val MESSAGES = "rakazo_messages"
   const val SCHEDULED = "rakazo_scheduled"
   const val ATTENTION = "rakazo_attention"
 }
 
-private fun runs(endpoint: String, token: String, spaceId: String, filter: String): List<RunRecord> {
-  val root = rpc(endpoint, token, spaceId, "runs/list", JSONObject().put("filter", filter))
+private fun runs(
+  endpoint: String,
+  token: String,
+  spaceId: String,
+  headers: String,
+  filter: String,
+): List<RunRecord> {
+  val root = rpc(endpoint, token, spaceId, headers, "runs/list", JSONObject().put("filter", filter))
   val rows = root.optJSONArray("runs") ?: throw IOException("Invalid activity response")
   return List(rows.length()) { index ->
     val row = rows.optJSONObject(index) ?: throw IOException("Invalid activity response")
@@ -453,14 +507,20 @@ private fun runs(endpoint: String, token: String, spaceId: String, filter: Strin
 private fun isWorking(run: RunRecord): Boolean =
   run.status == "queued" || run.status == "leased" || run.status == "running"
 
-private fun avatarStyle(endpoint: String, token: String, spaceId: String): String =
-  rpc(endpoint, token, spaceId, "me", JSONObject()).optString("avatarStyle", "robot")
+private fun avatarStyle(endpoint: String, token: String, spaceId: String, headers: String): String =
+  rpc(endpoint, token, spaceId, headers, "me", JSONObject()).optString("avatarStyle", "organic")
 
-private fun latestReply(endpoint: String, token: String, spaceId: String, run: RunRecord): String? {
+private fun latestReply(
+  endpoint: String,
+  token: String,
+  spaceId: String,
+  headers: String,
+  run: RunRecord,
+): String? {
   val target = JSONObject().apply {
     if (run.groupId != null) put("groupId", run.groupId) else put("botId", run.botId)
   }
-  val root = rpc(endpoint, token, spaceId, "threads/get", target)
+  val root = rpc(endpoint, token, spaceId, headers, "threads/get", target)
   val messages = root.optJSONArray("messages") ?: return ""
   for (messageIndex in messages.length() - 1 downTo 0) {
     val message = messages.optJSONObject(messageIndex) ?: continue
@@ -474,15 +534,461 @@ private fun latestReply(endpoint: String, token: String, spaceId: String, run: R
       if (block.optString("kind") == "handoff") return null
       block.optString("text").takeIf(String::isNotBlank)?.let(text::add)
     }
-    return text.joinToString("\n")
+    return markdownToPreview(text.joinToString("\n"))
   }
   return ""
+}
+
+private val TABLE_ROW = Regex("\\s*\\|(.+)\\|\\s*")
+private val BREAK_LINE = Regex("\\s*[-*_]{3,}\\s*")
+private val FENCE_OPEN = Regex("^ {0,3}(`{3,}|~{3,})(.*)$")
+private const val PAYLOAD_MARK = '\uE000'
+/** A preview is one line. Cap the source so one huge reply cannot stall the poll loop. */
+private const val MAX_PREVIEW_SOURCE = 4_096
+private val ESCAPE_RE =
+    Regex("\\\\([!\"#$%&'()*+,\\-./:;<=>?@\\[\\\\\\]^_`{|}~])")
+private val AUTOLINK_URL = Regex("<([A-Za-z][A-Za-z0-9+.-]{1,31}:[^<>\\s]*)>")
+private val AUTOLINK_EMAIL = Regex("<([^<>\\s]+@[^<>\\s]+\\.[^<>\\s]+)>")
+private val UNDERSCORE_RUN = Regex("_+")
+private val WORD_CHAR_AT_START = Regex("^[\\p{L}\\p{N}\\p{M}]")
+// \z pins to the absolute end: Java `$` would also match before a trailing newline.
+private val WORD_CHAR_AT_END = Regex("[\\p{L}\\p{N}\\p{M}]\\z")
+// Android's ICU regex engine rejects Java's UNICODE_CHARACTER_CLASS inline flag. Spell out Unicode
+// White_Space: separator characters plus ASCII whitespace and NEXT LINE.
+private val NON_SPACE_AT_END = Regex("[^\\p{Z}\\u0009-\\u000D\\u0085]\\z")
+private val NON_SPACE_AT_START = Regex("^[^\\p{Z}\\u0009-\\u000D\\u0085]")
+
+/**
+ * Escaped punctuation (\\*, \\|, ...) becomes a payload token so no later
+ * pass can eat it — including splitTableCells and the emphasis strips.
+ * Restored to the literal char at the very end. Mirrors takeEscapes.
+ */
+private fun takeEscapes(text: String, stash: (String) -> String): String =
+  ESCAPE_RE.replace(text) { m -> stash(m.groupValues[1]) }
+
+/**
+ * Paired backtick spans stash their contents (delimiters dropped) so escapes,
+ * pipes, and markers inside code stay literal. Unmatched runs are literal.
+ * Mirrors takeInlineCode.
+ */
+private fun takeInlineCode(text: String, stash: (String) -> String): String {
+  val out = StringBuilder()
+  var i = 0
+  while (i < text.length) {
+    if (text[i] != '`') {
+      out.append(text[i])
+      i++
+      continue
+    }
+    var n = 0
+    while (i + n < text.length && text[i + n] == '`') n++
+    val close = findInlineCodeClose(text, i + n, n)
+    if (close == -1) {
+      out.append(text, i, i + n)
+      i += n
+    } else {
+      out.append(stash(text.substring(i + n, close)))
+      i = close + n
+    }
+  }
+  return out.toString()
+}
+
+/**
+ * `[label](dest)` keeps the label and `![alt](src)` keeps the alt. Bracket and
+ * destination matching are stack-based, so nested `[]` or `()` cannot end a
+ * link early; malformed candidates stay literal. Mirrors takeLinks.
+ */
+private fun takeLinks(text: String): String {
+  val closeBracket = closerAt(text, '[', ']')
+  val closeParen = closerAt(text, '(', ')')
+  val out = StringBuilder()
+  var i = 0
+  while (i < text.length) {
+    val image = text.startsWith("![", i)
+    if (image || text[i] == '[') {
+      val open = if (image) i + 1 else i
+      val labelEnd = closeBracket[open]
+      if (labelEnd != null && labelEnd + 1 < text.length && text[labelEnd + 1] == '(') {
+        val destEnd = closeParen[labelEnd + 1]
+        if (destEnd != null) {
+          out.append(text, open + 1, labelEnd)
+          i = destEnd + 1
+          continue
+        }
+      }
+    }
+    out.append(text[i])
+    i++
+  }
+  return out.toString()
+}
+
+/** Matching-close index for each opener; a backslash skips the next char. Mirrors closerAt. */
+private fun closerAt(text: String, open: Char, close: Char): Array<Int?> {
+  val closeAt = arrayOfNulls<Int>(text.length)
+  val stack = mutableListOf<Int>()
+  var i = 0
+  while (i < text.length) {
+    if (text[i] == '\\') {
+      i += 2
+      continue
+    }
+    if (text[i] == open) {
+      stack.add(i)
+    } else if (text[i] == close) {
+      val start = if (stack.isEmpty()) null else stack.removeAt(stack.lastIndex)
+      if (start != null) closeAt[start] = i
+    }
+    i++
+  }
+  return closeAt
+}
+
+/**
+ * Source window for a preview. Messages that already fit are returned whole.
+ * Past the cap, leading whitespace is skipped first so a pad cannot hide the body.
+ * Mirrors boundedPreviewSource.
+ */
+private data class PreviewSource(val text: String, val truncated: Boolean)
+
+private fun boundedPreviewSource(markdown: String): PreviewSource {
+  val normalized = markdown.replace("\r\n", "\n")
+  if (normalized.length <= MAX_PREVIEW_SOURCE) return PreviewSource(normalized, false)
+  val body = normalized.trimStart()
+  if (body.length <= MAX_PREVIEW_SOURCE) return PreviewSource(body, false)
+  var end = MAX_PREVIEW_SOURCE
+  if (body[end - 1].isHighSurrogate()) end -= 1
+  return PreviewSource(body.substring(0, end), true)
+}
+
+/**
+ * Fenced blocks stash their body (open/close lines dropped) so interior text
+ * — separators, pipes, markers — survives untouched. Unclosed fences stay
+ * literal lines, except when the preview cap cut off the closer: that body
+ * is stashed so the opener and stripped code cannot leak into the preview.
+ * A scan that finds no closer line does not rescan the tail. Mirrors takeFencedCode.
+ */
+private fun takeFencedCode(
+  text: String,
+  stash: (String) -> String,
+  truncated: Boolean,
+): String {
+  val lines = text.split("\n")
+  val out = mutableListOf<String>()
+  var i = 0
+  while (i < lines.size) {
+    val line = lines[i]
+    val open = FENCE_OPEN.matchEntire(line)
+    val marker = open?.groupValues?.get(1)
+    if (open == null || marker == null ||
+      (marker[0] == '`' && open.groupValues[2].contains('`'))
+    ) {
+      out.add(line)
+      i++
+      continue
+    }
+    val body = mutableListOf<String>()
+    var closed = false
+    var sawCloser = false
+    var j = i + 1
+    while (j < lines.size) {
+      val close = FENCE_OPEN.matchEntire(lines[j])
+      val closeMarker = close?.groupValues?.get(1)
+      if (close != null && closeMarker != null && close.groupValues[2].isBlank()) {
+        sawCloser = true
+        if (closeMarker[0] == marker[0] && closeMarker.length >= marker.length) {
+          closed = true
+          break
+        }
+      }
+      body.add(lines[j])
+      j++
+    }
+    if (!closed) {
+      if (truncated && j == lines.size) {
+        out.add(stash(body.joinToString("\n")))
+        break
+      }
+      out.add(line)
+      if (!sawCloser) {
+        for (k in i + 1 until lines.size) out.add(lines[k])
+        break
+      }
+      i++
+      continue
+    }
+    out.add(stash(body.joinToString("\n")))
+    i = j + 1
+  }
+  return out.joinToString("\n")
+}
+
+/** Matching `>` for a tag at `<`, ignoring `>` inside quoted attributes. Mirrors htmlTagClose. */
+private fun htmlTagClose(text: String, open: Int): Int {
+  var quote: Char? = null
+  var gtInOpenQuote = -1
+  for (i in open + 1 until text.length) {
+    val ch = text[i]
+    if (quote != null) {
+      if (ch == quote) {
+        quote = null
+        gtInOpenQuote = -1
+        continue
+      }
+      if (ch == '>' && gtInOpenQuote == -1) gtInOpenQuote = i
+      continue
+    }
+    if (ch == '"' || ch == '\'') {
+      quote = ch
+      continue
+    }
+    if (ch == '>') return i
+  }
+  if (gtInOpenQuote != -1) return gtInOpenQuote
+  // Unclosed quote with no `>`: consume the rest so attribute text cannot leak.
+  return if (quote != null && text.length > open + 1) text.length - 1 else -1
+}
+
+private val HTML_TAG_START =
+  Regex("""(?:[!?]|/?[A-Za-z][A-Za-z0-9-]*(?:[/>]|\s+(?:[/>]|[A-Za-z_:@][^\s"'<>/=&]*(?:[\s=/>]|$))))""")
+
+/** A tag opens with `!`, `?`, or a name followed by whitespace, `/` or `>` and attribute-like content. Mirrors isHtmlTagStart. */
+private fun isHtmlTagStart(text: String, at: Int): Boolean =
+  HTML_TAG_START.matchAt(text, at + 1) != null
+
+/** `<...>` spans that open like a tag drop to a single space. Mirrors stripHtmlTags. */
+private fun stripHtmlTags(text: String): String {
+  val out = StringBuilder()
+  var i = 0
+  while (i < text.length) {
+    if (text[i] == '<' && isHtmlTagStart(text, i)) {
+      val close = htmlTagClose(text, i)
+      if (close != -1) {
+        out.append(' ')
+        i = close + 1
+        continue
+      }
+    }
+    out.append(text[i])
+    i++
+  }
+  return out.toString()
+}
+
+private data class Delimiter(val start: Int, val end: Int, var removed: Int)
+
+/** Pair delimiter runs once, without rescanning unmatched suffixes. Mirrors stripUnderscoreEmphasis. */
+private fun stripUnderscoreEmphasis(text: String): String {
+  val delimiters = mutableListOf<Delimiter>()
+  val openers = mutableListOf<Delimiter>()
+  var previousEnd = 0
+  for (match in UNDERSCORE_RUN.findAll(text)) {
+    val start = match.range.first
+    val end = start + match.value.length
+    if (text.substring(previousEnd, start).contains("\n")) {
+      openers.clear()
+    }
+    previousEnd = end
+    val delimiter = Delimiter(start, end, 0)
+    delimiters.add(delimiter)
+    // Two UTF-16 units preserve astral letters when checking each adjacent code point.
+    val before = text.substring(maxOf(0, start - 2), start)
+    val after = text.substring(end, minOf(end + 2, text.length))
+    val canClose = !WORD_CHAR_AT_START.containsMatchIn(after) && NON_SPACE_AT_END.containsMatchIn(before)
+    var remaining = end - start
+    while (canClose && remaining > 0 && openers.isNotEmpty()) {
+      val opener = openers.last()
+      val available = opener.end - opener.start - opener.removed
+      val paired = minOf(available, remaining)
+      opener.removed += paired
+      delimiter.removed += paired
+      remaining -= paired
+      if (paired == available) openers.removeAt(openers.lastIndex)
+    }
+    if (remaining > 0 && !WORD_CHAR_AT_END.containsMatchIn(before) && NON_SPACE_AT_START.containsMatchIn(after)) {
+      openers.add(delimiter)
+    }
+  }
+  val out = StringBuilder()
+  var from = 0
+  for (delimiter in delimiters) {
+    if (delimiter.removed == 0) continue
+    out.append(text, from, delimiter.start)
+    out.append("_".repeat(delimiter.end - delimiter.start - delimiter.removed))
+    from = delimiter.end
+  }
+  out.append(text, from, text.length)
+  return out.toString()
+}
+
+/** Every GFM delimiter cell needs at least one hyphen: `| : |` is content. */
+private fun isTableSeparator(line: String): Boolean {
+  val trimmed = line.trim()
+  if (!trimmed.contains("-")) return false
+  return trimmed.removePrefix("|").removeSuffix("|").split("|")
+    .all { it.trim().matches(Regex(":?-+:?")) }
+}
+
+/** Heading, quote, list and break markers; the line's own text survives. */
+private fun stripLineMarker(line: String): String {
+  val stripped = line
+    .replace(Regex("^\\s{0,3}#{1,6}\\s+"), "")
+    .replace(Regex("^\\s*>\\s?"), "")
+    .replace(Regex("^\\s*[-*+]\\s+"), "")
+    .replace(Regex("^\\s*\\d+[.)]\\s+"), "")
+  return if (BREAK_LINE.matches(stripped)) "" else stripped
+}
+
+private fun findInlineCodeClose(line: String, from: Int, n: Int): Int {
+  var i = from
+  while (i < line.length) {
+    if (line[i] != '`') {
+      i++
+      continue
+    }
+    var m = 0
+    while (i + m < line.length && line[i + m] == '`') m++
+    if (m == n) return i
+    i += m
+  }
+  return -1
+}
+
+/**
+ * Split a row on plain pipes. Code spans and escapes arrive as payload tokens
+ * (see takeInlineCode/takeEscapes), so no in-cell syntax can shield a pipe.
+ */
+private fun splitTableCells(line: String): String {
+  val cells = mutableListOf<String>()
+  val cell = StringBuilder()
+  var i = 0
+  while (i < line.length) {
+    val ch = line[i]
+    if (ch == '|') {
+      cells.add(cell.toString())
+      cell.setLength(0)
+    } else {
+      cell.append(ch)
+    }
+    i++
+  }
+  cells.add(cell.toString())
+  return cells.map(String::trim).filter(String::isNotEmpty).joinToString(", ")
+}
+
+/**
+ * One line per table row ("a, b"). A separator opens a table only after a
+ * pipe-bearing header line; inside a table every pipe line is a data row —
+ * including dash-only rows — until a no-pipe line ends it. Pipe-wrapped lines
+ * still flatten leniently outside tables. Fenced code and lines carrying a
+ * block marker are never table content; a quoted stand-alone row like
+ * `> | a |` still flattens, while a marked separator row stays syntax.
+ * Mirrors `flattenTableRows`.
+ */
+private fun flattenTableRows(text: String): String {
+  val lines = text.split("\n")
+  val out = mutableListOf<String>()
+  var inTable = false
+  var prevHadPipe = false
+  var prevFlattened = false
+  // Fenced bodies arrived stashed; an unclosed fence line stays literal here.
+  for (rawLine in lines) {
+    val line = stripLineMarker(rawLine)
+    if (line != rawLine) {
+      inTable = false
+      prevHadPipe = false
+      prevFlattened = false
+      // A separator row stays syntax even behind a quote or list marker.
+      if (!isTableSeparator(line)) {
+        out.add(if (TABLE_ROW.matches(line)) splitTableCells(line) else line)
+      }
+      continue
+    }
+    if (!line.contains("|")) {
+      inTable = false
+      prevHadPipe = false
+      prevFlattened = false
+      out.add(line)
+      continue
+    }
+    if (inTable) {
+      out.add(splitTableCells(line))
+      prevHadPipe = true
+      prevFlattened = true
+      continue
+    }
+    if (isTableSeparator(line)) {
+      if (prevHadPipe) {
+        inTable = true
+        if (!prevFlattened && out.isNotEmpty()) out[out.size - 1] = splitTableCells(out.last())
+      }
+      continue
+    }
+    if (TABLE_ROW.matches(line)) {
+      out.add(splitTableCells(line))
+      prevFlattened = true
+    } else {
+      out.add(line)
+      prevFlattened = false
+    }
+    prevHadPipe = true
+  }
+  return out.joinToString("\n")
+}
+
+/**
+ * Reply Markdown → a single notification line. A native port of
+ * `plainTextFromMarkdown`; intentionally lossy — the body is a preview,
+ * not the message.
+ */
+internal fun markdownToPreview(markdown: String): String {
+  // Payloads use a fixed one-char token alphabet: literal mark characters in
+  // the source are stashed first so tokens can never collide, token length is
+  // constant regardless of input, and payload count is bounded by input size —
+  // an adversarial reply cannot inflate the intermediate string.
+  val mark = PAYLOAD_MARK.toString()
+  val markToken = "${mark}0$mark"
+  val payloads = mutableListOf(mark)
+  // Restored payload text is never rescanned — literal marks that come back
+  // out of a payload cannot form phantom tokens. Payloads only ever contain
+  // earlier tokens, so the recursion is bounded by the payload count.
+  val tokenRe = Regex("$mark(\\d+)$mark")
+  fun restore(s: String): String =
+    tokenRe.replace(s) { m -> restore(payloads.getOrElse(m.groupValues[1].toIntOrNull() ?: -1) { "" }) }
+  // A payload's text must never carry a raw mark: one could sit next to digits
+  // and impersonate a token on restore. Marks are rewritten as payload-0 tokens.
+  val stash = { payload: String ->
+    payloads.add(payload.replace(mark, markToken))
+    "$mark${payloads.size - 1}$mark"
+  }
+  val source = boundedPreviewSource(markdown)
+  var text = source.text.replace(mark, markToken)
+  text = takeFencedCode(text, stash, source.truncated)
+  text = takeInlineCode(text, stash)
+  text = takeEscapes(text, stash)
+  text = takeLinks(text)
+  // Autolinks may contain stashed escapes; flatten only those literal payloads.
+  text = AUTOLINK_URL.replace(text) { m -> stash(restore(m.groupValues[1])) }
+  text = AUTOLINK_EMAIL.replace(text) { m -> stash(restore(m.groupValues[1])) }
+  text = stripUnderscoreEmphasis(stripHtmlTags(text))
+  // Table rows keep only their cells; a separator row is pure syntax.
+  // flattenTableRows also strips heading/list/quote/break markers per line so
+  // it can see them: a marked line interrupts the table instead of becoming a
+  // phantom row, while its stripped text still previews. Runs before the
+  // emphasis strips so "| **a** |" still reads "a".
+  text = flattenTableRows(text)
+    .replace(Regex("\\*\\*(.*?)\\*\\*"), "$1")
+    .replace(Regex("\\*([^*\\n]+)\\*"), "$1")
+    .replace(Regex("~~(.*?)~~"), "$1")
+  return restore(text).replace(Regex("\\s+"), " ").trim()
 }
 
 private fun rpc(
   endpoint: String,
   token: String,
   spaceId: String,
+  headers: String,
   procedure: String,
   input: JSONObject,
 ): JSONObject {
@@ -493,6 +999,10 @@ private fun rpc(
     connection.connectTimeout = 8_000
     connection.readTimeout = 15_000
     connection.doOutput = true
+    // An access proxy in front of the server answers a refused request with a redirect to its login
+    // page; following it would read that page as the server's answer.
+    connection.instanceFollowRedirects = false
+    serverHeaders(headers).forEach { (name, value) -> connection.setRequestProperty(name, value) }
     connection.setRequestProperty("Content-Type", "application/json")
     connection.setRequestProperty("Origin", "rakazo://")
     connection.setRequestProperty("Authorization", "Bearer $token")
@@ -505,10 +1015,28 @@ private fun rpc(
     val status = connection.responseCode
     if (status !in 200..299) throw ApiException(status)
     val body = connection.inputStream.bufferedReader().use { it.readText() }
-    JSONObject(body).optJSONObject("json") ?: throw IOException("Invalid server response")
+    val root = try {
+      JSONObject(body)
+    } catch (_: JSONException) {
+      throw IOException("Invalid server response")
+    }
+    root.optJSONObject("json") ?: throw IOException("Invalid server response")
   } finally {
     connection.disconnect()
   }
+}
+
+/** The saved headers; a value that is not a JSON object of strings sends none. */
+private fun serverHeaders(headers: String): Map<String, String> {
+  if (headers.isBlank()) return emptyMap()
+  val root = try {
+    JSONObject(headers)
+  } catch (_: JSONException) {
+    return emptyMap()
+  }
+  return root.keys().asSequence().mapNotNull { name ->
+    (root.opt(name) as? String)?.let { name to it }
+  }.toMap()
 }
 
 private fun JSONObject.requiredString(name: String): String =
@@ -516,3 +1044,37 @@ private fun JSONObject.requiredString(name: String): String =
 
 private fun JSONObject.optionalString(name: String): String? =
   if (isNull(name)) null else optString(name).takeIf(String::isNotBlank)
+
+internal fun localizedContext(base: Context, tag: String): Context {
+  if (tag.isBlank()) return base
+  val configuration = Configuration(base.resources.configuration)
+  configuration.setLocale(Locale.forLanguageTag(tag))
+  return base.createConfigurationContext(configuration)
+}
+
+internal fun createRakazoChannels(base: Context) {
+  if (Build.VERSION.SDK_INT < 26) return
+  val context = localizedContext(base, NotificationStorage(base).locale)
+  listOf(
+    NotificationChannel(
+      Channels.LIVE,
+      context.getString(R.string.rakazo_channel_live),
+      NotificationManager.IMPORTANCE_LOW,
+    ),
+    NotificationChannel(
+      Channels.MESSAGES,
+      context.getString(R.string.rakazo_channel_messages),
+      NotificationManager.IMPORTANCE_DEFAULT,
+    ),
+    NotificationChannel(
+      Channels.SCHEDULED,
+      context.getString(R.string.rakazo_channel_scheduled),
+      NotificationManager.IMPORTANCE_DEFAULT,
+    ),
+    NotificationChannel(
+      Channels.ATTENTION,
+      context.getString(R.string.rakazo_channel_attention),
+      NotificationManager.IMPORTANCE_HIGH,
+    ),
+  ).forEach(context.getSystemService(NotificationManager::class.java)::createNotificationChannel)
+}

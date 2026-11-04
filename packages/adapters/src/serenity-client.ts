@@ -1,27 +1,34 @@
-import { isIP } from "node:net";
+import { lookup } from "node:dns/promises";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { isLocalMcpHost } from "@rakazo/contracts";
-import { Agent } from "undici";
-import { combineSignals } from "./connector-safety.js";
 import {
-  createAddressCheckedLookup,
+  ipVersion,
   isCloudMetadataAddress,
-  isPrivateAddress,
-  type ResolvedAddress,
-  type ResolveHostname,
-} from "./network-address.js";
+  isLocalhostOrLoopbackIp,
+  isNonPublicAddress,
+} from "@rakazo/contracts";
+import { cancelResponseBody } from "@rakazo/core";
+import { Agent } from "undici";
 import {
-  createSafeRemoteFetch,
-  type RemoteTransportDependencies,
-  type SafeRemoteFetch,
-} from "./remote-mcp.js";
-import { dispatcherFetch } from "./undici-fetch.js";
+  combineSignals,
+  redactConnectorPayload,
+  sanitizeConnectorError,
+} from "./connector-safety.js";
+import type { ResolvedAddress, ResolveHostname } from "./network-address.js";
+import { createAddressCheckedLookup } from "./network-address.js";
+import type { RemoteTransportDependencies, SafeRemoteFetch } from "./remote-mcp.js";
+import { createSafeRemoteFetch } from "./remote-mcp.js";
+import { fetchPairedWithDispatcher } from "./undici-fetch.js";
 import { isBlockedHostname } from "./web-ssrf.js";
 
 const SERENITY_TIMEOUT_MS = 15_000;
+const SERENITY_TERMINATE_TIMEOUT_MS = 2_000;
 export const MAX_SERENITY_FACT_CHARS = 10_000;
+/** Hosted Serenity rejects larger facts; self-hosted brains share the same bound. */
+export const MAX_SERENITY_FACT_BYTES = 4096;
 export const MAX_SERENITY_PROVENANCE_CHARS = 500;
+/** The most facts one recall returns. */
+const MAX_SERENITY_RECALL_LIMIT = 100;
 
 export type SerenityNetworkDependencies = RemoteTransportDependencies;
 
@@ -54,8 +61,9 @@ export interface SerenityForgetResult {
   reason: string | null;
 }
 
-/** Endpoints are route prefixes: no credentials, query, or fragment. */
+/** Endpoints are route prefixes: no credentials, query, or fragment. There is no default URL. */
 export function parseSerenityEndpoint(endpoint: string): URL {
+  if (!endpoint.trim()) throw new Error("Serenity endpoint is required.");
   let url: URL;
   try {
     url = new URL(endpoint);
@@ -93,11 +101,11 @@ function hostnameOf(url: URL): string {
 }
 
 /** Loopback, RFC1918/ULA literals, or HTTP need deployment-owner authorization. */
-export function serenityEndpointRequiresDeploymentOwner(endpoint: string): boolean {
+export function serenityEndpointRequiresPrivateEndpoint(endpoint: string): boolean {
   const url = parseSerenityEndpoint(endpoint);
   const host = hostnameOf(url);
-  if (isLocalMcpHost(host) || isBlockedHostname(host)) return true;
-  if (isIP(host) !== 0) return isPrivateAddress(host);
+  if (isLocalhostOrLoopbackIp(host) || isBlockedHostname(host)) return true;
+  if (ipVersion(host) !== 0) return isNonPublicAddress(host);
   // Unresolved public-looking hostnames may still be LAN DNS over HTTP.
   return url.protocol === "http:";
 }
@@ -111,14 +119,10 @@ export async function classifySerenityEndpointTrust(
   resolveHostname?: ResolveHostname,
 ): Promise<"private" | "public"> {
   const url = parseSerenityEndpoint(endpoint);
-  if (serenityEndpointRequiresDeploymentOwner(url.href)) return "private";
+  if (serenityEndpointRequiresPrivateEndpoint(url.href)) return "private";
   const host = hostnameOf(url);
   const resolve =
-    resolveHostname ??
-    (async (hostname: string) => {
-      const { lookup } = await import("node:dns/promises");
-      return lookup(hostname, { all: true, verbatim: true });
-    });
+    resolveHostname ?? ((hostname: string) => lookup(hostname, { all: true, verbatim: true }));
   const addresses = await resolve(host);
   if (addresses.length === 0) {
     throw new Error("Serenity endpoint did not resolve to an address.");
@@ -126,7 +130,7 @@ export async function classifySerenityEndpointTrust(
   if (addresses.some((entry) => isCloudMetadataAddress(entry.address))) {
     throw new Error("Serenity endpoint targets a blocked address.");
   }
-  if (addresses.some((entry) => isPrivateAddress(entry.address))) return "private";
+  if (addresses.some((entry) => isNonPublicAddress(entry.address))) return "private";
   return "public";
 }
 
@@ -137,7 +141,7 @@ function assertAllowedSerenityEndpoint(url: URL): void {
   }
   if (url.protocol === "http:") {
     // Bearer tokens stay on the wire; only loopback may use cleartext HTTP.
-    if (!isLocalMcpHost(host)) {
+    if (!isLocalhostOrLoopbackIp(host)) {
       throw new Error(
         "Serenity HTTP endpoints are limited to loopback (localhost / 127.0.0.1 / ::1); use HTTPS for LAN or public hosts.",
       );
@@ -178,13 +182,34 @@ function toolCallIsError(result: unknown): boolean {
 
 function verbErrorMessage(payload: unknown, fallback: string): string {
   if (!payload || typeof payload !== "object") return fallback;
-  const row = payload as { error?: unknown; message?: unknown; suggestion?: unknown };
+  const row = payload as {
+    error?: unknown;
+    message?: unknown;
+    suggestion?: unknown;
+    reset_at?: unknown;
+  };
+  const message = typeof row.message === "string" ? row.message : null;
+  const code = typeof row.error === "string" && row.error !== message ? `(${row.error})` : null;
   const parts = [
-    typeof row.message === "string" ? row.message : null,
-    typeof row.error === "string" ? `(${row.error})` : null,
+    message,
+    code,
     typeof row.suggestion === "string" ? row.suggestion : null,
+    typeof row.reset_at === "string" ? `Resets at ${row.reset_at}.` : null,
   ].filter(Boolean);
   return parts.length > 0 ? parts.join(" ") : fallback;
+}
+
+/** Surface hosted gateway rate limits plainly instead of as an opaque transport error. */
+function assertNotRateLimited(response: Response): Response {
+  if (response.status !== 429) return response;
+  const retryAfter = response.headers.get("retry-after")?.trim();
+  // Retry-After is either delta-seconds or an HTTP date.
+  const when = !retryAfter ? null : /^\d+$/.test(retryAfter) ? `${retryAfter}s` : retryAfter;
+  throw new Error(
+    when
+      ? `Serenity rate limit reached; retry after ${when}.`
+      : "Serenity rate limit reached; retry shortly.",
+  );
 }
 
 /**
@@ -196,17 +221,14 @@ function serenityFetchPath(
   config: SerenityConnectionConfig,
   url: URL,
 ): "private-literal" | "private-dns" | "public" {
-  if (config.endpointTrust === "private" || serenityEndpointRequiresDeploymentOwner(url.href)) {
-    return isIP(hostnameOf(url)) !== 0 ? "private-literal" : "private-dns";
+  if (config.endpointTrust === "private" || serenityEndpointRequiresPrivateEndpoint(url.href)) {
+    return ipVersion(hostnameOf(url)) !== 0 ? "private-literal" : "private-dns";
   }
   return "public";
 }
 
 function defaultResolveHostname(): ResolveHostname {
-  return async (hostname: string) => {
-    const { lookup } = await import("node:dns/promises");
-    return lookup(hostname, { all: true, verbatim: true });
-  };
+  return (hostname: string) => lookup(hostname, { all: true, verbatim: true });
 }
 
 function assertPrivateLanAddresses(addresses: ResolvedAddress[]): void {
@@ -216,7 +238,7 @@ function assertPrivateLanAddresses(addresses: ResolvedAddress[]): void {
   if (addresses.some((entry) => isCloudMetadataAddress(entry.address))) {
     throw new Error("Serenity endpoint targets a blocked address.");
   }
-  if (addresses.some((entry) => !isPrivateAddress(entry.address))) {
+  if (addresses.some((entry) => !isNonPublicAddress(entry.address))) {
     throw new Error("Serenity endpoint no longer resolves to a private address.");
   }
 }
@@ -226,10 +248,11 @@ function assertPrivateLanAddresses(addresses: ResolvedAddress[]): void {
  * Resolve once, then reuse those addresses in the dispatcher lookup so a second DNS
  * answer cannot redirect the bearer token to a different internal host.
  */
-function createSerenityPrivateLanFetch(
-  baseFetch: typeof globalThis.fetch = dispatcherFetch,
+export function createSerenityPrivateLanFetch(
+  baseFetch?: typeof globalThis.fetch,
   resolve: ResolveHostname = defaultResolveHostname(),
 ): SafeRemoteFetch {
+  const transport = fetchPairedWithDispatcher(baseFetch);
   const privateFetch = async (input: string | URL | Request, init?: RequestInit) => {
     if (typeof input !== "string" && !(input instanceof URL)) {
       throw new Error("Serenity fetch requires a URL, not a Request");
@@ -243,12 +266,13 @@ function createSerenityPrivateLanFetch(
       },
     });
     try {
-      const response = await baseFetch(url, {
+      const response = await transport(url, {
         ...init,
         redirect: "manual",
         dispatcher,
       } as RequestInit & { dispatcher: Agent });
       if (response.status >= 300 && response.status < 400) {
+        cancelResponseBody(response);
         throw new Error("Serenity MCP redirects are not permitted; configure the final URL.");
       }
       return response;
@@ -293,19 +317,33 @@ async function withSerenityClient<T>(
       signal: requestSignal,
     },
     fetch: async (input, init) => {
-      if (pinnedFetch) return pinnedFetch(input, init);
+      if (pinnedFetch) return assertNotRateLimited(await pinnedFetch(input, init));
       const response = await localFetch(input, { ...init, redirect: "manual" });
       if (response.status >= 300 && response.status < 400) {
+        cancelResponseBody(response);
         throw new Error("Serenity MCP redirects are not permitted; configure the final URL.");
       }
-      return response;
+      return assertNotRateLimited(response);
     },
   });
   const client = new Client({ name: "rakazo", version: "0.1.0" }, { capabilities: {} });
   try {
     await client.connect(transport, { signal: requestSignal, timeout: SERENITY_TIMEOUT_MS });
-    return await run(client, requestSignal);
+    // A server or proxy may echo the bearer token it received; never hand it to the model.
+    return redactConnectorPayload(await run(client, requestSignal), [config.token]) as T;
   } finally {
+    // Each verb opens its own MCP session; end it server-side instead of leaving it to expire.
+    // The SDK's DELETE ignores our request signal, so bound it before closing.
+    if (transport.sessionId) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        transport.terminateSession().catch(() => undefined),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, SERENITY_TERMINATE_TIMEOUT_MS);
+        }),
+      ]);
+      clearTimeout(timer);
+    }
     await client.close().catch(() => undefined);
     await pinnedFetch?.close().catch(() => undefined);
   }
@@ -343,20 +381,23 @@ export async function probeSerenity(
   } catch (error) {
     return {
       ok: false,
-      error: `Serenity is unreachable: ${error instanceof Error ? error.message : String(error)}`,
+      error: `Serenity is unreachable: ${sanitizeConnectorError(error, [config.token])}`,
     };
   }
 }
 
+/**
+ * Lists an entity's newest facts, up to the server maximum. Recall's `query` only drives a
+ * separate page search; facts are filtered by entity and sorted newest first regardless of it,
+ * so the query is omitted and callers rank the facts themselves.
+ */
 export async function recallSerenity(
-  query: string,
   config: SerenityConnectionConfig,
   options: {
-    limit: number;
     entity?: string;
     signal?: AbortSignal;
     network?: SerenityNetworkDependencies;
-  },
+  } = {},
 ): Promise<SerenityResult<SerenityRecallFact[]>> {
   try {
     const payload = await withSerenityClient(
@@ -367,8 +408,7 @@ export async function recallSerenity(
           {
             name: "recall",
             arguments: {
-              query,
-              limit: Math.min(Math.max(1, Math.floor(options.limit)), 50),
+              limit: MAX_SERENITY_RECALL_LIMIT,
               ...(options.entity ? { entity: options.entity } : {}),
             },
           },
@@ -383,11 +423,11 @@ export async function recallSerenity(
       },
       options.network,
     );
-    return { ok: true, value: parseRecallFacts(payload).slice(0, options.limit) };
+    return { ok: true, value: parseRecallFacts(payload) };
   } catch (error) {
     return {
       ok: false,
-      error: `Serenity recall failed: ${error instanceof Error ? error.message : String(error)}`,
+      error: `Serenity recall failed: ${sanitizeConnectorError(error, [config.token])}`,
     };
   }
 }
@@ -398,13 +438,21 @@ export async function rememberSerenity(
   config: SerenityConnectionConfig,
   options: {
     entity?: string;
+    /** Serenity replays the same fact for a repeated key instead of writing a duplicate. */
+    operationKey?: string;
     signal?: AbortSignal;
     network?: SerenityNetworkDependencies;
   } = {},
 ): Promise<SerenityResult<SerenityRememberResult>> {
-  const trimmedFact = fact.trim().slice(0, MAX_SERENITY_FACT_CHARS);
+  const trimmedFact = fact.trim();
   const trimmedProvenance = provenance.trim().slice(0, MAX_SERENITY_PROVENANCE_CHARS);
   if (!trimmedFact) return { ok: false, error: "fact is required" };
+  if (Buffer.byteLength(trimmedFact, "utf8") > MAX_SERENITY_FACT_BYTES) {
+    return {
+      ok: false,
+      error: `fact exceeds ${MAX_SERENITY_FACT_BYTES} bytes; save a shorter fact`,
+    };
+  }
   if (!trimmedProvenance) return { ok: false, error: "provenance is required" };
   try {
     const payload = await withSerenityClient(
@@ -418,6 +466,7 @@ export async function rememberSerenity(
               fact: trimmedFact,
               provenance: trimmedProvenance,
               ...(options.entity ? { entity: options.entity } : {}),
+              ...(options.operationKey ? { operation_key: options.operationKey } : {}),
             },
           },
           undefined,
@@ -449,7 +498,7 @@ export async function rememberSerenity(
   } catch (error) {
     return {
       ok: false,
-      error: `Serenity remember failed: ${error instanceof Error ? error.message : String(error)}`,
+      error: `Serenity remember failed: ${sanitizeConnectorError(error, [config.token])}`,
     };
   }
 }
@@ -508,7 +557,7 @@ export async function forgetSerenity(
   } catch (error) {
     return {
       ok: false,
-      error: `Serenity forget failed: ${error instanceof Error ? error.message : String(error)}`,
+      error: `Serenity forget failed: ${sanitizeConnectorError(error, [config.token])}`,
     };
   }
 }

@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
 set -uo pipefail
+source /usr/local/lib/rakazo-user-env.sh
 export DISPLAY="${DISPLAY:-:1}"
 export HOME="${HOME:-/home/rakazo}"
 AGENT_HOME="$HOME"
 mkdir -p "$AGENT_HOME" "$AGENT_HOME/.local/bin" "$AGENT_HOME/.config" /tmp/rakazo /tmp/.X11-unix /tmp/fluxbox-home
+# Login shells re-apply ~/.local/bin from /etc/profile.d/rakazo-local-bin.sh.
 export PATH="$AGENT_HOME/.local/bin:/usr/local/bin:$PATH"
 export NPM_CONFIG_PREFIX="$AGENT_HOME/.local"
 export PIP_USER=1
 cd "$AGENT_HOME"
 
-# This script is PID 1. Without a handler, PID 1 ignores SIGTERM and `docker stop` waits its
-# full grace period before killing the container, so every stop, sleep and computer switch
-# took ten seconds. Install the handler before any child starts so a stop during startup is
-# honoured too: forward the signal to the desktop processes and exit promptly.
+# This script is PID 1, which ignores SIGTERM without a handler, so `docker stop` would wait out
+# its grace period. Install the handler before any child starts so a stop during startup is
+# honoured too.
 XVFB_PID=""
 shutdown() {
   trap - TERM INT
@@ -28,7 +29,10 @@ shutdown() {
 trap shutdown TERM INT
 
 if [[ -n "${RAKAZO_COMPUTER_CONTROL_TOKEN:-}" ]]; then
-  /usr/local/bin/rakazo-computer-control >/tmp/rakazo/control.log 2>&1 &
+  while true; do
+    /usr/local/bin/rakazo-computer-control
+    sleep 1
+  done >/tmp/rakazo/control.log 2>&1 &
 fi
 
 rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
@@ -52,6 +56,19 @@ fi
 
 if command -v dbus-launch >/dev/null 2>&1; then
   eval "$(dbus-launch --sh-syntax)"
+  # rakazo-browser is launched later without this session's environment; the
+  # file-chooser portals only work if the browser finds the same bus.
+  printf 'export DBUS_SESSION_BUS_ADDRESS=%s\n' "$DBUS_SESSION_BUS_ADDRESS" \
+    > /tmp/rakazo/dbus-session
+fi
+
+# Chromium's file chooser talks to xdg-desktop-portal over the session bus.
+# Without a running portal backend, the select-file dialog opens but the
+# chosen file never reaches the page — uploads silently do nothing. The
+# daemons install as flat files in /usr/libexec on Debian bookworm.
+if [ -x /usr/libexec/xdg-desktop-portal ] && [ -x /usr/libexec/xdg-desktop-portal-gtk ]; then
+  /usr/libexec/xdg-desktop-portal >/tmp/rakazo/portal.log 2>&1 &
+  /usr/libexec/xdg-desktop-portal-gtk >/tmp/rakazo/portal-gtk.log 2>&1 &
 fi
 
 xsetroot -solid "#111113" >/dev/null 2>&1 || true
@@ -103,6 +120,7 @@ if [[ ! -f "$NOVNC_ROOT/mobile-keyboard.js" ]]; then
   echo "noVNC mobile-keyboard.js is missing from the computer image" >&2
   exit 1
 fi
+# The screen proxy reaches this isolated container through its bridge interface.
 websockify --heartbeat=30 --web="$NOVNC_ROOT" --token-plugin=TokenFile --token-source=/tmp/rakazo/view-target-1 0.0.0.0:6080 >/tmp/rakazo/novnc.log 2>&1 &
 
 wait "$XVFB_PID"

@@ -4,9 +4,12 @@ import path from "node:path";
 import { SCRIPTED_MPEG, SCRIPTED_TRANSCRIPT, SCRIPTED_VOICE_ID } from "@rakazo/adapters";
 import type { PrismaClient } from "@rakazo/db";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import type { BotIntroHarness } from "./discard-bot-intro.js";
+import { discardBotIntroFromCreate } from "./discard-bot-intro.js";
 import { sessionCookieHeader } from "./index.js";
+import { asSystem } from "./system-db.js";
 
-type App = { request: (input: string, init?: RequestInit) => Promise<Response> };
+type App = { request: (input: string, init?: RequestInit) => Response | Promise<Response> };
 
 process.env.WAKEUP_DRIVER = "memory";
 process.env.SANDBOX_PROVIDER = "fake";
@@ -14,6 +17,7 @@ process.env.AGENT_RUNTIME = "scripted";
 
 const hasDb = process.env.VERIFY_DATABASE === "1" && Boolean(process.env.DATABASE_URL);
 const describeVoice = hasDb ? describe : describe.skip;
+let botIntroHarness: BotIntroHarness | undefined;
 
 describeVoice("voice credentials and speech HTTP", () => {
   let app: App;
@@ -23,7 +27,7 @@ describeVoice("voice credentials and speech HTTP", () => {
   const dataDir = mkdtempSync(path.join(tmpdir(), "rakazo-voice-"));
 
   beforeAll(async () => {
-    const { createApp } = await import("../../../apps/api/src/app.ts");
+    const { createApp } = await import("@rakazo/api/app");
     const handles = await createApp({
       databaseUrl: process.env.DATABASE_URL!,
       dataDir,
@@ -31,8 +35,9 @@ describeVoice("voice credentials and speech HTTP", () => {
       agentRuntime: "scripted",
     });
     app = handles.app;
-    prisma = handles.prisma;
+    prisma = asSystem(handles.prisma);
     stop = handles.stop;
+    botIntroHarness = handles;
   });
 
   afterAll(async () => {
@@ -172,6 +177,9 @@ describeVoice("voice credentials and speech HTTP", () => {
     await expect(
       prisma.spaceVoicePreference.count({ where: { credentialId: stored.id } }),
     ).resolves.toBe(0);
+    await expect(
+      prisma.userVoicePreference.count({ where: { credentialId: stored.id } }),
+    ).resolves.toBe(0);
     await expect(prisma.secret.findUnique({ where: { id: stored.secretId } })).resolves.toBeNull();
 
     const prepared = await rpc<{ ready: boolean }>(app, cookie, "voice/prepare", {
@@ -202,7 +210,7 @@ async function rpc<T>(app: App, cookie: string, proc: string, body: unknown = {}
   if (res.status >= 400 || parsed.error) {
     throw new Error(`${proc} ${res.status}: ${parsed.error?.message ?? text}`);
   }
-  return parsed.json as T;
+  return discardBotIntroFromCreate(botIntroHarness, cookie, proc, parsed.json as T);
 }
 
 async function raw(app: App, cookie: string, proc: string, body: unknown) {

@@ -5,7 +5,20 @@ import type {
   CredentialStore,
   OAuthCredential,
 } from "@earendil-works/pi-ai";
-import type { AgentModelOAuthCredential } from "@rakazo/adapter-kit";
+import type {
+  AgentModelOAuthCredential,
+  ModelCredentialFailedState,
+  ModelCredentialRetireReason,
+} from "@rakazo/adapter-kit";
+import { canonicalPiProviderId } from "@rakazo/contracts";
+import { getLogger } from "@rakazo/logging";
+import {
+  OAUTH_ACCOUNT_CHANGED_ERROR,
+  OAUTH_RECONNECT_REQUIRED_ERROR,
+  oauthCredentialAccountId,
+  RetiredModelCredentialError,
+  terminalOAuthRefreshErrorMarker,
+} from "./pi-oauth.js";
 
 export function toOAuthCredential(value: AgentModelOAuthCredential): OAuthCredential {
   return { ...value, type: "oauth" };
@@ -24,13 +37,28 @@ export class PiRuntimeCredentialStore implements CredentialStore {
     private readonly providerId: string,
     credential?: Credential,
     private readonly persistOAuth?: (credential: OAuthCredential) => Promise<void>,
+    private readonly retireOAuth?: (
+      reason: ModelCredentialRetireReason,
+      detail?: string,
+      failed?: ModelCredentialFailedState,
+    ) => Promise<boolean | undefined>,
   ) {
     this.credential = credential;
+    this.providerId = canonicalPiProviderId(providerId);
+  }
+
+  /**
+   * The token a request resolves to right now. `modify` swaps the stored
+   * credential on refresh, so callers must read this per request rather than
+   * caching the credential they seeded the store with.
+   */
+  get accessToken(): string | undefined {
+    return this.credential?.type === "oauth" ? this.credential.access : undefined;
   }
 
   async read(providerId: string, options?: AuthOperationOptions): Promise<Credential | undefined> {
     options?.signal?.throwIfAborted();
-    return providerId === this.providerId ? this.credential : undefined;
+    return canonicalPiProviderId(providerId) === this.providerId ? this.credential : undefined;
   }
 
   async list(options?: AuthOperationOptions): Promise<readonly CredentialInfo[]> {
@@ -43,15 +71,69 @@ export class PiRuntimeCredentialStore implements CredentialStore {
     fn: (current: Credential | undefined) => Promise<Credential | undefined>,
     options?: AuthOperationOptions,
   ): Promise<Credential | undefined> {
-    if (providerId !== this.providerId) return Promise.resolve(undefined);
+    if (canonicalPiProviderId(providerId) !== this.providerId) return Promise.resolve(undefined);
     const previous = this.chain;
     const operation = previous.then(async () => {
       options?.signal?.throwIfAborted();
       const current = this.credential;
-      const next = await fn(current);
+      let next: Credential | undefined;
+      try {
+        next = await fn(current);
+      } catch (error) {
+        const marker = terminalOAuthRefreshErrorMarker(error);
+        if (marker && this.retireOAuth) {
+          // Await the retirement so the marker commits before this error surfaces: a
+          // detached write could race a catalog read or be dropped by worker shutdown.
+          try {
+            const retired = await this.retireOAuth(
+              "terminal-refresh-failure",
+              marker,
+              current?.type === "oauth" ? current : undefined,
+            );
+            if (retired) {
+              // The rejected access token must not stay available to a later read.
+              this.credential = undefined;
+              throw new RetiredModelCredentialError(OAUTH_RECONNECT_REQUIRED_ERROR);
+            }
+          } catch (retireError) {
+            if (retireError instanceof RetiredModelCredentialError) throw retireError;
+            getLogger().error("model credential retirement failed", retireError);
+          }
+        }
+        throw error;
+      }
       options?.signal?.throwIfAborted();
       if (next !== undefined) {
         if (next.type === "oauth" && next !== current) {
+          const storedAccountId =
+            current?.type === "oauth" ? oauthCredentialAccountId(current) : undefined;
+          const refreshedAccountId = oauthCredentialAccountId(next);
+          if (storedAccountId && refreshedAccountId && storedAccountId !== refreshedAccountId) {
+            // The refresh belongs to a different account: retire the stored credential
+            // instead of persisting the new token. Fence on the stored state so a
+            // concurrent successful refresh is not deleted underneath it.
+            let deleted = false;
+            if (this.retireOAuth) {
+              try {
+                deleted =
+                  (await this.retireOAuth(
+                    "account-changed",
+                    `stored account ${storedAccountId}, refreshed account ${refreshedAccountId}`,
+                    current?.type === "oauth" ? current : undefined,
+                  )) === true;
+              } catch (retireError) {
+                // Leave it unmarked so the run can retry.
+                getLogger().error("model credential retirement failed", retireError);
+              }
+            }
+            // Fail the run permanently only when this call deleted the stored
+            // credential. A skipped delete means a newer credential survived.
+            if (deleted) {
+              this.credential = undefined;
+              throw new RetiredModelCredentialError(OAUTH_ACCOUNT_CHANGED_ERROR);
+            }
+            throw new Error(OAUTH_ACCOUNT_CHANGED_ERROR);
+          }
           await this.persistOAuth?.(next);
         }
         this.credential = next;
@@ -63,7 +145,7 @@ export class PiRuntimeCredentialStore implements CredentialStore {
   }
 
   delete(providerId: string, options?: AuthOperationOptions): Promise<void> {
-    if (providerId !== this.providerId) return Promise.resolve();
+    if (canonicalPiProviderId(providerId) !== this.providerId) return Promise.resolve();
     const previous = this.chain;
     const operation = previous.then(() => {
       options?.signal?.throwIfAborted();

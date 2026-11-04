@@ -4,9 +4,9 @@
     "slug": "rakazo",
     "owner": "inbox-zero",
     "scheme": "rakazo",
-    "version": "1.0.3",
-    "orientation": "portrait",
-    "userInterfaceStyle": "dark",
+    "version": "1.0.12",
+    "orientation": "default",
+    "userInterfaceStyle": "automatic",
     "icon": "./assets/icon.png",
     "plugins": [
       [
@@ -14,20 +14,35 @@
         {
           "image": "./assets/splash-icon.png",
           "resizeMode": "contain",
-          "backgroundColor": "#050506"
+          "backgroundColor": "#FCFCFC",
+          "dark": {
+            "backgroundColor": "#141414"
+          }
         }
       ],
       "expo-router",
       "expo-secure-store",
-      ["expo-audio", { "enableBackgroundPlayback": false }],
+      [
+        "expo-audio",
+        {
+          "enableBackgroundPlayback": false,
+          "microphonePermission": "OtterBot uses the microphone for voice calls with your bots."
+        }
+      ],
+      [
+        "expo-speech-recognition",
+        {
+          "speechRecognitionPermission": "Rakazo turns your speech into messages during voice calls.",
+          "microphonePermission": "OtterBot uses the microphone for voice calls with your bots."
+        }
+      ],
       "expo-localization",
       "@react-native-vector-icons/ionicons",
       "@react-native-vector-icons/material-design-icons",
       [
         "expo-notifications",
         {
-          "icon": "./assets/notification-icon.png",
-          "color": "#2965EC"
+          "icon": "./assets/notification-icon.png"
         }
       ],
       [
@@ -35,18 +50,48 @@
         {
           "photosPermission": "OtterBot uses your photo library so you can attach images to a bot message.",
           "cameraPermission": "OtterBot uses the camera so you can attach photos to a bot message.",
-          "microphonePermission": false
+          "microphonePermission": "OtterBot uses the microphone for voice calls with your bots."
         }
       ],
-      "expo-sharing",
+      [
+        "expo-sharing",
+        {
+          "android": {
+            "enabled": true,
+            "singleShareMimeTypes": [
+              "text/*",
+              "image/*",
+              "audio/*",
+              "video/mp4",
+              "application/pdf",
+              "application/json",
+              "application/zip"
+            ],
+            "multipleShareMimeTypes": [
+              "image/*",
+              "audio/*",
+              "video/mp4",
+              "application/pdf",
+              "application/json",
+              "application/zip"
+            ]
+          }
+        }
+      ],
       "./plugins/with-worklets-headers",
-      "./plugins/with-scene-lifecycle"
+      "./plugins/with-scene-lifecycle",
+      "./plugins/with-lan-cleartext",
+      "./plugins/with-agent-notifications",
+      "./plugins/with-app-intents"
     ],
+    "locales": {
+      "es": "./locales/es.json"
+    },
     "ios": {
       "bundleIdentifier": "com.rakazo.app",
       "buildNumber": "1",
-      "supportsTablet": false,
-      "icon": "../../packages/ui-tokens/assets/OtterBot.icon",
+      "supportsTablet": true,
+      "icon": "../../packages/ui-tokens/assets/Rakazo.icon",
       "config": {
         "usesNonExemptEncryption": false
       },
@@ -56,7 +101,13 @@
         "NSLocalNetworkUsageDescription": "OtterBot connects to a self-hosted OtterBot server on your local network.",
         "NSAppTransportSecurity": {
           "NSAllowsLocalNetworking": true
-        }
+        },
+        "UIBackgroundModes": ["voip", "audio", "remote-notification"],
+        "NSUserActivityTypes": ["INSendMessageIntent"]
+      },
+      "entitlements": {
+        "com.apple.developer.usernotifications.time-sensitive": true,
+        "com.apple.developer.usernotifications.communication": true
       }
     },
     "android": {
@@ -77,7 +128,26 @@
       "router": {},
       "supportsRTL": true,
       "eas": {
-        "projectId": "07f7eb04-45e3-47fe-9374-99a2f991131e"
+        "projectId": "07f7eb04-45e3-47fe-9374-99a2f991131e",
+        "build": {
+          "experimental": {
+            "ios": {
+              "appExtensions": [
+                {
+                  "targetName": "RakazoWidgets",
+                  "bundleIdentifier": "com.rakazo.app.widgets"
+                },
+                {
+                  "targetName": "AgentNotifications",
+                  "bundleIdentifier": "com.rakazo.app.notifications",
+                  "entitlements": {
+                    "com.apple.developer.usernotifications.communication": true
+                  }
+                }
+              ]
+            }
+          }
+        }
       }
     },
     "runtimeVersion": {

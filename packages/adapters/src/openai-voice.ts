@@ -14,9 +14,9 @@ import {
   readVoiceJson,
   requireOk,
   speechUploadName,
+  verifyVoiceHttpGet,
   voiceDeadline,
-  voiceHttpError,
-  voiceUnreachable,
+  voiceRequestError,
 } from "./voice-http.js";
 
 const API = "https://api.openai.com/v1";
@@ -27,9 +27,11 @@ const OPENAI_VOICES: VoiceInfo[] = [
   { id: "alloy", label: "Alloy", description: "Neutral" },
   { id: "ash", label: "Ash", description: "Clear" },
   { id: "ballad", label: "Ballad", description: "Warm" },
+  { id: "cedar", label: "Cedar" },
   { id: "coral", label: "Coral", description: "Bright" },
   { id: "echo", label: "Echo", description: "Even" },
   { id: "fable", label: "Fable", description: "Narrative" },
+  { id: "marin", label: "Marin" },
   { id: "onyx", label: "Onyx", description: "Deep" },
   { id: "nova", label: "Nova", description: "Energetic" },
   { id: "sage", label: "Sage", description: "Calm" },
@@ -48,27 +50,12 @@ export class OpenAIVoiceProvider implements VoiceProvider {
   }
 
   async verify(apiKey: string, context: AdapterContext): Promise<VoiceVerifyResult> {
-    try {
-      const res = await fetch(`${API}/models`, {
-        headers: { authorization: `Bearer ${apiKey}` },
-        signal: voiceDeadline(context.signal, 20_000),
-      });
-      if (res.ok) return { ok: true };
-      return {
-        ok: false,
-        message: voiceHttpError(
-          res.status,
-          "OpenAI",
-          "checking that key",
-          await readVoiceJson(res),
-        ),
-      };
-    } catch {
-      return {
-        ok: false,
-        message: voiceUnreachable("OpenAI"),
-      };
-    }
+    return verifyVoiceHttpGet({
+      url: `${API}/models`,
+      headers: { authorization: `Bearer ${apiKey}` },
+      signal: context.signal,
+      provider: "OpenAI",
+    });
   }
 
   async listVoices(_apiKey: string, _context: AdapterContext): Promise<VoiceInfo[]> {
@@ -113,7 +100,7 @@ export class OpenAIVoiceProvider implements VoiceProvider {
       signal: voiceDeadline(request.signal ?? context.signal, 60_000),
     });
     const body = await readVoiceJson(res, { requireValid: res.ok });
-    if (!res.ok) throw new Error(voiceHttpError(res.status, "OpenAI", "transcribing", body));
+    if (!res.ok) throw voiceRequestError(res.status, "OpenAI", "transcribing", body);
     return { text: String((body as { text?: unknown } | null)?.text ?? "").trim() };
   }
 }

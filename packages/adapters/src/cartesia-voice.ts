@@ -12,18 +12,15 @@ import {
   readVoiceAudio,
   readVoiceJson,
   requireOk,
+  verifyVoiceHttpGet,
   voiceDeadline,
-  voiceHttpError,
-  voiceUnreachable,
+  voiceRequestError,
 } from "./voice-http.js";
 
 const API = "https://api.cartesia.ai";
-const VERSION = "2024-06-10";
+// From 2026-03-01 errors are JSON with a `message`; `/voices` pages with `limit`.
+const VERSION = "2026-08-14";
 const MODEL = "sonic-3";
-// `/voices` only honours `limit` from this API version on. Under VERSION it returns the entire
-// catalog as one array, which overruns the voice JSON read cap and fails the request outright.
-// Synthesis stays pinned to VERSION so its request and response contract is untouched.
-const VOICES_VERSION = "2026-08-14";
 const VOICE_PAGE_LIMIT = 100;
 const VERIFY_PAGE_LIMIT = 1;
 /** Bounds the catalog walk so a very large library cannot spin forever. */
@@ -40,27 +37,12 @@ export class CartesiaVoiceProvider implements VoiceProvider {
   }
 
   async verify(apiKey: string, context: AdapterContext): Promise<VoiceVerifyResult> {
-    try {
-      const res = await fetch(`${API}/voices?limit=${VERIFY_PAGE_LIMIT}`, {
-        headers: cartesiaHeaders(apiKey, VOICES_VERSION),
-        signal: voiceDeadline(context.signal, 20_000),
-      });
-      if (res.ok) return { ok: true };
-      return {
-        ok: false,
-        message: voiceHttpError(
-          res.status,
-          "Cartesia",
-          "checking that key",
-          await readVoiceJson(res),
-        ),
-      };
-    } catch {
-      return {
-        ok: false,
-        message: voiceUnreachable("Cartesia"),
-      };
-    }
+    return verifyVoiceHttpGet({
+      url: `${API}/voices?limit=${VERIFY_PAGE_LIMIT}`,
+      headers: cartesiaHeaders(apiKey),
+      signal: context.signal,
+      provider: "Cartesia",
+    });
   }
 
   async listVoices(apiKey: string, context: AdapterContext): Promise<VoiceInfo[]> {
@@ -73,11 +55,11 @@ export class CartesiaVoiceProvider implements VoiceProvider {
       const params = new URLSearchParams({ limit: String(VOICE_PAGE_LIMIT) });
       if (startingAfter) params.set("starting_after", startingAfter);
       const res = await fetch(`${API}/voices?${params}`, {
-        headers: cartesiaHeaders(apiKey, VOICES_VERSION),
+        headers: cartesiaHeaders(apiKey),
         signal,
       });
       const body = await readVoiceJson(res, { requireValid: res.ok });
-      if (!res.ok) throw new Error(voiceHttpError(res.status, "Cartesia", "listing voices", body));
+      if (!res.ok) throw voiceRequestError(res.status, "Cartesia", "listing voices", body);
       const items = voicesFrom(body);
       voices.push(...items);
       const next = nextVoicePage(body, items);
@@ -104,8 +86,9 @@ export class CartesiaVoiceProvider implements VoiceProvider {
       body: JSON.stringify({
         model_id: MODEL,
         transcript: request.text,
-        voice: { mode: "id", id: request.voiceId },
-        output_format: { container: "mp3", encoding: "mp3", sample_rate: 44100 },
+        voice: { id: request.voiceId },
+        // Cartesia's mp3 container takes bit_rate, not encoding: an encoding key rejects the request.
+        output_format: { container: "mp3", sample_rate: 44100, bit_rate: 128000 },
       }),
       signal,
     });
@@ -114,8 +97,8 @@ export class CartesiaVoiceProvider implements VoiceProvider {
   }
 }
 
-function cartesiaHeaders(apiKey: string, version: string = VERSION): Record<string, string> {
-  return { "X-API-Key": apiKey, "Cartesia-Version": version };
+function cartesiaHeaders(apiKey: string): Record<string, string> {
+  return { Authorization: `Bearer ${apiKey}`, "Cartesia-Version": VERSION };
 }
 
 /** The cursor for the next catalog page, or undefined when this was the last one. */

@@ -3,36 +3,32 @@ import type {
   ProductEvent,
   Run,
   RunStatus,
+  RunTrigger,
   ThreadMessage,
   ThreadMessagePage,
   ThreadSnapshot,
 } from "@rakazo/contracts";
+import { RUN_TRIGGERS } from "@rakazo/contracts";
 import {
   isActive,
+  isBackgroundRunTrigger,
   isRunTerminalEvent,
   mergeThreadHistory,
   prependThreadHistoryPage,
   progressMessageId,
+  QUEUE_HOLDING_RUN_STATUSES,
   reduceLiveMessageBlocks,
+  replyMetadata,
   runFailureError,
+  settleRunSubagents,
+  stopsRunHelpers,
   subagentBlockFromPayload,
   takeLiveMessage,
   updateCloudAgentMessages,
   upsertMessageById,
 } from "@rakazo/core";
 
-const runTriggers = new Set<Run["trigger"]>([
-  "user",
-  "routine",
-  "resume",
-  "follow_up",
-  "spawn",
-  "skill",
-  "bot_message",
-  "webhook",
-  "messaging",
-  "cloud_agent",
-]);
+const runTriggers = new Set<string>(RUN_TRIGGERS);
 
 function runFromStartedEvent(event: ProductEvent, previous: Run | undefined): Run {
   const trigger = event.payload.trigger;
@@ -41,10 +37,11 @@ function runFromStartedEvent(event: ProductEvent, previous: Run | undefined): Ru
     botId: event.botId,
     threadId: event.threadId,
     taskId: previous?.taskId ?? event.runId ?? event.id,
+    userId: previous?.userId,
     status: "running",
     trigger:
-      typeof trigger === "string" && runTriggers.has(trigger as Run["trigger"])
-        ? (trigger as Run["trigger"])
+      typeof trigger === "string" && runTriggers.has(trigger)
+        ? (trigger as RunTrigger)
         : (previous?.trigger ?? "user"),
     routineId:
       typeof event.payload.routineId === "string"
@@ -96,7 +93,8 @@ export function applyThreadSendReceipt(
     return snapshot;
   }
   const currentRuns = activeThreadRuns(snapshot);
-  if (currentRuns.some((run) => isActive(run.status as RunStatus))) return snapshot;
+  if (currentRuns.some((run) => QUEUE_HOLDING_RUN_STATUSES.some((s) => s === run.status)))
+    return snapshot;
   const createdAt = receipt.createdAt ?? new Date().toISOString();
   const run: Run = {
     id: receipt.runId,
@@ -113,7 +111,11 @@ export function applyThreadSendReceipt(
     completedAt: null,
     createdAt,
   };
-  return { ...snapshot, run, activeRuns: [run] };
+  return {
+    ...snapshot,
+    run,
+    activeRuns: [...currentRuns.filter((r) => isActive(r.status as RunStatus)), run],
+  };
 }
 
 /** Reason the newest run stopped, until the reader dismisses that run's failure. */
@@ -158,9 +160,12 @@ export function mergeThreadSnapshot(
  * Apply a threads.get refresh without clobbering newer event-sourced takeover state.
  *
  * A refresh that started earlier can still return running+busyBotName after the client
- * already applied waiting_takeover. Cursor comparisons only apply within the same thread.
- * Stop clears run/busy optimistically in the shell because it has no terminal event; an
- * older-cursor refresh must keep that cleared local state (see Shell stopRun).
+ * already applied waiting_takeover. That stale snapshot shares the cursor already applied.
+ * A newer cursor is the release (or a later run) and replaces the waiting status.
+ * Cursor comparisons only apply within the same thread.
+ * Stop clears run/busy optimistically in the shell so an in-flight refresh cannot revive
+ * the run before its run.cancelled event lands; an older-cursor refresh must keep that
+ * cleared local state (see Shell stopRun).
  */
 export function reconcileRefreshedThread(
   prev: ThreadSnapshot | null,
@@ -211,6 +216,7 @@ export function reconcileRefreshedThread(
 
   const localWaiting =
     sameThread &&
+    prev?.cursor === snapshot.cursor &&
     prev?.run?.status === "waiting_takeover" &&
     snapshot.run?.id === prev.run.id &&
     snapshot.run.status !== "waiting_takeover" &&
@@ -254,6 +260,7 @@ export function isThreadSnapshotEvent(event: ProductEvent): boolean {
     event.type === "run.started" ||
     event.type === "run.waiting_input" ||
     event.type === "computer.takeover.requested" ||
+    event.type === "computer.takeover.released" ||
     isRunTerminalEvent(event)
   );
 }
@@ -263,6 +270,11 @@ export function reduceThreadSnapshot(
   event: ProductEvent,
 ): ThreadSnapshot | null {
   if (!prev) return prev;
+  if (stopsRunHelpers(event)) {
+    const messages = settleRunSubagents(prev.messages, event.runId);
+    if (messages !== prev.messages) prev = { ...prev, messages };
+  }
+
   if (event.type === "thread.cleared") {
     return {
       ...prev,
@@ -274,6 +286,11 @@ export function reduceThreadSnapshot(
     };
   }
   if (event.type === "run.started") {
+    // Background runs (ticket work) stay invisible in the transcript; the server
+    // already filters their events and snapshots, this guards a late arrival.
+    if (isBackgroundRunTrigger(event.payload.trigger as string | undefined)) {
+      return { ...prev, cursor: event.seq };
+    }
     if (!event.runId) {
       return {
         ...prev,
@@ -285,11 +302,12 @@ export function reduceThreadSnapshot(
       prev.activeRuns?.find((candidate) => candidate.id === event.runId) ??
       (prev.run?.id === event.runId ? prev.run : undefined);
     const run = runFromStartedEvent(event, previousRun);
+    if (!run.userId && prev.run?.id === run.id) run.userId = prev.run.userId;
     const without = (prev.activeRuns ?? (prev.run ? [prev.run] : [])).filter(
       (candidate) => candidate.id !== run.id,
     );
-    // Bot threads keep a single primary run; groups accumulate concurrent member runs.
-    const activeRuns = prev.groupId ? [...without, run] : [run];
+    // Paused cards remain answerable when new work starts in any thread.
+    const activeRuns = [...without.filter((r) => isActive(r.status as RunStatus)), run];
     return {
       ...prev,
       cursor: event.seq,
@@ -303,6 +321,12 @@ export function reduceThreadSnapshot(
   if (event.type === "run.waiting_input" || event.type === "computer.takeover.requested") {
     const status = event.type === "run.waiting_input" ? "waiting_input" : "waiting_takeover";
     const runId = event.runId;
+    const userId =
+      event.type === "run.waiting_input" &&
+      typeof event.payload.userId === "string" &&
+      event.payload.userId.length > 0
+        ? event.payload.userId
+        : undefined;
     const knownInRun = Boolean(runId && prev.run?.id === runId);
     const knownInActive = Boolean(
       runId && prev.activeRuns?.some((candidate) => candidate.id === runId),
@@ -310,10 +334,18 @@ export function reduceThreadSnapshot(
     // Peer bot_message runs are omitted from snapshots while busy; the first wait
     // event is how an open thread learns they need ask/takeover UI.
     const needsInsert = Boolean(runId) && !knownInRun && !knownInActive;
-    const runChanged = Boolean(knownInRun && prev.run && prev.run.status !== status);
+    const runChanged = Boolean(
+      knownInRun &&
+        prev.run &&
+        (prev.run.status !== status || (userId && prev.run.userId !== userId)),
+    );
     const activeRunChanged = Boolean(
       knownInActive &&
-        prev.activeRuns?.some((candidate) => candidate.id === runId && candidate.status !== status),
+        prev.activeRuns?.some(
+          (candidate) =>
+            candidate.id === runId &&
+            (candidate.status !== status || (userId && candidate.userId !== userId)),
+        ),
     );
     const members = updateMemberStatus(prev.members, event.botId, status);
     // Ask pauses delete progress events server-side; drop the live bubble so a missed
@@ -338,6 +370,7 @@ export function reduceThreadSnapshot(
         botId: event.botId,
         threadId: event.threadId,
         taskId: runId,
+        ...(userId ? { userId } : {}),
         status,
         trigger: "bot_message",
         routineId: null,
@@ -367,12 +400,48 @@ export function reduceThreadSnapshot(
       cursor: event.seq,
       members,
       messages,
-      run: runChanged && prev.run ? { ...prev.run, status } : prev.run,
+      run:
+        runChanged && prev.run ? { ...prev.run, status, ...(userId ? { userId } : {}) } : prev.run,
       activeRuns: activeRunChanged
         ? prev.activeRuns?.map((candidate) =>
-            candidate.id === runId ? { ...candidate, status } : candidate,
+            candidate.id === runId
+              ? { ...candidate, status, ...(userId ? { userId } : {}) }
+              : candidate,
           )
         : prev.activeRuns,
+    };
+  }
+  if (event.type === "computer.takeover.released") {
+    const runId = event.runId;
+    const settle = <T extends { id: string; status: string }>(candidate: T): T =>
+      runId && candidate.id === runId && candidate.status === "waiting_takeover"
+        ? { ...candidate, status: "queued" }
+        : candidate;
+    const nextRun = prev.run ? settle(prev.run) : prev.run;
+    const activeChanged = Boolean(
+      runId &&
+        prev.activeRuns?.some(
+          (candidate) => candidate.id === runId && candidate.status === "waiting_takeover",
+        ),
+    );
+    const nextActive = activeChanged ? prev.activeRuns?.map(settle) : prev.activeRuns;
+    const releasedWaiting = nextRun !== prev.run || activeChanged;
+    const members =
+      releasedWaiting &&
+      prev.members?.some(
+        (member) => member.botId === event.botId && member.status === "waiting_takeover",
+      )
+        ? updateMemberStatus(prev.members, event.botId, "queued")
+        : prev.members;
+    if (!releasedWaiting && members === prev.members) {
+      return prev.cursor === event.seq ? prev : { ...prev, cursor: event.seq };
+    }
+    return {
+      ...prev,
+      cursor: event.seq,
+      members,
+      run: nextRun,
+      activeRuns: nextActive,
     };
   }
   if (isRunTerminalEvent(event)) {
@@ -476,21 +545,19 @@ export function reduceThreadSnapshot(
   if (event.type === "thread.message.created" || event.type === "thread.message.updated") {
     const role = (event.payload.role as ThreadMessage["role"]) ?? "bot";
     const blocks = (event.payload.blocks as ThreadMessage["blocks"]) ?? [];
+    const id = String(event.payload.messageId ?? event.id);
+    const known = prev.messages.find((message) => message.id === id);
     const next: ThreadMessage = {
-      id: String(event.payload.messageId ?? event.id),
+      id,
       threadId: event.threadId,
       seq: event.seq,
       role,
       blocks,
       botId: event.botId,
       runId: event.runId,
-      replyToMessageId:
-        typeof event.payload.replyToMessageId === "string"
-          ? event.payload.replyToMessageId
-          : undefined,
-      replyQuote:
-        typeof event.payload.replyQuote === "string" ? event.payload.replyQuote : undefined,
-      createdAt: event.createdAt,
+      callId: typeof event.payload.callId === "string" ? event.payload.callId : known?.callId,
+      ...replyMetadata(event.payload, known),
+      createdAt: known?.createdAt ?? event.createdAt,
     };
     const replacedSubagentIds = new Set(
       blocks.filter((block) => block.kind === "subagent").map((block) => block.agentId),
@@ -534,27 +601,23 @@ export function computerTakeoverBlocked(
   return isActive(runStatus as RunStatus);
 }
 
-export function computerPanelAutoBoot(
+/**
+ * The panel only reconnects a computer that is already running; starting a stopped one waits
+ * for the user to open it, so showing the panel or switching bots never boots a sandbox.
+ * Reconnect must use computer.boot — never computer.recover (that destroys the sandbox).
+ */
+export function computerPanelNeedsScreen(
   state: ComputerStatus["state"] | undefined,
   screenUrl?: string | null,
-): "boot" | "recover-screen" | "wait" {
-  if (state === "booting" || state === "suspended") return "wait";
-  if (state === "running") return screenUrl ? "wait" : "recover-screen";
-  return "boot";
-}
-
-/** Auto panel reconnect must use computer.boot — never computer.recover (that destroys the sandbox). */
-export function computerPanelAutoUsesBoot(
-  action: ReturnType<typeof computerPanelAutoBoot>,
 ): boolean {
-  return action === "boot" || action === "recover-screen";
+  return state === "running" && !screenUrl;
 }
 
 export function computerPanelNeedsMaintenance(
   state: ComputerStatus["state"] | undefined,
   booting: boolean,
 ): boolean {
-  return !booting && (state === "error" || state === "stopped");
+  return !booting && state === "error";
 }
 
 export function reduceComputerStatus(
@@ -637,4 +700,27 @@ function isComputerState(value: unknown): value is ComputerStatus["state"] {
 function replacedSubagent(message: ThreadMessage, agentIds: ReadonlySet<string>) {
   if (agentIds.size === 0) return false;
   return message.blocks.some((block) => block.kind === "subagent" && agentIds.has(block.agentId));
+}
+
+export function screenMissing(options: {
+  state: ComputerStatus["state"] | undefined;
+  kind: ComputerStatus["kind"] | undefined;
+  booting: boolean;
+  screenUrlLoaded: boolean;
+  embeddedUrl: string | null;
+}): boolean {
+  return (
+    options.state === "running" &&
+    options.kind !== "desktop" &&
+    !options.booting &&
+    options.screenUrlLoaded &&
+    !options.embeddedUrl
+  );
+}
+
+export function screenReadLoaded(
+  issued: ComputerStatus["state"] | undefined,
+  current: ComputerStatus["state"] | undefined,
+): boolean {
+  return issued === "running" && current === "running";
 }

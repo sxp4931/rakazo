@@ -1,125 +1,171 @@
+import type { IncomingMessage } from "node:http";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
+import type { Route } from "@playwright/test";
 import { expect, test } from "@playwright/test";
-import { captureScreenshot, completeOnboarding, openUserSettings, rpc, signup } from "./helpers";
+import {
+  captureScreenshot,
+  completeOnboarding,
+  manageModelConnection,
+  modelConnectionDialog,
+  openBotPanelTab,
+  openModelConnection,
+  openUserSettings,
+  pickReopenedModel,
+  rpc,
+  signup,
+} from "./helpers";
 
 const LOCAL_MODEL_ID = "rakazo-e2e-local";
+const SECOND_MODEL_ID = "rakazo-e2e-second";
 const LOCAL_MODEL_REPLY = "OpenAI-compatible endpoint verified end to end.";
 
-test("custom connections persist reasoning support and bot thinking", async ({
-  page,
-}, testInfo) => {
-  const stamp = Date.now();
-  const userName = `Reasoning ${stamp}`;
-  await signup(page, `reasoning-model-${stamp}@rakazo.test`, "password12", userName);
-  await completeOnboarding(page);
-  await openUserSettings(page, "models");
-  await page.getByPlaceholder("Search providers").fill("openai-compatible");
-  await page.getByRole("button", { name: /OpenAI-compatible/ }).click();
-  await page.getByLabel("OpenAI-compatible server URL").fill("http://127.0.0.1:8090/v1");
-  await page.getByLabel("Model id").fill("arbitrary-model");
-  await expect(page.getByRole("checkbox", { name: "Supports thinking" })).toBeHidden();
-  await expect(page.getByRole("checkbox", { name: "Supports images" })).toBeHidden();
-  await page.getByText("Advanced", { exact: true }).click();
-  await page.getByRole("checkbox", { name: "Supports thinking" }).check();
-  await page.getByRole("combobox", { name: "Reasoning effort", exact: true }).selectOption("low");
-  await page.getByLabel("Maximum output tokens").fill("8192");
-  await page.getByLabel("Context limit").fill("65536");
-  await page.getByRole("checkbox", { name: "Supports images" }).check();
-  await page.getByLabel("Maximum images per request").fill("1");
-  await captureScreenshot(page, testInfo, "openai-compatible-thinking-connection");
-  await page.getByRole("button", { name: "Save", exact: true }).click();
-  await expect(page.getByText("Saved.", { exact: true })).toBeVisible();
-  const credentials = await rpc<
-    Array<{
-      modelId?: string;
-      reasoning?: boolean;
-      thinkingLevel?: string | null;
-      maxTokens?: number;
-      contextWindow?: number;
-      supportsImages?: boolean;
-      maxImagesPerPrompt?: number;
-    }>
-  >(page, "models/credentials", {});
-  expect(credentials.find((entry) => entry.modelId === "arbitrary-model")?.reasoning).toBe(true);
-  expect(credentials.find((entry) => entry.modelId === "arbitrary-model")?.thinkingLevel).toBe(
-    "low",
-  );
-  expect(credentials.find((entry) => entry.modelId === "arbitrary-model")?.maxTokens).toBe(8192);
-  expect(credentials.find((entry) => entry.modelId === "arbitrary-model")?.contextWindow).toBe(
-    65536,
-  );
-  expect(credentials.find((entry) => entry.modelId === "arbitrary-model")?.supportsImages).toBe(
-    true,
-  );
-  expect(credentials.find((entry) => entry.modelId === "arbitrary-model")?.maxImagesPerPrompt).toBe(
-    1,
-  );
-  await page.reload();
-  await openUserSettings(page, "models");
-  await page.getByText("Advanced", { exact: true }).click();
-  await expect(page.getByRole("checkbox", { name: "Supports thinking" })).toBeChecked();
-  await expect(page.getByRole("combobox", { name: "Reasoning effort", exact: true })).toHaveValue(
-    "low",
-  );
-  await expect(page.getByLabel("Maximum output tokens")).toHaveValue("8192");
-  await expect(page.getByLabel("Context limit")).toHaveValue("65536");
-  await expect(page.getByRole("checkbox", { name: "Supports images" })).toBeChecked();
-  await expect(page.getByLabel("Maximum images per request")).toHaveValue("1");
-  await page.getByLabel("Maximum images per request").fill("");
-  await page.getByRole("button", { name: "Save", exact: true }).click();
-  await expect(page.getByText("Saved.", { exact: true })).toBeVisible();
-  const clearedCredentials = await rpc<Array<{ modelId?: string; maxImagesPerPrompt?: number }>>(
-    page,
-    "models/credentials",
-    {},
-  );
-  expect(
-    clearedCredentials.find((entry) => entry.modelId === "arbitrary-model")?.maxImagesPerPrompt,
-  ).toBeUndefined();
-  await page.getByRole("button", { name: "Close model settings" }).click();
-  await page.locator("main").getByRole("button", { name: "Chief", exact: true }).click();
-  const settings = page.getByTestId("bot-settings");
-  await expect(settings).toBeVisible();
-  const advanced = settings.getByTestId("bot-settings-advanced");
-  await advanced.evaluate((element) => {
-    (element as HTMLDetailsElement).open = true;
-  });
-  // NativeSelect sits inside a wrapping <label>, so label text includes option
-  // copy and getByLabel(..., { exact: true }) misses the control. Use the
-  // combobox accessible name, matching other model E2E tests.
-  const model = settings.getByRole("combobox", { name: "Model", exact: true });
-  await expect(model).toBeVisible();
-  await expect(model).toContainText("arbitrary-model");
-  // Value key — not a /arbitrary-model/ label match, which also hits "Space default (arbitrary-model)".
-  await model.selectOption("openai-compatible::arbitrary-model");
-  const thinking = settings.getByRole("combobox", { name: "Thinking", exact: true });
-  await expect(thinking).toBeVisible();
-  await thinking.selectOption("low");
-  await thinking.scrollIntoViewIfNeeded();
-  await captureScreenshot(page, testInfo, "openai-compatible-thinking");
-  const saved = page.waitForResponse(
-    (response) => response.url().includes("/rpc/bots/update") && response.ok(),
-  );
-  await settings.getByRole("button", { name: "Save", exact: true }).click();
-  await saved;
-  await page.reload();
-  await page.locator("main").getByRole("button", { name: "Chief", exact: true }).click();
-  await expect(settings).toBeVisible();
-  await advanced.evaluate((element) => {
-    (element as HTMLDetailsElement).open = true;
-  });
-  await expect(thinking).toHaveValue("low");
+test.afterEach(async ({ page }) => {
+  // Finish intercepted responses before the browser context is disposed.
+  await page.unrouteAll({ behavior: "wait" });
 });
 
+test("model settings cleanup frames", { tag: "@nightly" }, async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  const stamp = Date.now();
+  await signup(page, `model-cleanup-${stamp}@rakazo.test`, "password12", "Model Preview");
+  await completeOnboarding(page);
+
+  // Keep account persistence real; the harness supplies offline provider verification.
+  // Hide the deployment default so the first frame exercises the empty-provider state.
+  let providerConnected = false;
+  await page.route("**/rpc/me", async (route) => {
+    const response = await route.fetch();
+    const body = (await response.json()) as { json: Record<string, unknown> };
+    body.json.needsModel = !providerConnected;
+    await route.fulfill({ response, json: body });
+  });
+  await openUserSettings(page, "models");
+  const mainList = page.getByTestId("model-role-main");
+  await expect(mainList.getByTestId("model-role-default")).toContainText("Choose a model");
+  const dialog = await openModelConnection(page, "OpenRouter");
+  await expect(dialog.getByLabel("API key")).toBeVisible();
+  await captureScreenshot(page, testInfo, "model-settings-cleanup-1-not-connected");
+
+  await dialog.getByLabel("API key").fill("rejected-fixture-key");
+  await dialog.getByRole("button", { name: "Connect API key", exact: true }).click();
+  await expect(
+    dialog.getByText("API key was rejected by the provider.", { exact: true }),
+  ).toBeVisible();
+  const rejected = await rpc<Array<{ provider: string }>>(page, "models/credentials", {});
+  expect(rejected.some((credential) => credential.provider === "openrouter")).toBe(false);
+  await captureScreenshot(page, testInfo, "model-settings-cleanup-1a-rejected-key");
+
+  // Connecting from the empty first slot makes the provider's model the main model.
+  await dialog.getByLabel("API key").fill("fake-cleanup-api-key");
+  providerConnected = true;
+  await dialog.getByRole("button", { name: "Connect API key", exact: true }).click();
+  await expect(dialog).toBeHidden();
+  await pickReopenedModel(page);
+  const primary = mainList.getByTestId("model-role-row-1");
+  await expect(primary).toContainText("OpenRouter");
+  const addFallback = mainList.getByRole("button", { name: "Add fallback", exact: true });
+  await expect(addFallback).toBeVisible();
+  await captureScreenshot(page, testInfo, "model-settings-cleanup-2-connected");
+
+  const model = primary.getByRole("button", { name: /^Change / });
+  await model.click();
+  const options = page.getByRole("listbox", { name: "Model options" });
+  await expect(options).toBeVisible();
+  await captureScreenshot(page, testInfo, "model-settings-cleanup-3-model-dropdown-open");
+
+  // The popup must paint above the settings scroll pane, including its lower edge.
+  const popup = page.locator('[data-slot="popover-content"]');
+  await expect(popup).toBeVisible();
+  expect(
+    await popup.evaluate((element) => {
+      const bounds = element.getBoundingClientRect();
+      const hit = document.elementFromPoint(bounds.x + bounds.width / 2, bounds.bottom - 2);
+      return hit !== null && element.contains(hit);
+    }),
+  ).toBe(true);
+  const search = page.getByRole("combobox", { name: "Search models" });
+  await expect(search).toBeFocused();
+  await search.fill("gpt");
+  const firstModel = await options.getByRole("option").first().locator("span").first().innerText();
+  await search.press("Home");
+  await search.press("Enter");
+  await expect(popup).toBeHidden();
+  await expect(primary).toContainText(firstModel);
+  await primary.getByRole("button", { name: /^Change / }).click();
+  await expect(search).toBeFocused();
+  await search.press("Escape");
+  await expect(popup).toBeHidden();
+  await primary.getByRole("button", { name: /^Change / }).click();
+  await expect(search).toBeFocused();
+  await mainList.getByRole("heading", { name: "Main model", exact: true }).click();
+  await expect(popup).toBeHidden();
+
+  // Choosing a fallback saves it at once; there is no separate save step.
+  await addFallback.click();
+  await expect(options).toBeVisible();
+  await captureScreenshot(page, testInfo, "model-settings-cleanup-4-backup-menu-open");
+  const backupItem = options.getByRole("option").first();
+  const backupLabel = (await backupItem.innerText()).trim();
+  await backupItem.click();
+  await expect(options).toBeHidden();
+  await expect(mainList.getByTestId("model-role-row-2")).toContainText(backupLabel);
+  await expect.poll(async () => (await rpc<unknown[]>(page, "models/backups", {})).length).toBe(1);
+  await mainList.scrollIntoViewIfNeeded();
+  await captureScreenshot(page, testInfo, "model-settings-cleanup-5-backup-added");
+});
+
+function readJsonBody(request: IncomingMessage): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    request.on("data", (chunk: Buffer) => chunks.push(chunk));
+    request.on("error", reject);
+    request.on("end", () => {
+      try {
+        resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+      } catch (error) {
+        reject(new Error(`fake /v1/chat/completions got a non-JSON body: ${String(error)}`));
+      }
+    });
+  });
+}
+
+async function fulfillWithoutModelStep(route: Route) {
+  const response = await route.fetch();
+  const body = (await response.json()) as { json: Record<string, unknown> };
+  await route.fulfill({ response, json: { ...body, json: { ...body.json, needsModel: false } } });
+}
+
 test("connects, lists, and uses an OpenAI-compatible endpoint", async ({ page }, testInfo) => {
-  const server = createServer((request, response) => {
+  let expandedModels = false;
+  const completionBodies: Array<Record<string, unknown>> = [];
+  const completionHeaders: Array<string | string[] | undefined> = [];
+  const server = createServer(async (request, response) => {
     if (request.method === "GET" && request.url === "/v1/models") {
       response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify({ object: "list", data: [{ id: LOCAL_MODEL_ID }] }));
+      response.end(
+        JSON.stringify({
+          object: "list",
+          data: [
+            { id: LOCAL_MODEL_ID },
+            { id: SECOND_MODEL_ID },
+            ...(expandedModels
+              ? Array.from({ length: 9 }, (_, index) => ({ id: `fixture-extra-${index}` }))
+              : []),
+          ],
+        }),
+      );
       return;
     }
     if (request.method === "POST" && request.url === "/v1/chat/completions") {
+      try {
+        completionBodies.push(await readJsonBody(request));
+        completionHeaders.push(request.headers["x-session"]);
+      } catch (error) {
+        response.writeHead(400, { "content-type": "text/plain" });
+        response.end(String(error));
+        return;
+      }
       response.writeHead(200, {
         "cache-control": "no-cache",
         connection: "keep-alive",
@@ -159,21 +205,32 @@ test("connects, lists, and uses an OpenAI-compatible endpoint", async ({ page },
   });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
-    server.listen(0, "127.0.0.1", resolve);
+    const socket = process.env.E2E_COMPATIBLE_SOCKET;
+    if (socket) server.listen(socket, resolve);
+    else server.listen(0, "127.0.0.1", resolve);
   });
 
   try {
     const address = server.address() as AddressInfo;
-    const baseUrl = `http://127.0.0.1:${address.port}/v1`;
+    const baseUrl = process.env.E2E_COMPATIBLE_FIXTURE_URL ?? `http://127.0.0.1:${address.port}/v1`;
     const stamp = Date.now();
     const userName = `Local model ${stamp}`;
+    // The pi runtime asks for a model before onboarding finishes; this test connects
+    // the fake endpoint from settings instead, so skip that step on the client.
+    const skipModelStep = process.env.AGENT_RUNTIME === "pi";
+    if (skipModelStep) await page.route("**/rpc/me", fulfillWithoutModelStep);
     await signup(page, `local-model-${stamp}@rakazo.test`, "password12", userName);
     await completeOnboarding(page);
+    if (skipModelStep) await page.unroute("**/rpc/me", fulfillWithoutModelStep);
 
     await openUserSettings(page, "models");
-    const providerSearch = page.getByPlaceholder("Search providers");
-    await providerSearch.fill("openai-compatible");
-    await page.getByRole("button", { name: /OpenAI-compatible/ }).click();
+    await page.getByRole("button", { name: "Add provider", exact: true }).click();
+    const providerSearch = page.getByRole("combobox", { name: "Add provider", exact: true });
+    await expect(providerSearch).toBeVisible();
+    await providerSearch.fill("compatible");
+    await captureScreenshot(page, testInfo, "add-provider-list-search");
+    await providerSearch.press("Escape");
+    await openModelConnection(page, "OpenAI-compatible");
     await expect(
       page.getByText("Paste the OpenAI-compatible address", { exact: false }),
     ).toBeHidden();
@@ -197,25 +254,102 @@ test("connects, lists, and uses an OpenAI-compatible endpoint", async ({ page },
     await expect(page.getByLabel("Model id")).toBeVisible();
     await page.getByRole("button", { name: "Find models" }).click();
     await expect(discoveredModels).toHaveValue(LOCAL_MODEL_ID);
-    await expect(page.getByText("Found 1 model.")).toBeVisible();
-    await expect(page.getByRole("button", { name: "Save" })).toBeEnabled();
+    await expect(page.getByText("Found 2 models.")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Save", exact: true })).toBeEnabled();
     await captureScreenshot(page, testInfo, "openai-compatible-model-discovery");
 
-    await page.getByRole("button", { name: "Save" }).click();
-    await expect(page.getByText("Saved.")).toBeVisible();
-    await expect(page.getByRole("button", { name: /OpenAI-compatible/ })).toContainText(
-      "Connected",
+    expandedModels = true;
+    await page.getByRole("button", { name: "Find models" }).click();
+    const modelSearch = page.getByRole("textbox", { name: "Search models", exact: true });
+    await expect(modelSearch).toBeVisible();
+    await captureScreenshot(page, testInfo, "compatible-model-list-search");
+    await modelSearch.fill("fixture-extra-8");
+    await expect(page.getByText("1 selected model is hidden by your search.")).toBeVisible();
+    await captureScreenshot(page, testInfo, "compatible-model-list-search-filtered");
+    await modelSearch.fill("");
+    expandedModels = false;
+    await page.getByRole("button", { name: "Find models" }).click();
+    await expect(page.getByRole("checkbox", { name: LOCAL_MODEL_ID })).toBeChecked();
+    await page.getByRole("checkbox", { name: SECOND_MODEL_ID }).check();
+    await page.getByText("Advanced", { exact: true }).click();
+    await page.getByRole("button", { name: "Add header", exact: true }).click();
+    await page.getByRole("textbox", { name: "Header name", exact: true }).fill("x-session");
+    await page.getByLabel("Header value", { exact: true }).fill("fake-session-secret");
+    await captureScreenshot(page, testInfo, "openai-compatible-header-edit");
+    await page.getByRole("checkbox", { name: "Supports thinking" }).check();
+    // Room for the bot's required context, so a pi run reaches the fake endpoint.
+    await page.getByLabel("Context limit").fill("200000");
+
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(modelConnectionDialog(page, "OpenAI-compatible")).toBeHidden();
+    await pickReopenedModel(page);
+    await expect(page.getByText("Saved.", { exact: true })).toBeVisible();
+    await expect(page.getByTestId("model-role-main").getByTestId("model-role-row-1")).toContainText(
+      LOCAL_MODEL_ID,
     );
     await captureScreenshot(page, testInfo, "openai-compatible-connected");
+    await page.getByRole("button", { name: "Close model settings" }).click();
+    await openUserSettings(page, "models");
+    const saved = await manageModelConnection(page, "OpenAI-compatible");
+    await expect(saved.getByRole("checkbox", { name: SECOND_MODEL_ID })).toBeChecked();
+    await captureScreenshot(page, testInfo, "openai-compatible-multi-model");
+    await saved.getByText("Advanced", { exact: true }).click();
+    await expect(saved.getByRole("textbox", { name: "Header name", exact: true })).toHaveValue(
+      "x-session",
+    );
+    await expect(saved.getByLabel("Header value", { exact: true })).toHaveValue("");
+    await saved.getByRole("group", { name: "Headers", exact: true }).scrollIntoViewIfNeeded();
+    await captureScreenshot(page, testInfo, "openai-compatible-header-saved");
+    const savedCredentials = await rpc<Array<{ modelId?: string; enabledModelIds?: string[] }>>(
+      page,
+      "models/credentials",
+      {},
+    );
+    expect(
+      savedCredentials.find((entry) => entry.modelId === LOCAL_MODEL_ID)?.enabledModelIds,
+    ).toEqual([LOCAL_MODEL_ID, SECOND_MODEL_ID]);
 
-    await page.getByLabel("OpenAI-compatible server URL").fill("");
-    await expect(page.getByRole("button", { name: "Find models" })).toBeDisabled();
-    await expect(page.getByRole("button", { name: "Save" })).toBeDisabled();
-    await page.getByLabel("OpenAI-compatible server URL").fill(baseUrl);
-    await expect(page.getByRole("button", { name: "Save" })).toBeEnabled();
+    await saved.getByLabel("OpenAI-compatible server URL").fill("");
+    await expect(saved.getByRole("button", { name: "Find models" })).toBeDisabled();
+    await expect(saved.getByRole("button", { name: "Save", exact: true })).toBeDisabled();
+    await saved.getByLabel("OpenAI-compatible server URL").fill(baseUrl);
+    await expect(saved.getByRole("button", { name: "Save", exact: true })).toBeEnabled();
+
+    await page
+      .getByTestId("model-connection")
+      .getByRole("button", { name: "Close", exact: true })
+      .click();
+    await expect(saved).toBeHidden();
+    await page.getByRole("button", { name: "Close model settings" }).click();
+    await openBotPanelTab(page, "Advanced");
+    const settings = page.getByTestId("bot-settings");
+    // The Model select sits inside its wrapping <label>, so the label text includes
+    // option copy and getByLabel(..., { exact: true }) misses it. Use the role name.
+    const botModel = settings.getByRole("combobox", { name: "Model", exact: true });
+    await expect(botModel.locator("option")).toContainText([LOCAL_MODEL_ID, SECOND_MODEL_ID]);
+    await botModel.selectOption(`openai-compatible::${SECOND_MODEL_ID}`);
+    // Native select popups are outside Playwright's screenshots. Render the
+    // same options as an expanded native list for the CI screenshot, then restore.
+    // An expanded select is a listbox, so keep a role-independent handle.
+    const botModelSelect = settings.locator(`[id="${await botModel.getAttribute("id")}"]`);
+    await botModelSelect.evaluate((select: HTMLSelectElement) => {
+      select.size = select.options.length;
+      select.style.height = "auto";
+    });
+    await botModelSelect.scrollIntoViewIfNeeded();
+    await captureScreenshot(page, testInfo, "openai-compatible-model-picker");
+    await botModelSelect.evaluate((select: HTMLSelectElement) => {
+      select.size = 0;
+      select.style.removeProperty("height");
+    });
+    await settings.getByRole("combobox", { name: "Thinking", exact: true }).selectOption("high");
+    const botSaved = page.waitForResponse(
+      (response) => response.url().includes("/rpc/bots/update") && response.ok(),
+    );
+    await settings.getByRole("button", { name: "Save", exact: true }).click();
+    await botSaved;
 
     if (process.env.AGENT_RUNTIME === "pi") {
-      await page.getByRole("button", { name: "Close model settings" }).click();
       const composer = page.getByPlaceholder(/Message/);
       await composer.fill("Reply with the endpoint verification message.");
       await page.keyboard.press("Enter");
@@ -223,80 +357,41 @@ test("connects, lists, and uses an OpenAI-compatible endpoint", async ({ page },
         timeout: 30_000,
       });
       await captureScreenshot(page, testInfo, "openai-compatible-response");
+      expect(completionBodies.length).toBeGreaterThan(0);
+      expect(completionHeaders.at(-1)).toBe("fake-session-secret");
+      expect(completionBodies.at(-1)).toMatchObject({
+        model: SECOND_MODEL_ID,
+        reasoning_effort: "high",
+      });
     }
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });
 
-test("model settings connect, replace, and cancel provider authentication", async ({ page }) => {
+test("a rejected subscription sign-in asks to sign in again", async ({ page }, testInfo) => {
   const stamp = Date.now();
-  const userName = `Models ${stamp}`;
-  await signup(page, `models-${stamp}@rakazo.test`, "password12", userName);
+  await signup(page, `reconnect-${stamp}@rakazo.test`, "password12", "Reconnect Preview");
   await completeOnboarding(page);
+  await page.route("**/rpc/models/credentials", (route) =>
+    route.fulfill({
+      json: {
+        json: [
+          {
+            id: "cred-claude",
+            provider: "anthropic",
+            label: "Anthropic",
+            hasKey: false,
+            isDefault: true,
+            authKind: "oauth",
+            reconnectRequired: true,
+          },
+        ],
+      },
+    }),
+  );
 
   await openUserSettings(page, "models");
-  await expect(page.getByRole("button", { name: "Close model settings" })).toBeVisible();
-
-  const providerSearch = page.getByPlaceholder("Search providers");
-  await providerSearch.fill("scripted");
-  await page.getByRole("button", { name: /Scripted/ }).click();
-  await expect(page.getByRole("combobox", { name: "Model" })).toHaveText(/Scripted runtime/);
-  const apiKeyInput = page.getByLabel("API key");
-  await expect(apiKeyInput).toHaveAttribute("autocomplete", "new-password");
-  await apiKeyInput.fill("fake-scripted-key-one");
-  await page.getByRole("button", { name: "Connect API key" }).click();
-  await expect(page.getByText(/Connected and using Scripted runtime/)).toBeVisible();
-
-  await page.getByLabel("Replace API key").fill("fake-scripted-key-two");
-  await page.getByRole("button", { name: "Replace API key" }).click();
-  await expect(page.getByText(/Connected and using Scripted runtime/)).toBeVisible();
-
-  await page.route("**/rpc/models/beginOAuth", async (route) => {
-    await route.fulfill({
-      contentType: "application/json",
-      body: JSON.stringify({
-        json: {
-          loginId: "fake-login",
-          provider: "openai-codex",
-          mode: "device-code",
-          verificationUri: "https://example.com/device",
-          userCode: "TEST-CODE",
-          expiresInSeconds: 900,
-        },
-      }),
-    });
-  });
-  await page.route("**/rpc/models/completeOAuth", async (route) => {
-    await route.fulfill({
-      contentType: "application/json",
-      body: JSON.stringify({ json: { status: "pending" } }),
-    });
-  });
-  await page.evaluate(() => {
-    window.open = () => null;
-  });
-  let finishRequests = 0;
-  page.on("request", (request) => {
-    if (request.url().includes("/rpc/models/finishOAuth")) finishRequests += 1;
-  });
-
-  await providerSearch.fill("openai-codex");
-  await page
-    .getByRole("button", { name: /ChatGPT Plus\/Pro/ })
-    .first()
-    .click();
-  await page.getByRole("button", { name: /Sign in with ChatGPT Plus\/Pro/ }).click();
-  await expect(page.getByText("Waiting for sign-in…")).toBeVisible();
-
-  const cancelled = page.waitForRequest((request) =>
-    request.url().includes("/rpc/models/cancelOAuth"),
-  );
-  await providerSearch.fill("scripted");
-  await page.getByRole("button", { name: /Scripted/ }).click();
-  await cancelled;
-  expect(finishRequests).toBe(0);
-  await page.getByLabel("Replace API key").fill("fake-scripted-key-three");
-  await expect(page.getByRole("button", { name: "Replace API key" })).toBeEnabled();
-  await expect(page.getByText("Waiting for sign-in…")).toBeHidden();
+  await expect(page.getByTestId("model-provider-cred-claude")).toContainText("Sign in again");
+  await captureScreenshot(page, testInfo, "model-settings-reconnect-required");
 });

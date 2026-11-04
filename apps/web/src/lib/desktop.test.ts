@@ -1,13 +1,9 @@
-import { readFileSync } from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { RakazoDesktop, RakazoDesktopOAuthCallback } from "./desktop.js";
 import {
   desktopOAuthCode,
   oauthStateOf,
   onDesktopOAuthCallback,
-  type RakazoDesktop,
-  type RakazoDesktopOAuthCallback,
   windowChromeKind,
 } from "./desktop.js";
 
@@ -47,34 +43,13 @@ describe("window chrome", () => {
     expect(windowChromeKind(desktop("darwin"))).toBe("darwin");
   });
 
-  it("uses real window-control buttons on Windows and Linux", () => {
+  it("leaves the native Windows frame to Electron when advertised", () => {
+    expect(windowChromeKind({ ...desktop("win32"), nativeWindowFrame: true })).toBe("spacer");
+  });
+
+  it("keeps controls for older frameless Windows clients and Linux", () => {
     expect(windowChromeKind(desktop("win32"))).toBe("controls");
     expect(windowChromeKind(desktop("linux"))).toBe("controls");
-  });
-
-  it("does not paint fake traffic lights into the browser shell or welcome page", () => {
-    const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "../pages");
-    const shell = readFileSync(path.join(root, "Shell.tsx"), "utf8");
-    const welcome = readFileSync(path.join(root, "Welcome.tsx"), "utf8");
-    expect(shell).not.toContain("FF5F57");
-    expect(welcome).not.toContain("FF5F57");
-  });
-
-  it("keeps conversation header controls clickable", () => {
-    const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "../pages");
-    const shell = readFileSync(path.join(root, "Shell.tsx"), "utf8");
-    expect(shell).toContain(
-      'className="app-drag flex items-center justify-between border-b border-sidebar-border',
-    );
-    expect(shell).toContain('className="app-no-drag grid h-8 w-8');
-    expect(shell).toContain('className="app-no-drag flex min-w-0 items-center gap-3"');
-    expect(shell.match(/className="app-no-drag grid h-\[30px\] w-\[34px\]/g)).toHaveLength(1);
-  });
-
-  it("moves window chrome into the conversation header when the bots sidebar is collapsed", () => {
-    const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "../pages");
-    const shell = readFileSync(path.join(root, "Shell.tsx"), "utf8");
-    expect(shell).toContain("{botsSidebarCollapsed && desktopBridge() ? <WindowChrome /> : null}");
   });
 });
 

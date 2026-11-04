@@ -1,5 +1,3 @@
-"use client";
-
 import { Select as SelectPrimitive } from "@base-ui/react/select";
 import { cn } from "@rakazo/ui-web/lib/utils";
 import { CheckIcon, ChevronDownIcon, ChevronUpIcon } from "lucide-react";
@@ -46,9 +44,10 @@ function SelectTrigger({
       {...props}
     >
       {children}
-      <SelectPrimitive.Icon
-        render={<ChevronDownIcon className="pointer-events-none size-4 text-muted-foreground" />}
-      />
+      {/* As a child, not render: Base UI would otherwise put its default "▼" into the trigger's text. */}
+      <SelectPrimitive.Icon className="pointer-events-none flex text-muted-foreground">
+        <ChevronDownIcon className="size-4" />
+      </SelectPrimitive.Icon>
     </SelectPrimitive.Trigger>
   );
 }

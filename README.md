@@ -1,30 +1,47 @@
 # OtterBot
 
+[English](./README.md) | [简体中文](./README.zh-CN.md) | [日本語](./README.ja.md)
+
 [![GitHub stars](https://img.shields.io/github/stars/elie222/rakazo?labelColor=black&style=for-the-badge&color=2563EB)](https://github.com/elie222/rakazo/stargazers)
 [![Discord](https://img.shields.io/badge/Discord-Join%20the%20community-5865F2?labelColor=black&style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/RWwKa2Sn7h)
+[![Download on the App Store](https://img.shields.io/badge/App%20Store-Download%20for%20iPhone-black?labelColor=black&style=for-the-badge&logo=apple&logoColor=white)](https://apps.apple.com/app/rakazo/id6801531099)
+[![Get Android on Google Play](https://img.shields.io/badge/Google%20Play-Get%20the%20app-black?labelColor=black&style=for-the-badge&logo=googleplay&logoColor=white)](https://play.google.com/store/apps/details?id=com.rakazo.app)
 
 ![OtterBot — AI teammates you actually own](./docs/readme-hero.png)
 
-OtterBot is an open-source platform for running persistent AI teammates. It is available on the web,
-as an Electron desktop app, and through an Expo mobile app. Bring your own model and computer
-provider, or run the complete stack locally.
+OtterBot is an open source AI agent for persistent teammates, and a self-hosted AI assistant you
+can run on your own machine. It is available on the web, as an Electron desktop app, and on
+[iPhone](https://apps.apple.com/app/rakazo/id6801531099) and [Android](https://play.google.com/store/apps/details?id=com.rakazo.app). Bring your own model
+and computer provider, or run the complete stack locally.
+
+It is an open source, self-hosted alternative to Grok Bot, Meta Muse, OpenAI Dots, Instinct,
+OpenClaw, Hermes Agent, and Claude Duet.
 
 OtterBot is in beta. Learn more at [rakazo.com](https://rakazo.com).
 
 ## Features
 
 - Persistent bots with their own conversations, memory, routines, and history
-- Voice mode: speak replies, dictate, and call a bot. Bring your own ElevenLabs, OpenAI, Cartesia, or Fish Audio key
+- Voice mode: speak replies, dictate, and call a bot. Bring your own ElevenLabs, OpenAI, Cartesia, or Fish Audio key, or use a Mac server's installed voices
 - Shared Team Computers and isolated Private computers
 - Browser, terminal, file, and graphical desktop access
 - Bots that can delegate to peer bots or short-lived subagents
 - Bring-your-own model credentials through Pi
 - App integrations through Composio or Pipedream Connect, plus user-installed Treg, remote MCP, and OpenAPI tool sources
-- Docker, E2B, Daytona, Box, and trusted local-computer support
+- Docker, E2B, Daytona, CreateOS, Boat, and trusted local-computer support
 
 ## Demo
 
 https://github.com/user-attachments/assets/dccdeddb-2134-4a56-8eed-b2e591736b1c
+
+## Thanks
+
+- [PromptLayer](https://promptlayer.com/?utm_source=github&utm_medium=referral&utm_campaign=rakazo_readme)
+- [Inbox Zero](https://getinboxzero.com/?utm_source=github&utm_medium=referral&utm_campaign=rakazo_readme)
+- [ConnectorMap](https://connectormap.luinbytes.dev/?utm_source=github&utm_medium=referral&utm_campaign=rakazo_readme)
+- [CodeRabbit](https://www.coderabbit.ai/?utm_source=github&utm_medium=referral&utm_campaign=rakazo_readme)
+- [Greptile](https://www.greptile.com/?utm_source=github&utm_medium=referral&utm_campaign=rakazo_readme)
+- [Snyk](https://snyk.io/?utm_source=github&utm_medium=referral&utm_campaign=rakazo_readme)
 
 ## Stack
 
@@ -36,7 +53,7 @@ https://github.com/user-attachments/assets/dccdeddb-2134-4a56-8eed-b2e591736b1c
 - Better Auth
 - Graphile Worker
 - Pi
-- Docker, E2B, Daytona, and Box
+- Docker, E2B, Daytona, CreateOS, and Boat
 - Composio, Pipedream Connect, MCP, and OpenAPI integrations
 
 ## Quick start (published images)
@@ -53,7 +70,7 @@ The installer downloads the Compose files, creates `.env` with random secrets, a
 It preserves an existing `.env` when rerun.
 
 Open [http://127.0.0.1:5173](http://127.0.0.1:5173), create an account, and connect a model.
-Local Docker computers are on by default. Optional remote providers: `e2b`, `daytona`, or `box`
+Local Docker computers are on by default. Optional remote providers: `e2b`, `novita`, `daytona`, `createos`, `boat`, `boxd`, or `railway`
 with the matching API key.
 
 Default image tag is `edge` (main builds, `linux/amd64` + `linux/arm64`). Details and tags:
@@ -73,13 +90,15 @@ the desktop app, the mobile app, or a browser.
 
 ```bash
 bash install-images.sh --prepare-only
-# edit .env: SANDBOX_PROVIDER=box (or e2b / daytona) with its API key, RAKAZO_HOST=your.domain
+# edit .env: SANDBOX_PROVIDER=boat (or e2b / daytona / createos) with its API key, RAKAZO_HOST=your.domain
 bash install-images.sh
 ```
 
-Put HTTPS in front of port 5173; [docs/self-host.md](./docs/self-host.md#public-single-vm-deployment)
+Put HTTPS in front of port 5173; [docs/self-host-production.md](./docs/self-host-production.md#public-single-vm-deployment)
 covers the Caddy setup and host hardening. In the desktop app choose **Existing instance** and enter
 the `https://` address.
+
+Or [deploy on Railway](https://railway.com/new/template/rakazo-template); see the [Railway setup guide](./infra/railway/README.md).
 
 ## Local development (source checkout)
 
@@ -92,11 +111,17 @@ cd rakazo
 cp .env.example .env
 ```
 
-Set `POSTGRES_PASSWORD` (for example `openssl rand -hex 16`), then put the same value in
-`DATABASE_URL`. Set `BETTER_AUTH_SECRET`, `ENCRYPTION_KEY`, and `SCREEN_PROXY_SECRET` to
+Set `POSTGRES_PASSWORD` and `POSTGRES_APP_PASSWORD` to two values from `openssl rand -hex 16`,
+then put them in `DATABASE_MIGRATION_URL` and `DATABASE_URL`. The app connects as its own
+`rakazo_app` login, which row-level security applies to; migrations run as the owner
+([database roles](docs/self-host-configuration.md#database-roles)). Set `BETTER_AUTH_SECRET`, `ENCRYPTION_KEY`, and `SCREEN_PROXY_SECRET` to
 independent long random values. Docker sandboxes also need a dedicated
 `SANDBOX_SUPERVISOR_TOKEN`. You can also set `OPENROUTER_API_KEY`, or connect a supported
 model provider during onboarding.
+
+For host-side development with Docker Desktop, set `SANDBOX_CONTROL_VIA_LOOPBACK=true`
+in `.env`. The supervisor discovers Docker Desktop's user socket automatically;
+`DOCKER_HOST` or `DOCKER_SOCKET` can override it for another Docker runtime.
 
 Managed app catalogs are optional. Set `COMPOSIO_API_KEY` for Composio, or the
 `PIPEDREAM_CLIENT_ID`, `PIPEDREAM_CLIENT_SECRET`, and `PIPEDREAM_PROJECT_ID` trio for Pipedream
@@ -109,31 +134,64 @@ hosted product should review [Treg's integration terms](https://treg.to/integrat
 a written agreement for hosted resale.
 
 ```bash
-docker compose --env-file .env \
-  -f infra/compose/docker-compose.yml \
-  -f infra/compose/docker-compose.postgres-host.yml \
-  up postgres -d
 pnpm install
-pnpm db:generate
-pnpm db:migrate
 pnpm sandbox:build
 pnpm dev
 ```
 
-Postgres stays network-internal in the default Compose file (same as published images). The
-`postgres-host` overlay publishes loopback `127.0.0.1:5433` for host-side `pnpm` and DB tools.
-Without the overlay, open a shell with
-`docker compose --env-file .env -f infra/compose/docker-compose.yml exec postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'`.
+`pnpm dev` uses the Postgres in `DATABASE_URL` when it accepts a connection. Otherwise it starts a
+local `rakazo-dev-postgres` container with Docker, and every checkout reuses that one. It applies
+migrations and generates the Prisma client before starting. A branch that adds migrations main
+doesn't have gets its own database on the same server, copied from the shared one when possible,
+so unmerged schema changes stay out of it. When the default ports are taken, for example by
+another git worktree, it moves to the next free block and prints the URL. Set `WEB_PORT` and
+`API_PORT` to choose ports yourself.
+
+To run Postgres from the Compose file instead, start it with the `postgres-host` overlay, which
+publishes loopback `127.0.0.1:5433`, and point `DATABASE_URL` and `DATABASE_MIGRATION_URL` at it:
+
+```bash
+docker compose --env-file .env \
+  -f infra/compose/docker-compose.yml \
+  -f infra/compose/docker-compose.postgres-host.yml \
+  up postgres -d
+```
+
 Use a URI-safe `POSTGRES_PASSWORD` (`openssl rand -hex 16`). An existing `pgdata` volume keeps the
 user, password, and database from first init, so keep those values in `.env`, or change them in
 place with `ALTER ROLE` / rename. Recreate the volume only after a backup (or when the data is
 disposable); `docker compose down -v` deletes all Postgres state.
 
-Open [http://127.0.0.1:5173](http://127.0.0.1:5173), create an account, connect a model, and create
+Open the printed URL ([http://127.0.0.1:5173](http://127.0.0.1:5173) by default), create an account, connect a model, and create
 your first bot.
 
 For deployment, provider selection, backups, and upgrades, see the
-[self-hosting guide](./docs/self-host.md).
+[self-hosting guide](./docs/self-host.md), [production deployment](./docs/self-host-production.md),
+[backup and restore](./docs/self-host-backups.md), and [upgrading](./docs/self-host-upgrading.md).
+
+To use CreateOS, set `SANDBOX_PROVIDER=createos` and `CREATEOS_SANDBOX_API_KEY`.
+Optional `CREATEOS_SANDBOX_BASE_URL`, `CREATEOS_SANDBOX_SHAPE`, and
+`CREATEOS_SANDBOX_ROOTFS` default to `https://api.sb.createos.sh`, `s-2vcpu-2gb`,
+and `desktop:1`.
+
+To use Railway computers, set `SANDBOX_PROVIDER=railway`, `RAILWAY_API_TOKEN`
+and `RAILWAY_ENVIRONMENT_ID` on the API and worker. Choose the sandbox environment
+explicitly; Railway's automatic environment ID identifies the hosted app's environment.
+Use the narrowest Railway API token that works: prefer a project token if sufficient
+for sandbox operations and supported by the client's authentication. This provider
+currently uses bearer authentication, so use a team/workspace token rather than a
+personal account token.
+The live screen and desktop require `PRIVATE` networking so Railway's public domain
+can serve the screen. Computers use this mode and can reach other services in the
+same Railway project/environment, as well as the public internet. We recommend a
+dedicated Railway project (or at least a separate environment) for sandboxes,
+separate from the app and database. Recreate existing `ISOLATED` computers before use.
+The desktop is installed on first start. Stopping a computer saves its portable
+home and destroys the sandbox; the next start restores that home in a new sandbox.
+Railway sandbox usage is metered.
+New computers start in Railway's default region. Set `RAILWAY_SANDBOX_REGION` (for example
+`asia-southeast1-eqsg3a`) to keep them near the API; a running computer moves on its next start.
+Workspace exports reject files above 64 MiB without truncating them. Set `RAILWAY_MAX_WORKSPACE_FILE_BYTES` to change this limit.
 
 ## Desktop and mobile
 
@@ -156,6 +214,21 @@ app verifies OtterBot's health endpoint before saving, and later launches go str
 instance. The stack keeps running after the app quits; **Stop Local Stack** in the application
 menu turns it off.
 
+On Linux the desktop app ships as an AppImage, which needs FUSE 2 (`libfuse.so.2`). Distributions
+that only include FUSE 3, such as Fedora Silverblue or Ubuntu 24.04, show
+`dlopen(): error loading libfuse.so.2`. Install the FUSE 2 library (`fuse-libs` on Fedora,
+`libfuse2t64` on Ubuntu 24.04, `libfuse2` on older Ubuntu and Debian), or run the AppImage without
+FUSE:
+
+```bash
+chmod +x OtterBot-*.AppImage
+./OtterBot-*.AppImage --appimage-extract-and-run
+```
+
+**This computer** looks for the `docker` CLI and does not detect Podman. To try another
+Docker-compatible CLI that supports the `compose` commands, set `RAKAZO_DOCKER_BINARY` to its path
+before starting the app.
+
 Use **Change OtterBot Server…** in the application menu to reconnect. Closing that window without
 saving returns to the previous instance. For development automation, set `RAKAZO_WEB_URL` to point
 the shell somewhere else without changing the saved instance, or `RAKAZO_FORCE_SETUP=1` to run
@@ -166,10 +239,13 @@ Mobile build and release instructions live in [docs/mobile-release.md](./docs/mo
 ## UI language
 
 The web (and Electron-hosted) UI supports English, Deutsch, 한국어, Türkçe, हिन्दी,
-Português (Brasil), 简体中文, Español, and Русский under **Settings → Language**. The Expo
-app supports English, 简体中文, and Русский under **Account → Language**. The marketing
-homepage (`apps/www`) is available in en/de/ko/zh via footer language links (`/`, `/de/`,
-`/ko/`, `/zh/`); other marketing pages stay English. The Russian marketing homepage and
+Português (Brasil), 简体中文, 繁體中文, Español, Русский, Français, עברית, Nederlands, and 日本語 under
+**Settings → Language**. The Expo app ships English, 简体中文, 繁體中文, Русский, Deutsch,
+Nederlands, and 日本語 catalogs, and **Account → Language** lists all seven. A device language or
+`EXPO_PUBLIC_DEFAULT_UI_LOCALE` still selects the starting catalog before a saved choice.
+The marketing
+homepage (`apps/www`) is available in en/de/ko/zh/ja via footer language links (`/`, `/de/`,
+`/ko/`, `/zh/`, `/ja/`); other marketing pages stay English. The Russian marketing homepage and
 native Electron setup/menu remain separate follow-up work.
 
 ## Development
@@ -196,11 +272,35 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for the development workflow and test m
 ## Documentation
 
 - [Self-hosting](./docs/self-host.md)
+- [Self-host configuration](./docs/self-host-configuration.md)
 - [Self-host secrets](./docs/self-host-secrets.md)
+- [Sign-in and accounts](./docs/self-host-accounts.md)
+- [Models](./docs/self-host-models.md)
+- [Tools and integrations](./docs/self-host-integrations.md)
+- [Computer providers](./docs/self-host-sandbox-providers.md)
+- [Docker computers](./docs/self-host-docker-computers.md)
+- [Storage and encryption](./docs/self-host-storage.md)
+- [Production deployment](./docs/self-host-production.md)
+- [Backup and restore](./docs/self-host-backups.md)
+- [Upgrading](./docs/self-host-upgrading.md)
+- [Logs and monitoring](./docs/self-host-observability.md)
+- [Apps and clients](./docs/self-host-clients.md)
+- [Billing](./docs/self-host-billing.md)
 - [Computer runtime and isolation](./docs/computer-runtime.md)
 - [Desktop releases](./docs/desktop-release.md)
 - [Mobile releases](./docs/mobile-release.md)
 - [Performance testing](./docs/performance.md)
+- [Bots that manage bots](./docs/fleet-management.md)
+
+## How OtterBot compares
+
+- [Grok Bot](https://rakazo.com/grok-bot-alternative/)
+- [Muse](https://rakazo.com/muse-alternative/)
+- [Dots](https://rakazo.com/dots-alternative/)
+- [Instinct](https://rakazo.com/instinct-alternative/)
+- [OpenClaw](https://rakazo.com/openclaw-alternative/)
+- [Hermes Agent](https://rakazo.com/hermes-alternative/)
+- [All comparisons](https://rakazo.com/alternatives/)
 
 ## Contributing
 

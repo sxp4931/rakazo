@@ -1,14 +1,25 @@
-import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { ComputerRef, ProcessEvent, SandboxProvider } from "@rakazo/adapter-kit";
-import { describe, expect, it } from "vitest";
-import { BoxSandboxEmulator } from "./box-emulator.js";
-import { DaytonaSandboxEmulator } from "./daytona-emulator.js";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import {
+  fakeBoatProvider as fakeBoat,
+  routeFakeBoatDownloads,
+} from "./boat-sandbox.test-support.js";
+import { fakeBoxdProvider } from "./boxd-sandbox.test-support.js";
+import { toComputerRef } from "./computer-support.js";
 import { DesktopSandboxProvider } from "./desktop-sandbox.js";
-import { ManagedSandboxEmulator } from "./e2b-emulator.js";
 import { FakeSandboxProvider } from "./fake-sandbox.js";
-import { provisionPrepared } from "./sandbox-test-support.js";
+import { emulatedNovita } from "./novita-sandbox.test-support.js";
+import { assertSandboxWorkspaceContract, provisionPrepared } from "./sandbox-test-support.js";
+import { FakeWuyingDesktop } from "./wuying-sandbox.test-support.js";
+
+let restoreFetch: () => void;
+beforeAll(() => {
+  restoreFetch = routeFakeBoatDownloads();
+});
+afterAll(() => restoreFetch());
 
 const ctx = {
   operationId: "1",
@@ -28,42 +39,38 @@ async function drain(provider: SandboxProvider, computer: ComputerRef) {
 }
 
 describe("sandbox conformance", () => {
-  it("runs the same graphical command across fake, managed-provider emulators, and desktop", async () => {
+  it("runs the same graphical command across fake, Boat, boxd, Novita, and desktop", async () => {
     const fake = new FakeSandboxProvider();
-    const managed = new ManagedSandboxEmulator();
-    const daytona = new DaytonaSandboxEmulator();
-    const box = new BoxSandboxEmulator();
+    const boat = fakeBoat();
+    const novita = emulatedNovita().provider();
     const desktop = new DesktopSandboxProvider();
+    const boxd = fakeBoxdProvider();
     const a = await provisionPrepared(fake, { botId: "bot-a", homePath: "/tmp/a" }, ctx);
-    const b = await provisionPrepared(managed, { botId: "bot-b", homePath: "/tmp/b" }, ctx);
-    const c = await provisionPrepared(daytona, { botId: "bot-c", homePath: "/tmp/c" }, ctx);
-    const d = await provisionPrepared(box, { botId: "bot-d", homePath: "/tmp/d" }, ctx);
-    const e = await provisionPrepared(desktop, { botId: "bot-e", homePath: "/tmp/e" }, ctx);
-    const outA = await drain(fake, a);
-    const outB = await drain(managed, b);
-    const outC = await drain(daytona, c);
-    const outD = await drain(box, d);
-    const outE = await drain(desktop, e);
-    expect(outA).toContain("graphical-ok");
-    expect(outB).toContain("graphical-ok");
-    expect(outC).toContain("graphical-ok");
-    expect(outD).toContain("graphical-ok");
-    expect(outE).toContain("graphical-ok");
+    const b = await provisionPrepared(boat, { botId: "bot-b", homePath: "/tmp/b" }, ctx);
+    const c = await provisionPrepared(desktop, { botId: "bot-c", homePath: "/tmp/c" }, ctx);
+    const d = await provisionPrepared(novita, { botId: "bot-d", homePath: "/tmp/d" }, ctx);
+    const e = await provisionPrepared(boxd, { botId: "bot-e", homePath: "/tmp/e" }, ctx);
+    expect(await drain(fake, a)).toContain("graphical-ok");
+    expect(await drain(boat, b)).toContain("graphical-ok");
+    expect(await drain(desktop, c)).toContain("graphical-ok");
+    expect(await drain(novita, d)).toContain("graphical-ok");
+    expect(await drain(boxd, e)).toContain("graphical-ok");
     expect(new Set([a.id, b.id, c.id, d.id, e.id]).size).toBe(5);
     await fake.destroy(a, ctx);
-    await managed.destroy(b, ctx);
-    await daytona.destroy(c, ctx);
-    await box.destroy(d, ctx);
-    await desktop.destroy(e, ctx);
+    await boat.destroy(b, ctx);
+    await desktop.destroy(c, ctx);
+    await novita.destroy(d, ctx);
+    await boxd.destroy(e, ctx);
   });
 
   it("offers the same observation, action, and workspace contract across providers", async () => {
     const providers: SandboxProvider[] = [
       new FakeSandboxProvider(),
-      new ManagedSandboxEmulator(),
-      new DaytonaSandboxEmulator(),
-      new BoxSandboxEmulator(),
+      fakeBoat(),
+      fakeBoxdProvider(),
+      emulatedNovita().provider(),
       new DesktopSandboxProvider(),
+      new FakeWuyingDesktop().provider(),
     ];
     for (const [index, provider] of providers.entries()) {
       const computer = await provisionPrepared(
@@ -71,44 +78,73 @@ describe("sandbox conformance", () => {
         { botId: `portable-${index}`, homePath: `/tmp/portable-${index}` },
         ctx,
       );
-      await provider.prepare(computer, ctx);
-      await provider.writeFile(
-        computer,
-        { path: "notes/result.txt", content: new TextEncoder().encode("portable") },
-        ctx,
-      );
-      expect(await provider.listFiles(computer, "notes", ctx)).toEqual([
-        { path: "notes/result.txt", kind: "file", size: 8 },
-      ]);
-      expect(
-        new TextDecoder().decode(await provider.readFile(computer, "notes/result.txt", ctx)),
-      ).toBe("portable");
-      const binary = Uint8Array.from([0, 255, 1, 128]);
-      await provider.writeFile(
-        computer,
-        { path: "bin/tool", content: binary, executable: true },
-        ctx,
-      );
-      expect(await provider.readFile(computer, "bin/tool", ctx)).toEqual(binary);
-      expect(await provider.listFiles(computer, "bin", ctx)).toEqual([
-        { path: "bin/tool", kind: "file", size: 4, executable: true },
-      ]);
-      const acted = await provider.act(
-        computer,
-        { actions: [{ kind: "clipboard", text: "visible" }], observe: true },
-        ctx,
-      );
-      expect(acted.completed).toBe(1);
-      expect(acted.observation?.image.byteLength).toBeGreaterThan(0);
-      const exported = [];
-      for await (const file of provider.exportWorkspace(computer, ctx)) exported.push(file);
-      expect(exported.map((file) => file.path)).toContain("notes/result.txt");
-      expect(exported.find((file) => file.path === "bin/tool")).toMatchObject({
-        content: binary,
-        executable: true,
-      });
+      await assertSandboxWorkspaceContract(provider, computer, ctx);
       await provider.destroy(computer, ctx);
     }
+  });
+
+  it("explicit unsets win over inherited and request variables across providers", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "rakazo-unset-env-"));
+    const providers: SandboxProvider[] = [
+      new FakeSandboxProvider(),
+      fakeBoat(),
+      fakeBoxdProvider(),
+      emulatedNovita().provider(),
+      new DesktopSandboxProvider({ root }),
+    ];
+    vi.stubEnv("RAKAZO_COMMAND_UNSET_TEST", "fake-host-value");
+    try {
+      for (const [index, provider] of providers.entries()) {
+        const computer = await provider.provision(
+          { botId: `unset-${index}`, homePath: "/unused" },
+          ctx,
+        );
+        const events = [];
+        for await (const event of provider.execute(
+          computer,
+          {
+            argv: ["printenv", "RAKAZO_COMMAND_UNSET_TEST"],
+            env: { RAKAZO_COMMAND_UNSET_TEST: "fake-request-value" },
+            unsetEnv: ["RAKAZO_COMMAND_UNSET_TEST"],
+          },
+          ctx,
+        ))
+          events.push(event);
+        expect(events).toEqual([{ type: "exit", code: 1 }]);
+        await provider.destroy(computer, ctx);
+      }
+    } finally {
+      vi.unstubAllEnvs();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("desktop executor passes request env to the command", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "rakazo-desktop-env-"));
+    const desktop = new DesktopSandboxProvider({ root });
+    const computer = await desktop.provision({ botId: "env", homePath: "/unused" }, ctx);
+    const sentinel = "rakazo-desktop-request-env-sentinel";
+    let stdout = "";
+    let code = 1;
+    for await (const event of desktop.execute(
+      computer,
+      {
+        argv: [
+          process.execPath,
+          "-e",
+          "process.stdout.write(process.env.RAKAZO_DESKTOP_ENV_SENTINEL ?? '')",
+        ],
+        env: { RAKAZO_DESKTOP_ENV_SENTINEL: sentinel },
+      },
+      ctx,
+    )) {
+      if (event.type === "stdout") stdout += event.data;
+      if (event.type === "exit") code = event.code;
+    }
+    expect(code).toBe(0);
+    expect(stdout).toContain(sentinel);
+    await desktop.destroy(computer, ctx);
+    rmSync(root, { recursive: true, force: true });
   });
 
   it("desktop executor refuses paths outside the computer home", async () => {
@@ -161,6 +197,39 @@ describe("sandbox conformance", () => {
     rmSync(root, { recursive: true, force: true });
   });
 
+  it("desktop executor yields stdout before a command that keeps running exits", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "rakazo-desktop-stream-"));
+    const desktop = new DesktopSandboxProvider({ root });
+    const computer = await desktop.provision({ botId: "stream", homePath: "/unused" }, ctx);
+    const controller = new AbortController();
+    const startedAt = Date.now();
+    const iterator = desktop
+      .execute(
+        computer,
+        {
+          argv: [
+            "node",
+            "-e",
+            "process.stdout.write('code: ABCD-1234\\n'); setTimeout(() => {}, 30000)",
+          ],
+          timeoutMs: 5_000,
+        },
+        { ...ctx, signal: controller.signal },
+      )
+      [Symbol.asyncIterator]();
+
+    const first = await iterator.next();
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    expect(first.value).toEqual({ type: "stdout", data: "code: ABCD-1234\n" });
+    controller.abort();
+    const rest: ProcessEvent[] = [];
+    for await (const event of { [Symbol.asyncIterator]: () => iterator }) rest.push(event);
+    expect(rest).toContainEqual({ type: "exit", code: 130 });
+
+    await desktop.destroy(computer, ctx);
+    rmSync(root, { recursive: true, force: true });
+  });
+
   it("desktop executor aborts and kills a running command", async () => {
     const root = mkdtempSync(path.join(tmpdir(), "rakazo-desktop-abort-"));
     const desktop = new DesktopSandboxProvider({ root });
@@ -188,9 +257,9 @@ describe("sandbox conformance", () => {
     const root = mkdtempSync(path.join(tmpdir(), "rakazo-destroy-idempotent-"));
     const providers: SandboxProvider[] = [
       new FakeSandboxProvider(),
-      new ManagedSandboxEmulator(),
-      new DaytonaSandboxEmulator(),
-      new BoxSandboxEmulator(),
+      fakeBoat(),
+      fakeBoxdProvider(),
+      emulatedNovita().provider(),
       new DesktopSandboxProvider({ root }),
     ];
     for (const [index, provider] of providers.entries()) {
@@ -219,6 +288,64 @@ describe("sandbox conformance", () => {
     rmSync(root, { recursive: true, force: true });
   });
 
+  it("reports a desktop machine running through the reference the computer row stores", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "rakazo-desktop-running-"));
+    const desktop = new DesktopSandboxProvider({ root });
+    // The API and the worker each build their own provider over the same data directory.
+    const otherProcess = new DesktopSandboxProvider({ root });
+    const first = await desktop.provision({ botId: "stable", homePath: "/unused" }, ctx);
+    const stored = toComputerRef({
+      homeKey: "stable",
+      kind: "desktop",
+      providerRef: first.providerRef!,
+    });
+    const never = toComputerRef({
+      homeKey: "other",
+      kind: "desktop",
+      providerRef: path.join(root, "desktop-computers", "other"),
+    });
+
+    expect(await desktop.isRunning(stored, ctx)).toBe(true);
+    expect(await otherProcess.isRunning(stored, ctx)).toBe(true);
+    expect(await otherProcess.isRunning({ ...stored, providerRef: root }, ctx)).toBe(false);
+    expect(await desktop.isRunning(never, ctx)).toBe(false);
+    await desktop.stop(stored, ctx);
+    expect(await desktop.isRunning(stored, ctx)).toBe(false);
+    expect(await otherProcess.isRunning(stored, ctx)).toBe(false);
+    await otherProcess.provision({ botId: "stable", homePath: "/unused" }, ctx);
+    expect(await desktop.isRunning(stored, ctx)).toBe(true);
+    rmSync(first.providerRef!, { recursive: true, force: true });
+    expect(await otherProcess.isRunning(stored, ctx)).toBe(false);
+    writeFileSync(first.providerRef!, "not a home");
+    expect(await otherProcess.isRunning(stored, ctx)).toBe(false);
+    // A stop it cannot record must fail rather than leave the computer reading as running.
+    const blocked = await desktop.provision({ botId: "blocked", homePath: "/unused" }, ctx);
+    mkdirSync(`${blocked.providerRef}.stopped`);
+    await expect(desktop.stop(blocked, ctx)).rejects.toThrow();
+    const gone = { ...never, providerRef: path.join(root, "missing", "gone") };
+    await expect(otherProcess.stop(gone, ctx)).resolves.toBeUndefined();
+    // A marker that cannot be read is not proof the computer is running.
+    const longKey = "k".repeat(250);
+    const longHome = path.join(root, "desktop-computers", longKey);
+    mkdirSync(longHome);
+    await expect(
+      otherProcess.isRunning({ ...never, botId: longKey, providerRef: longHome }, ctx),
+    ).rejects.toThrow();
+    // The marker itself counts, even as a link to nothing.
+    const linked = await desktop.provision({ botId: "linked", homePath: "/unused" }, ctx);
+    symlinkSync(path.join(root, "nowhere"), `${linked.providerRef}.stopped`);
+    const linkedRef = { ...never, botId: "linked", providerRef: linked.providerRef };
+    expect(await otherProcess.isRunning(linkedRef, ctx)).toBe(false);
+    const kept = await desktop.provision({ botId: "kept", homePath: "/unused" }, ctx);
+    await desktop.destroy(kept, ctx);
+    expect(
+      await otherProcess.isRunning({ ...never, botId: "kept", providerRef: kept.providerRef }, ctx),
+    ).toBe(false);
+
+    await desktop.destroy(first, ctx);
+    rmSync(root, { recursive: true, force: true });
+  });
+
   it("desktop file writes do not follow a final symlink outside the workspace", async () => {
     const root = mkdtempSync(path.join(tmpdir(), "rakazo-desktop-symlink-"));
     const desktop = new DesktopSandboxProvider({ root });
@@ -234,6 +361,25 @@ describe("sandbox conformance", () => {
       }),
     ).rejects.toThrow();
     expect(readFileSync(outside, "utf8")).toBe("before");
+
+    await desktop.destroy(computer, ctx);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("desktop file listings skip links that dangle or leave the workspace", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "rakazo-desktop-list-links-"));
+    const desktop = new DesktopSandboxProvider({ root });
+    const computer = await desktop.provision({ botId: "list-links", homePath: "/unused" }, ctx);
+    const directory = path.join(computer.providerRef, "links");
+    mkdirSync(directory);
+    writeFileSync(path.join(root, "outside.txt"), "outside");
+    writeFileSync(path.join(directory, "kept.txt"), "inside");
+    symlinkSync(path.join(root, "outside.txt"), path.join(directory, "escape.txt"));
+    symlinkSync(path.join(directory, "missing.txt"), path.join(directory, "dangling.txt"));
+
+    expect(await desktop.listFiles(computer, "links", ctx)).toEqual([
+      { path: "links/kept.txt", kind: "file", size: 6 },
+    ]);
 
     await desktop.destroy(computer, ctx);
     rmSync(root, { recursive: true, force: true });

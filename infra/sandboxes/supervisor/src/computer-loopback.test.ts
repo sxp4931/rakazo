@@ -4,7 +4,15 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import { resolveSupervisorToken } from "@rakazo/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { COMPUTER_IMAGE, computerNetworkNameFor, hostComputerUser } from "./computer-spec.js";
+import {
+  COMPUTER_IMAGE,
+  computerBridgeNameFor,
+  computerNetworkNameFor,
+  computerNetworkOwnerFor,
+  containerNameFor,
+  hostComputerUser,
+  screenPorts,
+} from "./computer-spec.js";
 
 const mocks = vi.hoisted(() => ({
   docker: {
@@ -14,8 +22,11 @@ const mocks = vi.hoisted(() => ({
     listContainers: vi.fn(),
     createContainer: vi.fn(),
     createNetwork: vi.fn(),
+    getNetwork: vi.fn(),
+    listNetworks: vi.fn(),
   },
   assertHomeWritable: vi.fn(),
+  verifyRestrictedEgress: vi.fn(),
 }));
 vi.mock("dockerode", () => ({
   default: class {
@@ -25,9 +36,15 @@ vi.mock("dockerode", () => ({
     listContainers = mocks.docker.listContainers;
     createContainer = mocks.docker.createContainer;
     createNetwork = mocks.docker.createNetwork;
+    getNetwork = mocks.docker.getNetwork;
+    listNetworks = mocks.docker.listNetworks;
   },
 }));
 vi.mock("./home-ownership.js", () => ({ assertComputerHomeWritable: mocks.assertHomeWritable }));
+vi.mock("./egress-probe.js", () => ({
+  EgressNotEnforced: class EgressNotEnforced extends Error {},
+  verifyRestrictedEgress: mocks.verifyRestrictedEgress,
+}));
 vi.mock("node:fs/promises", async (importOriginal) => ({
   ...(await importOriginal<typeof NodeFsPromises>()),
   mkdir: vi.fn(),
@@ -39,6 +56,7 @@ let screenPort: string;
 beforeEach(async () => {
   vi.resetModules();
   vi.resetAllMocks();
+  mocks.verifyRestrictedEgress.mockResolvedValue(undefined);
   vi.stubEnv("HOSTNAME", "");
   vi.stubEnv("DATA_DIR", "/tmp/rakazo-loopback-test");
   vi.stubEnv("SANDBOX_SCREEN_NETWORK", "published");
@@ -182,6 +200,42 @@ describe("computer loopback provision lifecycle", () => {
     expect(container.stop).toHaveBeenCalledOnce();
   });
 
+  it("quiesces browser profiles with Browser.close before stopping the container", async () => {
+    const { supervisorApp } = await import("./index.js");
+    const container = {
+      inspect: vi.fn(async () => ({
+        Config: {
+          Labels: { "rakazo.managed": "true", "rakazo.botId": "bot", "rakazo.spaceId": "space" },
+        },
+        State: { Running: true },
+      })),
+      exec: vi.fn(async (_options: { Cmd?: string[] }) => ({
+        start: async () => Readable.from([]),
+        inspect: async () => ({ ExitCode: 0 }),
+      })),
+      stop: vi.fn(async () => {}),
+    };
+    mocks.docker.getContainer.mockReturnValue(container);
+    const response = await supervisorApp.request("/computers/quiesce-before-stop/stop", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${resolveSupervisorToken(process.env)}`,
+        "x-rakazo-bot-id": "bot",
+        "x-rakazo-space-id": "space",
+      },
+    });
+    expect(response.status).toBe(200);
+    const command = String(container.exec.mock.calls[0]?.[0]?.Cmd?.[2] ?? "");
+    expect(command).toContain("Browser.close");
+    expect(command).toContain(".browser-profiles'/chromium ");
+    expect(command).toContain(".browser-profiles'/chromium-bot-");
+    expect(command).toContain(".browser-profiles'/chromium-screen-");
+    expect(container.exec).toHaveBeenCalledOnce();
+    expect(container.exec.mock.invocationCallOrder[0]).toBeLessThan(
+      container.stop.mock.invocationCallOrder[0] ?? 0,
+    );
+  });
+
   it.each([
     { enabled: true, hosts: [], resumed: false },
     { enabled: true, hosts: ["127.0.0.1"], resumed: true },
@@ -204,7 +258,10 @@ describe("computer loopback provision lifecycle", () => {
         PortBindings: { "7070/tcp": hosts.map((HostIp) => ({ HostIp, HostPort: "0" })) },
       },
       State: { Running: false },
-      NetworkSettings: { Ports: { "6080/tcp": [{ HostIp: "127.0.0.1", HostPort: screenPort }] } },
+      NetworkSettings: {
+        Ports: { "6080/tcp": [{ HostIp: "127.0.0.1", HostPort: screenPort }] },
+        Networks: { [computerNetworkNameFor("bot")]: { NetworkID: "bot-network" } },
+      },
     };
     const existing = {
       id: "existing",
@@ -224,6 +281,9 @@ describe("computer loopback provision lifecycle", () => {
     mocks.docker.listContainers.mockResolvedValue([{ Id: existing.id }]);
     mocks.docker.createContainer.mockResolvedValue(replacement);
     mocks.docker.createNetwork.mockResolvedValue({});
+    mocks.docker.getNetwork.mockReturnValue({
+      inspect: vi.fn().mockResolvedValue({ Id: "bot-network" }),
+    });
 
     const response = await supervisorApp.request("/computers", {
       method: "POST",
@@ -238,6 +298,7 @@ describe("computer loopback provision lifecycle", () => {
     expect(await response.json()).toMatchObject({
       resumed,
       id: resumed ? "existing" : "replacement",
+      ...(resumed ? { started: true } : {}),
     });
     expect(response.status).toBe(200);
     if (resumed) {
@@ -387,6 +448,7 @@ describe("provisioning network rollback", () => {
           Labels: { "rakazo.managed": "true", "rakazo.botId": "bot", "rakazo.spaceId": "space" },
         },
         HostConfig: { PortBindings: {} },
+        State: { Running: true },
       }),
     };
     mocks.docker.listContainers.mockResolvedValue([{ Id: existing.id }]);
@@ -435,6 +497,238 @@ describe("provisioning network rollback", () => {
     expect(await response.json()).toEqual({ error: "container creation failed" });
     expect(mocks.docker.createContainer).toHaveBeenCalledOnce();
     expect(mocks.docker.createNetwork).not.toHaveBeenCalled();
+  });
+});
+
+describe("restricted egress rekeying", () => {
+  function setupExisting(botNet: string) {
+    const homePath = path.join(process.env.DATA_DIR!, "homes", "bot");
+    const info = {
+      Image: "test-image-id",
+      Config: {
+        User: hostComputerUser(),
+        Labels: { "rakazo.managed": "true", "rakazo.botId": "bot", "rakazo.spaceId": "space" },
+      },
+      HostConfig: { NetworkMode: botNet, PortBindings: {} },
+      State: { Running: false },
+      NetworkSettings: {
+        Ports: { "6080/tcp": [{ HostIp: "127.0.0.1", HostPort: screenPort }] },
+        Networks: { [botNet]: { NetworkID: "bot-network" } },
+      },
+    };
+    const existing = {
+      id: "existing",
+      inspect: vi.fn().mockResolvedValue(info),
+      start: vi.fn().mockResolvedValue(undefined),
+      remove: vi.fn().mockResolvedValue(undefined),
+    };
+    const replacement = {
+      id: "replacement",
+      inspect: vi.fn().mockResolvedValue(info),
+      start: vi.fn().mockResolvedValue(undefined),
+      remove: vi.fn().mockResolvedValue(undefined),
+    };
+    mocks.docker.getImage.mockReturnValue({
+      inspect: vi.fn().mockResolvedValue({ Id: info.Image }),
+    });
+    mocks.docker.getContainer.mockReturnValue(existing);
+    mocks.docker.listContainers.mockResolvedValue([{ Id: existing.id }]);
+    mocks.docker.createContainer.mockResolvedValue(replacement);
+    return { homePath, existing, replacement };
+  }
+
+  async function provision() {
+    const { supervisorApp } = await import("./index.js");
+    const homePath = path.join(process.env.DATA_DIR!, "homes", "bot");
+    return supervisorApp.request("/computers", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${resolveSupervisorToken(process.env)}`,
+        "content-type": "application/json",
+        "x-rakazo-bot-id": "bot",
+        "x-rakazo-space-id": "space",
+      },
+      body: JSON.stringify({ botId: "bot", spaceId: "space", homePath }),
+    });
+  }
+
+  it("replaces a computer whose network lacks the named bridge", async () => {
+    vi.stubEnv("SANDBOX_COMPUTER_EGRESS", "restricted");
+    const botNet = computerNetworkNameFor("bot");
+    const { existing } = setupExisting(botNet);
+    const network = {
+      inspect: vi.fn().mockResolvedValue({ Id: "bot-network", Options: {} }),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      connect: vi.fn().mockResolvedValue(undefined),
+      remove: vi.fn().mockResolvedValue(undefined),
+    };
+    mocks.docker.getNetwork.mockReturnValue(network);
+    mocks.docker.createNetwork.mockResolvedValue({});
+
+    const response = await provision();
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ resumed: false, id: "replacement" });
+    expect(existing.remove).toHaveBeenCalledWith({ force: true });
+    expect(existing.start).not.toHaveBeenCalled();
+  });
+
+  it.each(["auto", "restricted"])("probes %s egress with configured computer DNS", async (mode) => {
+    vi.stubEnv("SANDBOX_COMPUTER_EGRESS", mode);
+    vi.stubEnv("SANDBOX_COMPUTER_DNS", "1.1.1.1, 9.9.9.9");
+    setupExisting(computerNetworkNameFor("bot"));
+    await provision();
+    expect(mocks.verifyRestrictedEgress).toHaveBeenCalledExactlyOnceWith(
+      expect.anything(),
+      COMPUTER_IMAGE,
+      ["1.1.1.1", "9.9.9.9"],
+    );
+  });
+
+  it("refuses restricted computers until the host ruleset is verified", async () => {
+    vi.stubEnv("SANDBOX_COMPUTER_EGRESS", "restricted");
+    const { existing } = setupExisting(computerNetworkNameFor("bot"));
+    mocks.verifyRestrictedEgress.mockRejectedValueOnce(new Error("egress is not enforced"));
+
+    const response = await provision();
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: "egress is not enforced" });
+    expect(existing.start).not.toHaveBeenCalled();
+    expect(mocks.docker.createContainer).not.toHaveBeenCalled();
+    expect(mocks.docker.createNetwork).not.toHaveBeenCalled();
+  });
+
+  it("auto egress stays open only after a probe shows the rules are missing", async () => {
+    vi.stubEnv("SANDBOX_COMPUTER_EGRESS", "auto");
+    const { existing } = setupExisting(computerNetworkNameFor("bot"));
+    const { EgressNotEnforced } = await import("./egress-probe.js");
+    mocks.verifyRestrictedEgress
+      .mockRejectedValueOnce(new Error("probe timed out"))
+      .mockRejectedValueOnce(new EgressNotEnforced("a computer bridge reached the host"));
+
+    // A probe that could not finish decides nothing: refuse, and probe again next time.
+    const refused = await provision();
+    expect(refused.status).toBe(500);
+    expect(existing.start).not.toHaveBeenCalled();
+
+    mocks.docker.getNetwork.mockReturnValue({
+      inspect: vi.fn().mockResolvedValue({ Id: "bot-network", Options: {} }),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      connect: vi.fn().mockResolvedValue(undefined),
+      remove: vi.fn().mockResolvedValue(undefined),
+    });
+    mocks.docker.createNetwork.mockResolvedValue({});
+    const opened = await provision();
+    expect(await opened.clone().text()).not.toMatch(/probe/);
+    expect(opened.status).toBe(200);
+    // The completed answer is kept: no third probe.
+    await provision();
+    expect(mocks.verifyRestrictedEgress).toHaveBeenCalledTimes(2);
+  });
+
+  it("resumes a computer whose network has the named bridge", async () => {
+    vi.stubEnv("SANDBOX_COMPUTER_EGRESS", "restricted");
+    const botNet = computerNetworkNameFor("bot");
+    const { existing } = setupExisting(botNet);
+    const network = {
+      inspect: vi.fn().mockResolvedValue({
+        Id: "bot-network",
+        Options: { "com.docker.network.bridge.name": computerBridgeNameFor("bot") },
+      }),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      connect: vi.fn().mockResolvedValue(undefined),
+      remove: vi.fn().mockResolvedValue(undefined),
+    };
+    mocks.docker.getNetwork.mockReturnValue(network);
+    mocks.docker.createNetwork.mockResolvedValue({});
+
+    const response = await provision();
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ resumed: true, id: "existing" });
+    expect(existing.start).toHaveBeenCalledOnce();
+    expect(mocks.docker.createContainer).not.toHaveBeenCalled();
+    expect(mocks.docker.createNetwork).not.toHaveBeenCalled();
+  });
+
+  it("stops the computer instead of restoring unrestricted egress when rekey removal fails", async () => {
+    vi.stubEnv("SANDBOX_COMPUTER_EGRESS", "restricted");
+    const botNet = computerNetworkNameFor("bot");
+    const { existing } = setupExisting(botNet);
+    const stop = vi.fn().mockResolvedValue(undefined);
+    const kill = vi.fn().mockResolvedValue(undefined);
+    Object.assign(existing, { stop, kill });
+    const peer = {
+      inspect: vi.fn().mockResolvedValue({ Config: { Labels: { "rakazo.botId": "other" } } }),
+      stop: vi.fn().mockResolvedValue(undefined),
+      kill: vi.fn().mockResolvedValue(undefined),
+    };
+    mocks.docker.getContainer.mockImplementation((id: string) => (id === "peer" ? peer : existing));
+    const network = {
+      inspect: vi.fn().mockResolvedValue({
+        Id: "bot-network",
+        Options: {},
+        Containers: { existing: {}, peer: {} },
+      }),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      connect: vi.fn().mockResolvedValue(undefined),
+      remove: vi.fn().mockRejectedValue(new Error("network has active endpoints")),
+    };
+    mocks.docker.getNetwork.mockReturnValue(network);
+    mocks.docker.createNetwork.mockRejectedValue(new Error("network already exists"));
+
+    const response = await provision();
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({
+      error: expect.stringContaining("failed to replace unrestricted network"),
+    });
+    for (const id of ["existing", "peer"]) {
+      expect(network.disconnect).toHaveBeenCalledWith({ Container: id, Force: true });
+    }
+    expect(network.connect).not.toHaveBeenCalled();
+    expect(stop).toHaveBeenCalledWith({ t: 1 });
+    expect(peer.stop).not.toHaveBeenCalled();
+    expect(existing.remove).not.toHaveBeenCalled();
+    expect(existing.start).not.toHaveBeenCalled();
+  });
+
+  it("stops the named computer when endpoint inspection fails during rekey", async () => {
+    vi.stubEnv("SANDBOX_COMPUTER_EGRESS", "restricted");
+    const botNet = computerNetworkNameFor("bot");
+    const { existing } = setupExisting(botNet);
+    const info = await existing.inspect();
+    let seen = 0;
+    existing.inspect.mockImplementation(async () => {
+      seen += 1;
+      if (seen > 2) throw new Error("inspect failed");
+      return info;
+    });
+    const stop = vi.fn().mockResolvedValue(undefined);
+    const kill = vi.fn().mockResolvedValue(undefined);
+    Object.assign(existing, { stop, kill });
+    const peer = {
+      inspect: vi.fn().mockResolvedValue({ Config: { Labels: { "rakazo.botId": "other" } } }),
+      stop: vi.fn().mockResolvedValue(undefined),
+      kill: vi.fn().mockResolvedValue(undefined),
+    };
+    mocks.docker.getContainer.mockImplementation((id: string) => (id === "peer" ? peer : existing));
+    const network = {
+      inspect: vi.fn().mockResolvedValue({
+        Id: "bot-network",
+        Options: {},
+        Containers: { existing: {}, peer: {} },
+      }),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      connect: vi.fn().mockResolvedValue(undefined),
+      remove: vi.fn().mockRejectedValue(new Error("network has active endpoints")),
+    };
+    mocks.docker.getNetwork.mockReturnValue(network);
+    mocks.docker.createNetwork.mockRejectedValue(new Error("network already exists"));
+
+    const response = await provision();
+    expect(response.status).toBe(500);
+    expect(network.connect).not.toHaveBeenCalled();
+    expect(mocks.docker.getContainer).toHaveBeenCalledWith(containerNameFor("bot"));
+    expect(stop).toHaveBeenCalledWith({ t: 1 });
+    expect(peer.stop).not.toHaveBeenCalled();
   });
 });
 
@@ -545,6 +839,7 @@ describe("space computer limit enforcement", () => {
           PortBindings: {},
           Mounts: [],
         },
+        NetworkSettings: { Networks: { [computerNetworkNameFor("bot-existing")]: {} } },
       }),
       start: vi.fn().mockResolvedValue(undefined),
     };
@@ -578,6 +873,67 @@ describe("space computer limit enforcement", () => {
       resumed: true,
     });
     expect(mocks.docker.createContainer).not.toHaveBeenCalled();
+  });
+
+  it("replaces a running container that lost its network attachment", async () => {
+    setupContainerFixture();
+
+    // A named network deleted out from under a container (e.g. a failed rekey)
+    // leaves HostConfig.NetworkMode set while NetworkSettings has no endpoint —
+    // resuming it would report success with zero connectivity, so it must be
+    // replaced instead.
+    const existing = {
+      id: "detached-container",
+      inspect: vi.fn().mockResolvedValue({
+        Image: "image",
+        Config: {
+          User: hostComputerUser(process.getuid?.(), process.getgid?.()),
+          Labels: {
+            "rakazo.managed": "true",
+            "rakazo.botId": "bot-detached",
+            "rakazo.spaceId": "space-1",
+          },
+        },
+        State: { Running: true },
+        HostConfig: {
+          NetworkMode: computerNetworkNameFor("bot-detached"),
+          PortBindings: {},
+          Mounts: [],
+        },
+        NetworkSettings: { Networks: {} },
+      }),
+      start: vi.fn().mockResolvedValue(undefined),
+      remove: vi.fn().mockResolvedValue(undefined),
+    };
+
+    mocks.docker.getContainer.mockReturnValue(existing);
+    mocks.docker.listContainers.mockImplementation(
+      async (opts?: { filters?: { label?: string[] } }) => {
+        const labels = opts?.filters?.label ?? [];
+        if (labels.some((l: string) => l === "rakazo.botId=bot-detached")) {
+          return [
+            {
+              Id: existing.id,
+              Labels: {
+                "rakazo.managed": "true",
+                "rakazo.botId": "bot-detached",
+                "rakazo.spaceId": "space-1",
+              },
+            },
+          ];
+        }
+        return [];
+      },
+    );
+
+    const response = await provisionBot("bot-detached", "space-1");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      id: "new-container-id",
+      resumed: false,
+    });
+    expect(existing.remove).toHaveBeenCalledWith({ force: true });
+    expect(mocks.docker.createContainer).toHaveBeenCalled();
   });
 
   it("counts legacy workspaceId COMPUTER_IMAGE containers toward the limit", async () => {
@@ -727,6 +1083,1526 @@ describe("space computer limit enforcement", () => {
     expect(present.size).toBe(1);
     expect(await createResponse.json()).toEqual({
       error: "Computer limit reached for space (max: 1)",
+    });
+  });
+});
+
+describe("screen release status", () => {
+  const headers = {
+    authorization: `Bearer ${resolveSupervisorToken(process.env)}`,
+    "content-type": "application/json",
+    "x-rakazo-bot-id": "bot",
+    "x-rakazo-space-id": "space",
+    "x-rakazo-screen-id": "writer",
+  };
+
+  function managedContainer(exec?: ReturnType<typeof vi.fn>) {
+    return {
+      inspect: vi.fn(async () => ({
+        Config: {
+          Labels: { "rakazo.managed": "true", "rakazo.botId": "bot", "rakazo.spaceId": "space" },
+        },
+        HostConfig: { NetworkMode: computerNetworkNameFor("bot") },
+        State: { Running: true },
+        NetworkSettings: {
+          Ports: { "6080/tcp": [{ HostIp: "127.0.0.1", HostPort: screenPort }] },
+        },
+      })),
+      exec:
+        exec ??
+        vi.fn(async () => ({
+          start: async () => Readable.from([]),
+          inspect: async () => ({ ExitCode: 0 }),
+        })),
+    };
+  }
+
+  it("returns 404 only when the computer is already missing", async () => {
+    const { supervisorApp } = await import("./index.js");
+    const missing = {
+      inspect: vi
+        .fn()
+        .mockRejectedValue(Object.assign(new Error("no such container"), { statusCode: 404 })),
+    };
+    mocks.docker.getContainer.mockReturnValue(missing);
+    const response = await supervisorApp.request("/computers/missing-screen/screen", {
+      method: "DELETE",
+      headers,
+    });
+    expect(response.status).toBe(404);
+    await expect(response.json()).resolves.toEqual({ error: "computer not found" });
+  });
+
+  it("rejects another computer identity without releasing its screen", async () => {
+    const { supervisorApp } = await import("./index.js");
+    const container = {
+      inspect: vi.fn().mockResolvedValue({
+        Config: {
+          Labels: { "rakazo.managed": "true", "rakazo.botId": "other", "rakazo.spaceId": "other" },
+        },
+      }),
+      exec: vi.fn(),
+    };
+    mocks.docker.getContainer.mockReturnValue(container);
+    const response = await supervisorApp.request("/computers/identity-screen/screen", {
+      method: "DELETE",
+      headers: { ...headers, "x-rakazo-preserve-screen": "1" },
+    });
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toEqual({ error: "invalid computer identity" });
+    expect(container.exec).not.toHaveBeenCalled();
+  });
+
+  it.each(["run-1:1", "screen-view-writer:0"])(
+    "keeps the browser across release and reacquisition (%s)",
+    async (leaseId) => {
+      const { supervisorApp } = await import("./index.js");
+      const container = managedContainer();
+      mocks.docker.getContainer.mockReturnValue(container);
+      const open = (lease: string) =>
+        supervisorApp.request("/computers/persistent/screen-mode", {
+          method: "POST",
+          headers: { ...headers, "x-rakazo-screen-lease-id": lease },
+          body: JSON.stringify({ interactive: false, revokeControl: false }),
+        });
+      const first = await open(leaseId);
+      expect(first.status).toBe(200);
+      const firstView = await first.json();
+      container.exec.mockClear();
+
+      const released = await supervisorApp.request("/computers/persistent/screen", {
+        method: "DELETE",
+        headers: { ...headers, "x-rakazo-screen-lease-id": leaseId },
+      });
+      expect(released.status).toBe(200);
+      const releaseCommand = container.exec.mock.calls
+        .map(([options]) => options.Cmd.join(" "))
+        .join("\n");
+      expect(releaseCommand).toContain("sockets/view-1-");
+      expect(releaseCommand).toContain("sockets/control-1-");
+      expect(releaseCommand).not.toContain("Browser.close");
+      expect(releaseCommand).not.toContain("browser-profile-");
+      expect(releaseCommand).not.toContain("Xvfb");
+      container.exec.mockClear();
+
+      const next = await open("run-2:2");
+      expect(next.status).toBe(200);
+      expect(await next.json()).not.toEqual(firstView);
+      const setupCommand = container.exec.mock.calls
+        .map(([options]) => options.Cmd.join(" "))
+        .join("\n");
+      expect(setupCommand).toContain("browser-profile-1");
+      expect(setupCommand).toContain("browser_running || launch_browser");
+      expect(setupCommand).not.toContain("Browser.close");
+      expect(setupCommand).not.toContain("for marker in /tmp/rakazo/browser-profile-*");
+    },
+  );
+
+  it("restores active control on every screen ensure and fails visibly if restoration fails", async () => {
+    const { supervisorApp } = await import("./index.js");
+    let failControl = false;
+    const container = managedContainer(
+      vi.fn(async (options: { Cmd?: string[] }) => ({
+        start: async () => Readable.from([]),
+        inspect: async () => ({
+          ExitCode:
+            failControl &&
+            options.Cmd?.join(" ").includes("nohup x11vnc -display :1 -forever -shared -nopw")
+              ? 1
+              : 0,
+        }),
+      })),
+    );
+    mocks.docker.getContainer.mockReturnValue(container);
+    const open = (interactive: boolean) =>
+      supervisorApp.request("/computers/control-rebuild/screen-mode", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          interactive,
+          controlToken: interactive ? "human-control" : undefined,
+          revokeControl: false,
+        }),
+      });
+    const takeover = await open(true);
+    expect(takeover.status).toBe(200);
+    expect(
+      decodeURIComponent(((await takeover.json()) as { screenUrl: string }).screenUrl),
+    ).toContain("token=human-control");
+    container.exec.mockClear();
+    expect((await open(false)).status).toBe(200);
+    expect(
+      container.exec.mock.calls.map(([options]) => options.Cmd.join(" ")).join("\n"),
+    ).toContain("nohup x11vnc -display :1 -forever -shared -nopw");
+    failControl = true;
+    const failed = await open(false);
+    expect(failed.status).toBe(400);
+    expect(await failed.json()).toEqual({ error: "control screen failed to start" });
+    const failedTakeover = await open(true);
+    expect(failedTakeover.status).toBe(400);
+    expect(await failedTakeover.json()).toEqual({ error: "control screen failed to start" });
+    const viewer = await supervisorApp.request("/computers/control-rebuild/screen", { headers });
+    expect(viewer.status).toBe(302);
+    expect(decodeURIComponent(viewer.headers.get("location")!)).not.toContain(
+      "token=human-control",
+    );
+    const terminal = await supervisorApp.request("/computers/control-rebuild/terminal", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ controlToken: "human-control" }),
+    });
+    expect(terminal.status).toBe(200);
+    const revoked = await supervisorApp.request("/computers/control-rebuild/screen-mode", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ interactive: false }),
+    });
+    expect(revoked.status).toBe(200);
+    expect((await open(false)).status).toBe(200);
+  });
+
+  it("returns 500 when cancellation leaves the browser running", async () => {
+    const { supervisorApp } = await import("./index.js");
+    let failStop = false;
+    const container = managedContainer(
+      vi.fn(async (options: { Cmd?: string[] }) => {
+        const command = options.Cmd?.join(" ") ?? "";
+        const code = failStop && command.includes("Browser.close") ? 1 : 0;
+        return {
+          start: async () => Readable.from([]),
+          inspect: async () => ({ ExitCode: code }),
+        };
+      }),
+    );
+    mocks.docker.getContainer.mockReturnValue(container);
+    const opened = await supervisorApp.request("/computers/release-failed/screen-mode", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ interactive: false, revokeControl: false }),
+    });
+    expect(opened.status).toBe(200);
+
+    failStop = true;
+    const released = await supervisorApp.request("/computers/release-failed/screen", {
+      method: "DELETE",
+      headers: {
+        ...headers,
+        "x-rakazo-screen-lease-id": "run-1:1",
+        "x-rakazo-cancel-run-work": "1",
+      },
+    });
+    expect(released.status).toBe(500);
+    await expect(released.json()).resolves.toEqual({ error: "computer screen failed to stop" });
+  });
+
+  it("fully tears down a screen when control revocation is uncertain", async () => {
+    const { supervisorApp } = await import("./index.js");
+    const commands: string[] = [];
+    let failNextCommand = false;
+    const container = managedContainer(
+      vi.fn(async (options: { Cmd?: string[] }) => {
+        const command = options.Cmd?.join(" ") ?? "";
+        commands.push(command);
+        const code = failNextCommand ? 1 : 0;
+        failNextCommand = false;
+        return {
+          start: async () => Readable.from([]),
+          inspect: async () => ({ ExitCode: code }),
+        };
+      }),
+    );
+    mocks.docker.getContainer.mockReturnValue(container);
+    const opened = await supervisorApp.request("/computers/revoke-failed/screen-mode", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ interactive: false, revokeControl: false }),
+    });
+    expect(opened.status).toBe(200);
+
+    failNextCommand = true;
+    const released = await supervisorApp.request("/computers/revoke-failed/screen", {
+      method: "DELETE",
+      headers: {
+        ...headers,
+        "x-rakazo-screen-lease-id": "run-1:1",
+        "x-rakazo-preserve-screen": "1",
+      },
+    });
+    expect(released.status).toBe(200);
+    expect(commands.at(-2)).not.toContain("Browser.close");
+    expect(commands.at(-1)).toContain("Browser.close");
+  });
+
+  it("returns 500 when exec.start 404s after the container was found", async () => {
+    const { supervisorApp } = await import("./index.js");
+    let failStart = false;
+    const container = managedContainer(
+      vi.fn(async () => ({
+        start: async () => {
+          if (failStart) throw Object.assign(new Error("no such exec"), { statusCode: 404 });
+          return Readable.from([]);
+        },
+        inspect: async () => ({ ExitCode: 0 }),
+      })),
+    );
+    mocks.docker.getContainer.mockReturnValue(container);
+    const opened = await supervisorApp.request("/computers/exec-start-404/screen-mode", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ interactive: false, revokeControl: false }),
+    });
+    expect(opened.status).toBe(200);
+    expect(container.inspect).toHaveBeenCalled();
+
+    failStart = true;
+    const released = await supervisorApp.request("/computers/exec-start-404/screen", {
+      method: "DELETE",
+      headers: { ...headers, "x-rakazo-screen-lease-id": "run-1:1" },
+    });
+    expect(released.status).toBe(500);
+    await expect(released.json()).resolves.toEqual({ error: "no such exec" });
+  });
+});
+
+describe("computer deletion", () => {
+  const headers = {
+    authorization: `Bearer ${resolveSupervisorToken(process.env)}`,
+    "content-type": "application/json",
+    "x-rakazo-bot-id": "bot",
+    "x-rakazo-space-id": "space",
+    "x-rakazo-screen-id": "writer",
+  };
+  const dockerError = (statusCode: number) =>
+    Object.assign(new Error(`docker ${statusCode}`), { statusCode });
+
+  function computer(botId = "bot") {
+    const commands: string[] = [];
+    const container = {
+      inspect: vi.fn(async () => ({
+        Config: {
+          Labels: { "rakazo.managed": "true", "rakazo.botId": botId, "rakazo.spaceId": "space" },
+        },
+        HostConfig: { NetworkMode: computerNetworkNameFor("bot") },
+        State: { Running: true },
+        NetworkSettings: {
+          Ports: { "6080/tcp": [{ HostIp: "127.0.0.1", HostPort: screenPort }] },
+        },
+      })),
+      exec: vi.fn(async ({ Cmd }: { Cmd: string[] }) => {
+        commands.push(Cmd.join(" "));
+        return { start: async () => Readable.from([]), inspect: async () => ({ ExitCode: 0 }) };
+      }),
+      remove: vi.fn(),
+    };
+    mocks.docker.getContainer.mockReturnValue(container);
+    mocks.docker.getNetwork.mockReturnValue({
+      inspect: vi.fn().mockRejectedValue(dockerError(404)),
+    });
+    const resets = () =>
+      commands.filter((command) => command.includes("for marker in /tmp/rakazo/browser-profile-*"))
+        .length;
+    return { container, resets };
+  }
+
+  it.each([
+    { fail: "inspect", error: dockerError(500), status: 500 },
+    { fail: "inspect", error: dockerError(404), status: 404 },
+    { fail: "remove", error: dockerError(500), status: 500 },
+    { fail: "remove", error: dockerError(404), status: 200 },
+  ])("answers $status when $fail fails with $error.message", async ({ fail, error, status }) => {
+    const { supervisorApp } = await import("./index.js");
+    const { container } = computer();
+    (fail === "inspect" ? container.inspect : container.remove).mockRejectedValue(error);
+    const response = await supervisorApp.request("/computers/computer", {
+      method: "DELETE",
+      headers,
+    });
+    expect(response.status).toBe(status);
+    if (status === 404)
+      await expect(response.json()).resolves.toEqual({ error: "computer not found" });
+    expect(container.remove).toHaveBeenCalledTimes(fail === "inspect" ? 0 : 1);
+  });
+
+  it("rejects another computer identity without removing its container", async () => {
+    const { supervisorApp } = await import("./index.js");
+    const { container } = computer("other");
+    const response = await supervisorApp.request("/computers/computer", {
+      method: "DELETE",
+      headers,
+    });
+    expect(response.status).toBe(403);
+    expect(container.remove).not.toHaveBeenCalled();
+  });
+
+  it("forgets the computer's screens only once it is removed", async () => {
+    const { supervisorApp } = await import("./index.js");
+    const { container, resets } = computer();
+    const view = () =>
+      supervisorApp.request("/computers/computer/screen-mode", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ interactive: false, revokeControl: false }),
+      });
+    const remove = () =>
+      supervisorApp.request("/computers/computer", { method: "DELETE", headers });
+    expect((await view()).status).toBe(200);
+    expect(resets()).toBe(1);
+
+    container.remove.mockRejectedValueOnce(dockerError(500));
+    expect((await remove()).status).toBe(500);
+    expect((await view()).status).toBe(200);
+    expect(resets()).toBe(1);
+
+    container.remove.mockResolvedValueOnce(undefined);
+    expect((await remove()).status).toBe(200);
+    expect((await view()).status).toBe(200);
+    expect(resets()).toBe(2);
+  });
+});
+
+describe("screen registry across run boundaries", () => {
+  it("discards a first failed setup left releasing when the container restarts", async () => {
+    const logic = await import("./supervisor-logic.js");
+    const currentScreens = vi.spyOn(logic, "currentComputerScreens");
+    const { supervisorApp } = await import("./index.js");
+    let boot = "boot-1";
+    let running = true;
+    let failSetup = true;
+    const commands: string[] = [];
+    const container = {
+      inspect: vi.fn(async () => ({
+        Config: {
+          Labels: { "rakazo.managed": "true", "rakazo.botId": "bot", "rakazo.spaceId": "space" },
+        },
+        State: { Running: running, StartedAt: boot },
+        HostConfig: { NetworkMode: computerNetworkNameFor("bot") },
+        NetworkSettings: {
+          Ports: { "6080/tcp": [{ HostIp: "127.0.0.1", HostPort: screenPort }] },
+        },
+      })),
+      exec: vi.fn(async ({ Cmd }: { Cmd: string[] }) => {
+        const command = Cmd.join(" ");
+        commands.push(command);
+        if (!running) throw new Error("container stopped");
+        let code = 0;
+        if (failSetup && command.includes("computer browser CDP not ready")) {
+          failSetup = false;
+          running = false;
+          code = 1;
+        }
+        return { start: async () => Readable.from([]), inspect: async () => ({ ExitCode: code }) };
+      }),
+    };
+    mocks.docker.getContainer.mockReturnValue(container);
+    const view = () =>
+      supervisorApp.request("/computers/failed-first-setup/screen-mode", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${resolveSupervisorToken(process.env)}`,
+          "content-type": "application/json",
+          "x-rakazo-bot-id": "bot",
+          "x-rakazo-space-id": "space",
+          "x-rakazo-screen-id": "writer",
+        },
+        body: JSON.stringify({ interactive: false, revokeControl: false }),
+      });
+    const failed = await view();
+    expect(failed.status).toBe(400);
+    expect(await failed.json()).toEqual({ error: "container stopped" });
+    const [registry, boots] = currentScreens.mock.calls.at(-1)!;
+    const stale = registry.get("failed-first-setup");
+    expect(stale?.get("writer")?.releasing).toBe(true);
+
+    boot = "boot-2";
+    running = true;
+    expect((await view()).status).toBe(200);
+    expect(registry.get("failed-first-setup")).not.toBe(stale);
+    expect(registry.get("failed-first-setup")?.get("writer")).toMatchObject({ index: 0 });
+    expect(boots.get("failed-first-setup")).toBe("boot-2");
+    expect(
+      commands.filter((command) => command.includes("for marker in /tmp/rakazo/browser-profile-*")),
+    ).toHaveLength(2);
+    expect((await view()).status).toBe(200);
+    expect(
+      commands.filter((command) => command.includes("for marker in /tmp/rakazo/browser-profile-*")),
+    ).toHaveLength(2);
+  });
+
+  it.each([
+    { phase: "reset", continuous: false },
+    { phase: "reset", continuous: true },
+    { phase: "ensure", continuous: false },
+    { phase: "ensure", continuous: true },
+  ])(
+    "retries setup when the boot changes during $phase (continuous: $continuous)",
+    async ({ phase, continuous }) => {
+      const logic = await import("./supervisor-logic.js");
+      const currentScreens = vi.spyOn(logic, "currentComputerScreens");
+      const { supervisorApp } = await import("./index.js");
+      let boot = 1;
+      let restart = true;
+      let claiming = true;
+      const commands: string[] = [];
+      const container = {
+        inspect: vi.fn(async () => ({
+          Config: {
+            Labels: { "rakazo.managed": "true", "rakazo.botId": "bot", "rakazo.spaceId": "space" },
+          },
+          HostConfig: { NetworkMode: computerNetworkNameFor("bot") },
+          State: { Running: true, StartedAt: `boot-${boot}` },
+          NetworkSettings: {
+            Ports: { "6080/tcp": [{ HostIp: "127.0.0.1", HostPort: screenPort }] },
+          },
+        })),
+        exec: vi.fn(async ({ Cmd }: { Cmd: string[] }) => {
+          const command = Cmd.join(" ");
+          // Reset starts without a registry; ensure has a pending marker for its inspected boot.
+          if (claiming) {
+            const [, boots] = currentScreens.mock.calls.at(-1)!;
+            expect(boots.has("mid-claim")).toBe(
+              !command.includes("for marker in /tmp/rakazo/browser-profile-*"),
+            );
+          }
+          commands.push(command);
+          const restartsDuringCommand =
+            phase === "reset"
+              ? command.includes("for marker in /tmp/rakazo/browser-profile-*")
+              : command.includes("computer browser CDP not ready");
+          if (restartsDuringCommand && restart) {
+            boot += 1;
+            restart = continuous;
+          }
+          return { start: async () => Readable.from([]), inspect: async () => ({ ExitCode: 0 }) };
+        }),
+      };
+      mocks.docker.getContainer.mockReturnValue(container);
+      const view = () =>
+        supervisorApp.request("/computers/mid-claim/screen-mode", {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${resolveSupervisorToken(process.env)}`,
+            "content-type": "application/json",
+            "x-rakazo-bot-id": "bot",
+            "x-rakazo-space-id": "space",
+            "x-rakazo-screen-id": "writer",
+          },
+          body: JSON.stringify({ interactive: false, revokeControl: false }),
+        });
+      const response = await view();
+      claiming = false;
+      expect(response.status).toBe(continuous ? 400 : 200);
+      expect(
+        commands.filter((command) =>
+          command.includes("for marker in /tmp/rakazo/browser-profile-*"),
+        ).length,
+      ).toBe(continuous ? 3 : 2);
+      if (continuous) {
+        expect(await response.json()).toEqual({ error: "computer restarted during screen setup" });
+        restart = false;
+      }
+      const next = await view();
+      expect(next.status).toBe(200);
+      if (!continuous) expect(await next.json()).toEqual(await response.json());
+      const resets = commands.filter((command) =>
+        command.includes("for marker in /tmp/rakazo/browser-profile-*"),
+      ).length;
+      expect((await view()).status).toBe(200);
+      expect(
+        commands.filter((command) =>
+          command.includes("for marker in /tmp/rakazo/browser-profile-*"),
+        ).length,
+      ).toBe(resets);
+    },
+  );
+
+  it("waits for screen setup before replacing a container and clears its metadata", async () => {
+    const logic = await import("./supervisor-logic.js");
+    const clearRegistry = vi.spyOn(logic, "clearComputerScreenRegistry");
+    const { supervisorApp } = await import("./index.js");
+    const commands: string[] = [];
+    let block = false;
+    let signalBlocked!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      signalBlocked = resolve;
+    });
+    let unblock!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      unblock = resolve;
+    });
+    const info = {
+      Image: "old-image",
+      Config: {
+        User: hostComputerUser(),
+        Labels: { "rakazo.managed": "true", "rakazo.botId": "bot", "rakazo.spaceId": "space" },
+      },
+      HostConfig: { NetworkMode: computerNetworkNameFor("bot") },
+      State: { Running: true, StartedAt: "boot-1" },
+      NetworkSettings: { Ports: { "6080/tcp": [{ HostIp: "127.0.0.1", HostPort: screenPort }] } },
+    };
+    const existing = {
+      id: "existing-screen",
+      inspect: vi.fn().mockResolvedValue(info),
+      remove: vi.fn().mockResolvedValue(undefined),
+      exec: vi.fn(async ({ Cmd }: { Cmd: string[] }) => {
+        commands.push(Cmd.join(" "));
+        if (block) {
+          block = false;
+          signalBlocked();
+          await gate;
+        }
+        return { start: async () => Readable.from([]), inspect: async () => ({ ExitCode: 0 }) };
+      }),
+    };
+    mocks.docker.getContainer.mockReturnValue(existing);
+    mocks.docker.listContainers.mockResolvedValue([{ Id: existing.id }]);
+    mocks.docker.getImage.mockReturnValue({
+      inspect: vi.fn().mockResolvedValue({ Id: "new-image" }),
+    });
+    mocks.docker.createContainer.mockResolvedValue({ id: "replacement", start: vi.fn() });
+    mocks.docker.createNetwork.mockResolvedValue({});
+    const headers = {
+      authorization: `Bearer ${resolveSupervisorToken(process.env)}`,
+      "content-type": "application/json",
+      "x-rakazo-bot-id": "bot",
+      "x-rakazo-space-id": "space",
+    };
+    const view = () =>
+      supervisorApp.request("/computers/existing-screen/screen-mode", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ interactive: false, revokeControl: false }),
+      });
+    expect((await view()).status).toBe(200);
+    block = true;
+    const claim = view();
+    await blocked;
+    const replacement = supervisorApp.request("/computers", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        botId: "bot",
+        spaceId: "space",
+        homePath: path.join(process.env.DATA_DIR!, "homes", "bot"),
+      }),
+    });
+    await vi.waitFor(() => expect(mocks.docker.createNetwork).toHaveBeenCalled());
+    expect(existing.remove).not.toHaveBeenCalled();
+    unblock();
+    expect((await claim).status).toBe(200);
+    expect((await replacement).status).toBe(200);
+    expect(existing.remove).toHaveBeenCalledWith({ force: true });
+    const cleanup = clearRegistry.mock.calls.find(([, , id]) => id === existing.id);
+    expect(cleanup).toBeDefined();
+    const [registry, boots] = cleanup!;
+    expect(registry.has(existing.id)).toBe(false);
+    expect(boots.has(existing.id)).toBe(false);
+    // Let the mock answer for the old ID to observe whether its registry was forgotten.
+    const resets = commands.filter((command) =>
+      command.includes("for marker in /tmp/rakazo/browser-profile-*"),
+    ).length;
+    expect((await view()).status).toBe(200);
+    expect(
+      commands.filter((command) => command.includes("for marker in /tmp/rakazo/browser-profile-*"))
+        .length,
+    ).toBe(resets + 1);
+  });
+
+  it.each(["POST", "DELETE"])(
+    "re-inspects the boot after a queued %s screen request acquires the lock",
+    async (method) => {
+      const { supervisorApp } = await import("./index.js");
+      const commands: string[] = [];
+      let startedAt = "boot-1";
+      let blockCommand = false;
+      let signalBlocked!: () => void;
+      const blocked = new Promise<void>((resolve) => {
+        signalBlocked = resolve;
+      });
+      let unblock!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        unblock = resolve;
+      });
+      let signalQueued!: () => void;
+      const queuedInspection = new Promise<void>((resolve) => {
+        signalQueued = resolve;
+      });
+      let waitingForInspection = false;
+      const container = {
+        inspect: vi.fn(async () => {
+          if (waitingForInspection) signalQueued();
+          return {
+            Config: {
+              Labels: {
+                "rakazo.managed": "true",
+                "rakazo.botId": "bot",
+                "rakazo.spaceId": "space",
+              },
+            },
+            HostConfig: { NetworkMode: computerNetworkNameFor("bot") },
+            State: { Running: true, StartedAt: startedAt },
+            NetworkSettings: {
+              Ports: { "6080/tcp": [{ HostIp: "127.0.0.1", HostPort: screenPort }] },
+            },
+          };
+        }),
+        exec: vi.fn(async ({ Cmd }: { Cmd: string[] }) => {
+          commands.push(Cmd.join(" "));
+          if (blockCommand) {
+            blockCommand = false;
+            signalBlocked();
+            await gate;
+          }
+          return { start: async () => Readable.from([]), inspect: async () => ({ ExitCode: 0 }) };
+        }),
+      };
+      mocks.docker.getContainer.mockReturnValue(container);
+      const headers = {
+        authorization: `Bearer ${resolveSupervisorToken(process.env)}`,
+        "content-type": "application/json",
+        "x-rakazo-bot-id": "bot",
+        "x-rakazo-space-id": "space",
+        "x-rakazo-screen-id": "writer",
+      };
+      const view = (leaseId = "run-2:2") =>
+        supervisorApp.request("/computers/restarted/screen-mode", {
+          method: "POST",
+          headers: { ...headers, "x-rakazo-screen-lease-id": leaseId },
+          body: JSON.stringify({ interactive: false, revokeControl: false }),
+        });
+      const resets = () =>
+        commands.filter((command) =>
+          command.includes("for marker in /tmp/rakazo/browser-profile-*"),
+        ).length;
+      expect((await view()).status).toBe(200);
+      blockCommand = true;
+      const holder = view();
+      await blocked;
+      waitingForInspection = true;
+      const queued =
+        method === "POST"
+          ? view()
+          : supervisorApp.request("/computers/restarted/screen", {
+              method: "DELETE",
+              headers: { ...headers, "x-rakazo-screen-lease-id": "run-1:1" },
+            });
+      await queuedInspection;
+      startedAt = "boot-2";
+      unblock();
+      const held = await holder;
+      expect(held.status).toBe(200);
+      const response = await queued;
+      expect(response.status).toBe(200);
+      if (method === "DELETE") {
+        // A delayed release cannot invalidate the holder's new screen or token.
+        const next = await view();
+        expect(next.status).toBe(200);
+        expect(await next.json()).toEqual(await held.json());
+      } else {
+        expect(resets()).toBe(2);
+        const screen = await response.json();
+        const next = await view();
+        expect(next.status).toBe(200);
+        // Reusing the registry preserves the screen's view token as well as its desktop.
+        expect(await next.json()).toEqual(screen);
+      }
+      expect((await view()).status).toBe(200);
+      expect(resets()).toBe(2);
+      // A screen created in the new boot keeps its marker on later requests.
+      expect((await view()).status).toBe(200);
+      expect(resets()).toBe(2);
+    },
+  );
+
+  it("does not reset the desktop when a screen is requested after the last one is released", async () => {
+    const { supervisorApp } = await import("./index.js");
+    const commands: string[] = [];
+    const container = {
+      inspect: vi.fn().mockResolvedValue({
+        Config: {
+          Labels: { "rakazo.managed": "true", "rakazo.botId": "bot", "rakazo.spaceId": "space" },
+        },
+        HostConfig: { NetworkMode: computerNetworkNameFor("bot") },
+        State: { Running: true },
+        NetworkSettings: {
+          Ports: { "6080/tcp": [{ HostIp: "127.0.0.1", HostPort: screenPort }] },
+        },
+      }),
+      exec: vi.fn(async ({ Cmd }: { Cmd: string[] }) => {
+        commands.push(Cmd.join(" "));
+        return { start: async () => Readable.from([]), inspect: async () => ({ ExitCode: 0 }) };
+      }),
+    };
+    mocks.docker.getContainer.mockReturnValue(container);
+    const headers = {
+      authorization: `Bearer ${resolveSupervisorToken(process.env)}`,
+      "content-type": "application/json",
+      "x-rakazo-bot-id": "bot",
+      "x-rakazo-space-id": "space",
+      "x-rakazo-screen-id": "writer",
+    };
+    const view = () =>
+      supervisorApp.request("/computers/registry/screen-mode", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ interactive: false, revokeControl: false }),
+      });
+    const resets = () =>
+      commands.filter((command) => command.includes("for marker in /tmp/rakazo/browser-profile-*"))
+        .length;
+
+    expect((await view()).status).toBe(200);
+    expect(resets()).toBe(1);
+    const released = await supervisorApp.request("/computers/registry/screen", {
+      method: "DELETE",
+      headers: { ...headers, "x-rakazo-screen-lease-id": "run-1:1" },
+    });
+    expect(released.status).toBe(200);
+    expect((await view()).status).toBe(200);
+    // The first request after a supervisor start resets; a released screen must not.
+    expect(resets()).toBe(1);
+  });
+
+  it("retains a completed Team screen, rejects stale release, and isolates peer screens", async () => {
+    const { supervisorApp } = await import("./index.js");
+    const commands: string[] = [];
+    const container = {
+      inspect: vi.fn().mockResolvedValue({
+        Config: {
+          Labels: { "rakazo.managed": "true", "rakazo.botId": "bot", "rakazo.spaceId": "space" },
+        },
+        HostConfig: { NetworkMode: computerNetworkNameFor("bot") },
+        State: { Running: true },
+        NetworkSettings: {
+          Ports: Object.fromEntries(
+            [0, 1].map((index) => [
+              `${screenPorts(index).viewPort}/tcp`,
+              [{ HostIp: "127.0.0.1", HostPort: screenPort }],
+            ]),
+          ),
+        },
+      }),
+      exec: vi.fn(async ({ Cmd }: { Cmd: string[] }) => {
+        commands.push(Cmd.join(" "));
+        return { start: async () => Readable.from([]), inspect: async () => ({ ExitCode: 0 }) };
+      }),
+    };
+    mocks.docker.getContainer.mockReturnValue(container);
+    const headersFor = (screenId: string, leaseId: string) => ({
+      authorization: `Bearer ${resolveSupervisorToken(process.env)}`,
+      "content-type": "application/json",
+      "x-rakazo-bot-id": "bot",
+      "x-rakazo-space-id": "space",
+      "x-rakazo-screen-id": screenId,
+      "x-rakazo-screen-lease-id": leaseId,
+    });
+    const view = (screenId: string, leaseId: string) =>
+      supervisorApp.request("/computers/registry/screen-mode", {
+        method: "POST",
+        headers: headersFor(screenId, leaseId),
+        body: JSON.stringify({ interactive: false, revokeControl: false }),
+      });
+
+    const first = await view("writer", "run-1:1");
+    const researcher = await view("researcher", "team-run:1");
+    expect(first.status).toBe(200);
+    expect(researcher.status).toBe(200);
+    const firstScreenUrl = ((await first.json()) as { screenUrl: string }).screenUrl;
+    const researcherScreenUrl = ((await researcher.json()) as { screenUrl: string }).screenUrl;
+    expect(researcherScreenUrl).not.toBe(firstScreenUrl);
+
+    const released = await supervisorApp.request("/computers/registry/screen", {
+      method: "DELETE",
+      headers: {
+        ...headersFor("writer", "run-1:1"),
+        "x-rakazo-preserve-screen": "1",
+      },
+    });
+    expect(released.status).toBe(200);
+    const releaseCommand = commands.at(-1) ?? "";
+    expect(releaseCommand).toContain("control-1");
+    expect(releaseCommand).not.toContain("view-1");
+    expect(releaseCommand).not.toContain("Browser.close");
+
+    const resumed = await view("writer", "run-2:2");
+    expect(resumed.status).toBe(200);
+    expect(((await resumed.json()) as { screenUrl: string }).screenUrl).toBe(firstScreenUrl);
+
+    const commandCountBeforeStaleRelease = commands.length;
+    const staleRelease = await supervisorApp.request("/computers/registry/screen", {
+      method: "DELETE",
+      headers: {
+        ...headersFor("writer", "run-1:1"),
+        "x-rakazo-preserve-screen": "1",
+      },
+    });
+    expect(staleRelease.status).toBe(200);
+    expect(commands).toHaveLength(commandCountBeforeStaleRelease);
+
+    const cancelled = await supervisorApp.request("/computers/registry/screen", {
+      method: "DELETE",
+      headers: {
+        ...headersFor("writer", "run-2:2"),
+        "x-rakazo-preserve-screen": "1",
+        "x-rakazo-cancel-run-work": "1",
+      },
+    });
+    expect(cancelled.status).toBe(200);
+    expect(commands.at(-1)).toContain("Browser.close");
+    expect(commands.at(-1)).toContain("view-1");
+    expect(commands.at(-1)).not.toContain("view-2");
+
+    const peerStillOpen = await view("researcher", "team-run:1");
+    expect(peerStillOpen.status).toBe(200);
+    expect(((await peerStillOpen.json()) as { screenUrl: string }).screenUrl).toBe(
+      researcherScreenUrl,
+    );
+  });
+
+  it("evicts only the oldest idle Team screen when the screen limit is full", async () => {
+    vi.stubEnv("SANDBOX_TEAM_SCREEN_LIMIT", "2");
+    const { supervisorApp } = await import("./index.js");
+    const commands: string[] = [];
+    const container = {
+      inspect: vi.fn().mockResolvedValue({
+        Config: {
+          Labels: { "rakazo.managed": "true", "rakazo.botId": "bot", "rakazo.spaceId": "space" },
+        },
+        HostConfig: { NetworkMode: computerNetworkNameFor("bot") },
+        State: { Running: true },
+        NetworkSettings: {
+          Ports: Object.fromEntries(
+            [0, 1].map((index) => [
+              `${screenPorts(index).viewPort}/tcp`,
+              [{ HostIp: "127.0.0.1", HostPort: screenPort }],
+            ]),
+          ),
+        },
+      }),
+      exec: vi.fn(async ({ Cmd }: { Cmd: string[] }) => {
+        commands.push(Cmd.join(" "));
+        return { start: async () => Readable.from([]), inspect: async () => ({ ExitCode: 0 }) };
+      }),
+    };
+    mocks.docker.getContainer.mockReturnValue(container);
+    const headersFor = (screenId: string, leaseId: string) => ({
+      authorization: `Bearer ${resolveSupervisorToken(process.env)}`,
+      "content-type": "application/json",
+      "x-rakazo-bot-id": "bot",
+      "x-rakazo-space-id": "space",
+      "x-rakazo-screen-id": screenId,
+      "x-rakazo-screen-lease-id": leaseId,
+    });
+    const view = (screenId: string, leaseId: string) =>
+      supervisorApp.request("/computers/registry/screen-mode", {
+        method: "POST",
+        headers: headersFor(screenId, leaseId),
+        body: JSON.stringify({ interactive: false, revokeControl: false }),
+      });
+
+    const writer = await view("writer", "run-1:1");
+    const researcher = await view("researcher", "team-run:1");
+    const writerUrl = ((await writer.json()) as { screenUrl: string }).screenUrl;
+    const researcherUrl = ((await researcher.json()) as { screenUrl: string }).screenUrl;
+    const release = await supervisorApp.request("/computers/registry/screen", {
+      method: "DELETE",
+      headers: {
+        ...headersFor("writer", "run-1:1"),
+        "x-rakazo-preserve-screen": "1",
+      },
+    });
+    expect(release.status).toBe(200);
+
+    const newcomer = await view("newcomer", "team-run:2");
+    expect(newcomer.status).toBe(200);
+    expect(((await newcomer.json()) as { screenUrl: string }).screenUrl).not.toBe(writerUrl);
+    const eviction = commands.filter((command) => command.includes("Browser.close")).at(-1) ?? "";
+    expect(eviction).toContain("view-1");
+    expect(eviction).not.toContain("view-2");
+
+    const peerStillOpen = await view("researcher", "team-run:1");
+    expect(((await peerStillOpen.json()) as { screenUrl: string }).screenUrl).toBe(researcherUrl);
+  });
+});
+
+describe("computer network reclaim", () => {
+  const botNet = computerNetworkNameFor("bot");
+  const homePath = () => path.join(process.env.DATA_DIR!, "homes", "bot");
+  const headers = {
+    authorization: `Bearer ${resolveSupervisorToken(process.env)}`,
+    "x-rakazo-bot-id": "bot",
+    "x-rakazo-space-id": "space",
+  };
+
+  function botNetwork(attached: string[] = []) {
+    return {
+      inspect: vi.fn().mockResolvedValue({
+        Id: "net-current",
+        Containers: Object.fromEntries(attached.map((id) => [id, {}])),
+      }),
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      remove: vi.fn().mockResolvedValue(undefined),
+    };
+  }
+
+  function computer() {
+    let running = true;
+    const container = {
+      id: "computer",
+      inspect: vi.fn(async () => ({
+        Id: "computer-full-id",
+        Config: {
+          Labels: { "rakazo.managed": "true", "rakazo.botId": "bot", "rakazo.spaceId": "space" },
+        },
+        State: { Running: running },
+        // Docker keeps a stopped container's endpoint on its network.
+        NetworkSettings: { Networks: { [botNet]: { NetworkID: "net-current" } } },
+      })),
+      exec: vi.fn(async () => ({
+        start: async () => Readable.from([]),
+        inspect: async () => ({ ExitCode: 0 }),
+      })),
+      stop: vi.fn(async () => {
+        running = false;
+      }),
+    };
+    mocks.docker.getContainer.mockReturnValue(container);
+    networkUsers(["computer-full-id"]);
+    return container;
+  }
+
+  // Containers listed by network, stopped ones included; webIds answers the
+  // Compose web proxy lookup.
+  function networkUsers(ids: string[], webIds: string[] = []) {
+    mocks.docker.listContainers.mockImplementation(
+      async ({ filters }: { filters: { network?: string[] } }) =>
+        (filters.network ? ids : webIds).map((Id) => ({ Id })),
+    );
+  }
+
+  async function stop() {
+    const { supervisorApp } = await import("./index.js");
+    return supervisorApp.request("/computers/computer/stop", { method: "POST", headers });
+  }
+
+  describe("on stop", () => {
+    it("disconnects the stopped computer, then gives its network back to Docker", async () => {
+      const container = computer();
+      const network = botNetwork();
+      mocks.docker.getNetwork.mockReturnValue(network);
+
+      expect((await stop()).status).toBe(200);
+      expect(mocks.docker.getNetwork).toHaveBeenCalledWith(botNet);
+      expect(network.disconnect).toHaveBeenCalledExactlyOnceWith({
+        Container: "computer-full-id",
+      });
+      expect(network.remove).toHaveBeenCalledExactlyOnceWith();
+      expect(container.stop.mock.invocationCallOrder[0]).toBeLessThan(
+        network.disconnect.mock.invocationCallOrder[0]!,
+      );
+      expect(network.disconnect.mock.invocationCallOrder[0]).toBeLessThan(
+        network.remove.mock.invocationCallOrder[0]!,
+      );
+    });
+
+    it("reclaims a network created before networks carried an owner label", async () => {
+      computer();
+      const network = botNetwork();
+      // Ownership comes from the computer's identity, not from network labels.
+      network.inspect.mockResolvedValue({ Id: "net-legacy", Labels: {}, Containers: {} });
+      mocks.docker.getNetwork.mockReturnValue(network);
+
+      expect((await stop()).status).toBe(200);
+      expect(network.remove).toHaveBeenCalledOnce();
+    });
+
+    it("disconnects the Compose screen peers of an isolated computer network", async () => {
+      vi.stubEnv("SANDBOX_SCREEN_NETWORK", "isolated");
+      vi.stubEnv("HOSTNAME", "supervisor");
+      const container = computer();
+      const supervisor = {
+        inspect: vi.fn().mockResolvedValue({
+          Id: "supervisor-id",
+          Config: { Labels: { "com.docker.compose.project": "example" } },
+        }),
+      };
+      mocks.docker.getContainer.mockImplementation((id: string) =>
+        id === "supervisor" ? supervisor : container,
+      );
+      networkUsers(["supervisor-id", "computer-full-id", "web-id"], ["web-id"]);
+      // The web proxy is stopped, so network inspect lists only the supervisor. Left
+      // attached, it could not start again once the network is gone.
+      const network = botNetwork(["supervisor-id"]);
+      mocks.docker.getNetwork.mockReturnValue(network);
+
+      expect((await stop()).status).toBe(200);
+      expect(mocks.docker.listContainers).toHaveBeenCalledWith({
+        all: true,
+        filters: { network: [botNet] },
+      });
+      expect(mocks.docker.listContainers).toHaveBeenCalledWith({
+        all: true,
+        filters: {
+          label: ["com.docker.compose.project=example", "com.docker.compose.service=web"],
+        },
+      });
+      expect(network.disconnect.mock.calls).toEqual([
+        [{ Container: "computer-full-id" }],
+        [{ Container: "supervisor-id" }],
+        [{ Container: "web-id" }],
+      ]);
+      expect(network.remove).toHaveBeenCalledOnce();
+    });
+
+    it("keeps the network when a screen peer cannot be disconnected from it", async () => {
+      vi.stubEnv("SANDBOX_SCREEN_NETWORK", "isolated");
+      vi.stubEnv("HOSTNAME", "supervisor");
+      const container = computer();
+      const supervisor = {
+        inspect: vi.fn().mockResolvedValue({ Id: "supervisor-id", Config: { Labels: {} } }),
+      };
+      mocks.docker.getContainer.mockImplementation((id: string) =>
+        id === "supervisor" ? supervisor : container,
+      );
+      networkUsers(["computer-full-id", "supervisor-id"]);
+      const network = botNetwork();
+      network.disconnect.mockImplementation(async ({ Container }: { Container: string }) => {
+        if (Container === "supervisor-id") throw new Error("disconnect failed");
+      });
+      mocks.docker.getNetwork.mockReturnValue(network);
+
+      expect((await stop()).status).toBe(200);
+      expect(network.remove).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["running", ["another-container"]],
+      ["stopped", []],
+    ])(
+      "keeps a network that a %s container other than a screen peer uses",
+      async (_state, running) => {
+        computer();
+        networkUsers(["computer-full-id", "another-container"]);
+        const network = botNetwork(running);
+        mocks.docker.getNetwork.mockReturnValue(network);
+
+        expect((await stop()).status).toBe(200);
+        expect(network.disconnect).not.toHaveBeenCalled();
+        expect(network.remove).not.toHaveBeenCalled();
+      },
+    );
+
+    it("keeps the network when the computer cannot be disconnected from it", async () => {
+      computer();
+      const network = botNetwork();
+      network.disconnect.mockRejectedValue(new Error("disconnect failed"));
+      mocks.docker.getNetwork.mockReturnValue(network);
+
+      expect((await stop()).status).toBe(200);
+      expect(network.remove).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["logs", new Error("permission denied"), true],
+      ["does not log", new Error("network example has active endpoints"), false],
+    ])("%s a failed removal without failing the stop: %s", async (_case, error, logged) => {
+      computer();
+      const network = botNetwork();
+      network.remove.mockRejectedValue(error);
+      mocks.docker.getNetwork.mockReturnValue(network);
+      const { getLogger } = await import("@rakazo/logging");
+      const logError = vi.spyOn(getLogger(), "error").mockImplementation(() => undefined);
+
+      expect((await stop()).status).toBe(200);
+      if (logged) {
+        expect(logError).toHaveBeenCalledWith("computer network reclaim failed", error);
+      } else {
+        expect(logError).not.toHaveBeenCalled();
+      }
+    });
+
+    it("does not touch the shared internal network", async () => {
+      vi.stubEnv("SANDBOX_SCREEN_NETWORK", "internal");
+      computer();
+      mocks.docker.getNetwork.mockReturnValue(botNetwork());
+
+      expect((await stop()).status).toBe(200);
+      expect(mocks.docker.getNetwork).not.toHaveBeenCalled();
+    });
+
+    it("does not reclaim the network of a computer that failed to stop", async () => {
+      const container = computer();
+      container.stop.mockRejectedValue(new Error("stop failed"));
+      mocks.docker.getNetwork.mockReturnValue(botNetwork());
+
+      expect((await stop()).status).toBe(500);
+      expect(mocks.docker.getNetwork).not.toHaveBeenCalled();
+    });
+
+    it("waits for an in-flight provision of the same bot before reclaiming", async () => {
+      const { supervisorApp } = await import("./index.js");
+      computer();
+      const network = botNetwork();
+      mocks.docker.getNetwork.mockReturnValue(network);
+      mocks.docker.getImage.mockReturnValue({
+        inspect: vi.fn().mockResolvedValue({ Id: "image" }),
+      });
+      mocks.docker.listContainers.mockResolvedValue([]);
+      mocks.docker.createNetwork.mockResolvedValue(network);
+      let attach!: () => void;
+      const attached = new Promise<void>((resolve) => {
+        attach = resolve;
+      });
+      mocks.docker.createContainer.mockImplementation(async () => {
+        await attached;
+        return { id: "replacement", start: vi.fn().mockResolvedValue(undefined) };
+      });
+      const provision = supervisorApp.request("/computers", {
+        method: "POST",
+        headers: { ...headers, "content-type": "application/json" },
+        body: JSON.stringify({ botId: "bot", spaceId: "space", homePath: homePath() }),
+      });
+      await vi.waitFor(() => expect(mocks.docker.createContainer).toHaveBeenCalled());
+
+      const stopped = stop();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(network.inspect).not.toHaveBeenCalled();
+      attach();
+      expect((await provision).status).toBe(200);
+      expect((await stopped).status).toBe(200);
+      expect(network.inspect).toHaveBeenCalled();
+    });
+  });
+
+  it("disconnects a stopped screen peer when the computer is deleted", async () => {
+    vi.stubEnv("SANDBOX_SCREEN_NETWORK", "isolated");
+    vi.stubEnv("HOSTNAME", "supervisor");
+    const container = Object.assign(computer(), { remove: vi.fn().mockResolvedValue(undefined) });
+    const supervisor = {
+      inspect: vi.fn().mockResolvedValue({
+        Id: "supervisor-id",
+        Config: { Labels: { "com.docker.compose.project": "example" } },
+      }),
+    };
+    mocks.docker.getContainer.mockImplementation((id: string) =>
+      id === "supervisor" ? supervisor : container,
+    );
+    networkUsers(["supervisor-id", "web-id"], ["web-id"]);
+    // The web proxy is stopped, so network inspect lists only the supervisor.
+    const network = botNetwork(["supervisor-id"]);
+    mocks.docker.getNetwork.mockImplementation((name: string) =>
+      name === botNet
+        ? network
+        : { inspect: vi.fn().mockRejectedValue(new Error("no such network")) },
+    );
+    const { supervisorApp } = await import("./index.js");
+
+    const response = await supervisorApp.request("/computers/computer", {
+      method: "DELETE",
+      headers,
+    });
+    expect(response.status).toBe(200);
+    expect(container.remove).toHaveBeenCalledWith({ force: true });
+    expect(network.disconnect.mock.calls).toEqual([
+      [{ Container: "supervisor-id" }],
+      [{ Container: "web-id" }],
+    ]);
+    expect(network.remove).toHaveBeenCalledOnce();
+  });
+
+  describe("on startup", () => {
+    async function reclaim() {
+      const { reclaimIdleComputerNetworks } = await import("./index.js");
+      return reclaimIdleComputerNetworks();
+    }
+
+    function ownerLabel() {
+      return computerNetworkOwnerFor(process.env.DATA_DIR!, undefined);
+    }
+
+    it("removes only its own labeled networks that no container uses", async () => {
+      const networks: Record<string, ReturnType<typeof botNetwork>> = {
+        [computerNetworkNameFor("orphan")]: botNetwork(),
+        [computerNetworkNameFor("stopped")]: botNetwork(),
+        [computerNetworkNameFor("renamed")]: botNetwork(),
+      };
+      mocks.docker.listNetworks.mockResolvedValue([
+        { Name: computerNetworkNameFor("orphan"), Labels: { "rakazo.botId": "orphan" } },
+        { Name: computerNetworkNameFor("stopped"), Labels: { "rakazo.botId": "stopped" } },
+        // The bot label must name the network, since it picks the lock.
+        { Name: computerNetworkNameFor("renamed"), Labels: { "rakazo.botId": "other" } },
+      ]);
+      mocks.docker.getNetwork.mockImplementation((name: string) => networks[name]);
+      mocks.docker.listContainers.mockImplementation(
+        async ({ filters }: { filters: { network: string[] } }) =>
+          // A stopped computer still uses its network, though network inspect omits it.
+          filters.network[0] === computerNetworkNameFor("stopped") ? [{ Id: "stopped-id" }] : [],
+      );
+
+      await reclaim();
+      expect(mocks.docker.listNetworks).toHaveBeenCalledWith({
+        filters: { label: [`rakazo.computerOwner=${ownerLabel()}`] },
+      });
+      expect(mocks.docker.listContainers).toHaveBeenCalledWith({
+        all: true,
+        filters: { network: [computerNetworkNameFor("orphan")] },
+      });
+      expect(networks[computerNetworkNameFor("orphan")]!.remove).toHaveBeenCalledOnce();
+      expect(networks[computerNetworkNameFor("stopped")]!.remove).not.toHaveBeenCalled();
+      expect(networks[computerNetworkNameFor("stopped")]!.disconnect).not.toHaveBeenCalled();
+      expect(mocks.docker.getNetwork).not.toHaveBeenCalledWith(computerNetworkNameFor("renamed"));
+    });
+
+    it("disconnects the Compose screen peers from an orphaned isolated network", async () => {
+      vi.stubEnv("SANDBOX_SCREEN_NETWORK", "isolated");
+      vi.stubEnv("HOSTNAME", "supervisor");
+      mocks.docker.getContainer.mockReturnValue({
+        inspect: vi.fn().mockResolvedValue({
+          Id: "supervisor-id",
+          Config: { Labels: { "com.docker.compose.project": "example" } },
+          Mounts: [],
+        }),
+      });
+      const network = botNetwork();
+      mocks.docker.getNetwork.mockReturnValue(network);
+      mocks.docker.listNetworks.mockResolvedValue([
+        { Name: botNet, Labels: { "rakazo.botId": "bot" } },
+      ]);
+      mocks.docker.listContainers.mockImplementation(
+        async ({ filters }: { filters: { network?: string[] } }) =>
+          filters.network ? [{ Id: "supervisor-id" }, { Id: "web-id" }] : [{ Id: "web-id" }],
+      );
+
+      await reclaim();
+      expect(network.disconnect.mock.calls).toEqual([
+        [{ Container: "supervisor-id" }],
+        [{ Container: "web-id" }],
+      ]);
+      expect(network.remove).toHaveBeenCalledOnce();
+    });
+
+    it("does nothing in the shared internal topology", async () => {
+      vi.stubEnv("SANDBOX_SCREEN_NETWORK", "internal");
+      await reclaim();
+      expect(mocks.docker.listNetworks).not.toHaveBeenCalled();
+      expect(mocks.docker.getNetwork).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("resuming a stopped computer", () => {
+    function stoppedComputer(networks: Record<string, { NetworkID: string }>) {
+      const info = {
+        Image: "image",
+        Config: {
+          User: hostComputerUser(),
+          Labels: { "rakazo.managed": "true", "rakazo.botId": "bot", "rakazo.spaceId": "space" },
+        },
+        HostConfig: { NetworkMode: botNet, PortBindings: {} },
+        State: { Running: false },
+        NetworkSettings: { Networks: networks },
+      };
+      const existing = {
+        id: "existing",
+        inspect: vi.fn().mockResolvedValue(info),
+        start: vi.fn().mockResolvedValue(undefined),
+        remove: vi.fn().mockResolvedValue(undefined),
+      };
+      const replacement = { id: "replacement", start: vi.fn().mockResolvedValue(undefined) };
+      mocks.docker.getImage.mockReturnValue({
+        inspect: vi.fn().mockResolvedValue({ Id: "image" }),
+      });
+      mocks.docker.getContainer.mockReturnValue(existing);
+      mocks.docker.listContainers.mockResolvedValue([{ Id: existing.id }]);
+      mocks.docker.createNetwork.mockResolvedValue({ remove: vi.fn() });
+      mocks.docker.createContainer.mockResolvedValue(replacement);
+      return { existing, replacement };
+    }
+
+    async function provision() {
+      const { supervisorApp } = await import("./index.js");
+      return supervisorApp.request("/computers", {
+        method: "POST",
+        headers: { ...headers, "content-type": "application/json" },
+        body: JSON.stringify({ botId: "bot", spaceId: "space", homePath: homePath() }),
+      });
+    }
+
+    function expectReconnected(
+      existing: { start: ReturnType<typeof vi.fn>; remove: ReturnType<typeof vi.fn> },
+      network: ReturnType<typeof botNetwork>,
+    ) {
+      expect(network.connect).toHaveBeenCalledExactlyOnceWith({ Container: "existing" });
+      expect(existing.start).toHaveBeenCalledOnce();
+      expect(network.connect.mock.invocationCallOrder[0]).toBeLessThan(
+        existing.start.mock.invocationCallOrder[0]!,
+      );
+      expect(existing.remove).not.toHaveBeenCalled();
+      expect(mocks.docker.createContainer).not.toHaveBeenCalled();
+    }
+
+    it.each(["open", "restricted"])(
+      "recreates a reclaimed network and reconnects the same container (%s egress)",
+      async (egress) => {
+        vi.stubEnv("SANDBOX_COMPUTER_EGRESS", egress);
+        const { existing } = stoppedComputer({});
+        const network = botNetwork();
+        network.inspect.mockRejectedValue(
+          Object.assign(new Error("no such network"), { statusCode: 404 }),
+        );
+        mocks.docker.getNetwork.mockReturnValue(network);
+
+        const response = await provision();
+        expect(await response.json()).toMatchObject({ id: "existing", resumed: true });
+        expect(mocks.docker.createNetwork).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({
+            Name: botNet,
+            Labels: {
+              "rakazo.computerOwner": computerNetworkOwnerFor(process.env.DATA_DIR!, undefined),
+              "rakazo.botId": "bot",
+            },
+            ...(egress === "restricted"
+              ? { Options: { "com.docker.network.bridge.name": computerBridgeNameFor("bot") } }
+              : {}),
+          }),
+        );
+        expect(network.disconnect).not.toHaveBeenCalled();
+        expectReconnected(existing, network);
+      },
+    );
+
+    it.each([
+      ["removed", Object.assign(new Error("no such network"), { statusCode: 404 })],
+      ["recreated", undefined],
+    ])("moves a stale endpoint onto the network when it was %s under it", async (_case, error) => {
+      const { existing } = stoppedComputer({ [botNet]: { NetworkID: "net-old" } });
+      const network = botNetwork();
+      if (error) network.inspect.mockRejectedValue(error);
+      mocks.docker.getNetwork.mockReturnValue(network);
+
+      const response = await provision();
+      expect(await response.json()).toMatchObject({ id: "existing", resumed: true });
+      expect(network.disconnect).toHaveBeenCalledWith({ Container: "existing", Force: true });
+      expect(network.disconnect.mock.invocationCallOrder[0]).toBeLessThan(
+        network.connect.mock.invocationCallOrder[0]!,
+      );
+      expectReconnected(existing, network);
+    });
+
+    it("restarts it without reconnecting while its endpoint is on the current network", async () => {
+      const { existing } = stoppedComputer({ [botNet]: { NetworkID: "net-current" } });
+      const network = botNetwork();
+      mocks.docker.getNetwork.mockReturnValue(network);
+
+      const response = await provision();
+      expect(await response.json()).toMatchObject({ id: "existing", resumed: true });
+      expect(existing.start).toHaveBeenCalledOnce();
+      expect(network.connect).not.toHaveBeenCalled();
+      expect(mocks.docker.createNetwork).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["a leftover endpoint", new Error("endpoint with name rakazo-bot-bot already exists")],
+      ["a missing container", Object.assign(new Error("no such container"), { statusCode: 404 })],
+    ])(
+      "replaces it, never starting it unattached, when Docker refuses to attach it: %s",
+      async (_case, error) => {
+        const { existing, replacement } = stoppedComputer({});
+        const network = botNetwork();
+        network.connect.mockRejectedValue(error);
+        mocks.docker.getNetwork.mockReturnValue(network);
+
+        const response = await provision();
+        expect(await response.json()).toMatchObject({ id: "replacement", resumed: false });
+        expect(existing.start).not.toHaveBeenCalled();
+        expect(existing.remove).toHaveBeenCalledWith({ force: true });
+        expect(replacement.start).toHaveBeenCalledOnce();
+      },
+    );
+
+    it("keeps it when its network cannot be recreated", async () => {
+      const { existing } = stoppedComputer({});
+      mocks.docker.getNetwork.mockReturnValue(botNetwork());
+      mocks.docker.createNetwork.mockRejectedValue(new Error("address pools exhausted"));
+
+      const response = await provision();
+      expect(response.status).toBe(500);
+      expect(await response.json()).toEqual({ error: "address pools exhausted" });
+      expect(existing.start).not.toHaveBeenCalled();
+      expect(existing.remove).not.toHaveBeenCalled();
+    });
+
+    it("keeps it through a transient failure that a retry would get past", async () => {
+      const { existing } = stoppedComputer({});
+      mocks.docker.getNetwork.mockReturnValue(botNetwork());
+      // Only the first create fails, so falling through to the replace path's
+      // own create would succeed and remove this container.
+      mocks.docker.createNetwork
+        .mockRejectedValueOnce(new Error("daemon busy"))
+        .mockResolvedValue({ remove: vi.fn() });
+
+      const response = await provision();
+      expect(response.status).toBe(500);
+      expect(await response.json()).toEqual({ error: "daemon busy" });
+      expect(mocks.docker.createNetwork).toHaveBeenCalledOnce();
+      expect(existing.start).not.toHaveBeenCalled();
+      expect(existing.remove).not.toHaveBeenCalled();
+      expect(mocks.docker.createContainer).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      [
+        "fails transiently and keeps it",
+        Object.assign(new Error("daemon busy"), { statusCode: 500 }),
+        false,
+      ],
+      [
+        "is already gone and reconnects it",
+        new Error("container is not connected to the network"),
+        true,
+      ],
+    ])("when clearing a stale endpoint %s", async (_case, error, resumed) => {
+      const { existing } = stoppedComputer({ [botNet]: { NetworkID: "net-old" } });
+      const network = botNetwork();
+      network.disconnect.mockRejectedValue(error);
+      mocks.docker.getNetwork.mockReturnValue(network);
+
+      const response = await provision();
+      if (resumed) {
+        expect(await response.json()).toMatchObject({ id: "existing", resumed: true });
+        expect(network.connect).toHaveBeenCalledOnce();
+      } else {
+        expect(response.status).toBe(500);
+        expect(network.connect).not.toHaveBeenCalled();
+        expect(existing.start).not.toHaveBeenCalled();
+      }
+      expect(existing.remove).not.toHaveBeenCalled();
+      expect(mocks.docker.createContainer).not.toHaveBeenCalled();
+    });
+
+    it("keeps it when attaching it fails transiently", async () => {
+      const { existing } = stoppedComputer({});
+      const network = botNetwork();
+      network.connect.mockRejectedValue(
+        Object.assign(new Error("daemon busy"), { statusCode: 500 }),
+      );
+      mocks.docker.getNetwork.mockReturnValue(network);
+
+      const response = await provision();
+      expect(response.status).toBe(500);
+      expect(existing.start).not.toHaveBeenCalled();
+      expect(existing.remove).not.toHaveBeenCalled();
+      expect(mocks.docker.createContainer).not.toHaveBeenCalled();
+    });
+
+    it("surfaces a transient network inspect failure instead of replacing it", async () => {
+      const { existing } = stoppedComputer({ [botNet]: { NetworkID: "net-current" } });
+      const network = botNetwork();
+      network.inspect.mockRejectedValue(new Error("daemon unavailable"));
+      mocks.docker.getNetwork.mockReturnValue(network);
+
+      expect((await provision()).status).toBe(500);
+      expect(existing.start).not.toHaveBeenCalled();
+      expect(existing.remove).not.toHaveBeenCalled();
     });
   });
 });

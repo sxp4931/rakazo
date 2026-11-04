@@ -16,6 +16,7 @@ const PRIVACY_URLS: Record<string, string> = {
   cartesia: "https://cartesia.ai/legal/privacy",
   "fish-audio": "https://fish.audio/privacy/",
   supermemory: "https://supermemory.ai/privacy",
+  honcho: "https://app.honcho.dev/privacy",
 };
 
 /** Never expose endpoint paths, query parameters, user info, or credentials in a disclosure. */
@@ -37,21 +38,22 @@ export function aiRecipient(input: {
     key,
     name: origin ? `${name} (${origin})` : name,
     use: input.use,
-    detail: [
-      input.modelId ? `Model: ${input.modelId}.` : "",
-      ["openrouter", "vercel-ai-gateway"].includes(input.provider)
-        ? `${name} forwards requests to model providers using the routing and privacy settings configured for this connection.`
-        : "",
-    ]
-      .filter(Boolean)
-      .join(" "),
+    detail: ["openrouter", "vercel-ai-gateway"].includes(input.provider)
+      ? input.modelId
+        ? `${input.modelId}, forwarded to its provider`
+        : "Forwards to model providers"
+      : (input.modelId ?? ""),
     privacyUrl: PRIVACY_URLS[input.provider],
   };
 }
 
 function recipientName(provider: string, use: AiDataUse) {
   if (use === "voice") return voiceCatalogEntry(provider)?.name ?? provider;
-  if (use === "memory") return provider === "supermemory" ? "Supermemory" : provider;
+  if (use === "memory") {
+    if (provider === "supermemory") return "Supermemory";
+    if (provider === "honcho") return "Honcho";
+    return provider;
+  }
   if (provider === "cursor") return "Cursor";
   return listPiCatalog().find((entry) => entry.provider === provider)?.providerName ?? provider;
 }

@@ -3,6 +3,7 @@ import type {
   MemoryCommitRequest,
   MemoryExportRequest,
   MemoryReadRequest,
+  MemoryRemoveRequest,
   MemoryRevision,
   MemorySearchRequest,
   MemorySearchResult,
@@ -10,7 +11,9 @@ import type {
   MemoryStore,
   PortableFile,
 } from "@rakazo/adapter-kit";
-import { Prisma, type PrismaClient, withTransactionRetry } from "@rakazo/db";
+import { MEMORY_REVISION_CONFLICT_ERROR } from "@rakazo/adapter-kit";
+import type { PrismaClient } from "@rakazo/db";
+import { Prisma, withTransactionRetry } from "@rakazo/db";
 
 export class MarkdownMemoryStore implements MemoryStore {
   constructor(private readonly prisma: PrismaClient) {}
@@ -83,6 +86,24 @@ export class MarkdownMemoryStore implements MemoryStore {
               path: request.path,
             },
           });
+          if (request.expectedRevision !== undefined) {
+            const live = existing?.revision ?? 0;
+            if (live !== request.expectedRevision) throw new Error(MEMORY_REVISION_CONFLICT_ERROR);
+          }
+          if (
+            request.expectedDocumentId !== undefined &&
+            existing?.id !== request.expectedDocumentId
+          )
+            throw new Error(MEMORY_REVISION_CONFLICT_ERROR);
+          // Seeded documents may not have a history row until their first save.
+          if (existing) {
+            await tx.memoryRevision.createMany({
+              data: [
+                { documentId: existing.id, revision: existing.revision, content: existing.content },
+              ],
+              skipDuplicates: true,
+            });
+          }
           const doc = existing
             ? await tx.memoryDocument.update({
                 where: { id: existing.id },
@@ -112,6 +133,24 @@ export class MarkdownMemoryStore implements MemoryStore {
         { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
       ),
     );
+  }
+
+  async remove(
+    request: MemoryRemoveRequest,
+    context: AdapterContext,
+  ): Promise<{ removed: boolean }> {
+    // Revisions cascade with the document row.
+    const { count } = await this.prisma.memoryDocument.deleteMany({
+      where: {
+        ...(request.id ? { id: request.id } : {}),
+        spaceId: context.spaceId,
+        userId: context.userId,
+        scope: request.scope,
+        botId: request.botId ?? null,
+        path: request.path,
+      },
+    });
+    return { removed: count > 0 };
   }
 
   async *exportMarkdown(

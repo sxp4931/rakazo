@@ -1,138 +1,71 @@
-import { expect, type Page, test } from "@playwright/test";
+import type { Page } from "@playwright/test";
+import { expect, test } from "@playwright/test";
 import {
   activeBotId,
   captureScreenshot,
   completeOnboarding,
-  createNamedBot,
+  openBotPanelTab,
   realSandboxTimeout,
   rpc,
   signup,
 } from "./helpers";
 
-test("Team Computer gives bots a home folder plus shared space while Private stays isolated", async ({
+test("opening and releasing the computer keep a view-only stream; a failed release can be retried", async ({
   page,
 }, testInfo) => {
-  const stamp = Date.now();
-  const personalMarker = `personal-${stamp}`;
-  const sharedMarker = `shared-${stamp}`;
-  const privateMarker = `private-${stamp}`;
-
-  await signup(page, `team-computer-${stamp}@rakazo.test`, "password12", "Team Computer");
+  await signup(page, `view-only-${Date.now()}@rakazo.test`, "password12", "Computer");
   await completeOnboarding(page);
-  const chiefId = activeBotId(page);
-
+  let takeovers = 0;
+  page.on("request", (request) => {
+    if (request.url().endsWith("/rpc/computer/takeover")) takeovers += 1;
+  });
   await openComputerPanel(page);
-  await expect(page.getByText("Team Computer", { exact: true }).last()).toBeVisible();
-  await captureScreenshot(page, testInfo, "41-team-computer");
-
-  const writerId = await createBot(page, "Writer", "team");
-  await sendAndWait(
-    page,
-    writerId,
-    `write a file in your home called notes/result.txt that says ${personalMarker}`,
-  );
-
-  await expect(readFile(page, writerId, "notes/result.txt")).resolves.toContain(personalMarker);
-  await expect(readFileResponse(page, chiefId, "notes/result.txt")).resolves.toMatchObject({
-    ok: false,
-  });
-  await expect(readFile(page, chiefId, `bots/${writerId}/notes/result.txt`)).resolves.toContain(
-    personalMarker,
-  );
-  await captureScreenshot(page, testInfo, "42-team-bot-home-folder");
-
-  await sendAndWait(
-    page,
-    writerId,
-    `write a file called shared/notes/result.txt that says ${sharedMarker}`,
-  );
-  await expect(readFile(page, chiefId, "shared/notes/result.txt")).resolves.toContain(sharedMarker);
-
-  const privateId = await createBot(page, "Private Writer", "dedicated");
-  await openComputerPanel(page);
-  await expect(page.getByText(/Private Writer['’]s screen/).last()).toBeVisible();
-  await captureScreenshot(page, testInfo, "43-private-computer");
-  await expect(readFileResponse(page, privateId, "notes/result.txt")).resolves.toMatchObject({
-    ok: false,
-  });
-
-  await sendAndWait(
-    page,
-    privateId,
-    `write a file in your home called notes/result.txt that says ${privateMarker}`,
-  );
-  await expect(readFile(page, privateId, "notes/result.txt")).resolves.toContain(privateMarker);
-  await expect(readFileResponse(page, chiefId, "notes/result.txt")).resolves.toMatchObject({
-    ok: false,
-  });
-
-  await setComputerMode(page, "Private Writer", privateId, "team");
-  await expect(readFileResponse(page, privateId, "notes/result.txt")).resolves.toMatchObject({
-    ok: false,
-  });
-  await expect(readFile(page, privateId, "shared/notes/result.txt")).resolves.toContain(
-    sharedMarker,
-  );
-  await captureScreenshot(page, testInfo, "44-private-bot-joined-team-computer");
-
-  await setComputerMode(page, "Private Writer", privateId, "dedicated");
-  await expect(readFile(page, privateId, "notes/result.txt")).resolves.toContain(privateMarker);
-  await expect(readFile(page, writerId, "notes/result.txt")).resolves.toContain(personalMarker);
-  await captureScreenshot(page, testInfo, "45-private-computer-restored");
-});
-
-test("user control leaves another Team bot's screen available", async ({ page }, testInfo) => {
-  const stamp = Date.now();
-  const marker = `after-release-${stamp}`;
-
-  await signup(page, `team-control-${stamp}@rakazo.test`, "password12", "Team Control");
-  await completeOnboarding(page);
-  const chiefId = activeBotId(page);
-  const workerId = await createBot(page, "Worker", "team");
-
-  await openBot(page, "Chief");
-  await page.getByTitle("Agent computer").click();
-  await page.getByTestId("computer-preview").hover();
-  await page.getByTestId("computer-preview-open").click();
-  await expect(page.getByRole("button", { name: "Close computer" })).toBeVisible();
-  await page.getByRole("button", { name: "Close computer" }).click();
-
-  await openBot(page, "Worker");
-  const workerRunId = await sendMessage(
-    page,
-    `write a file in your home called notes/result.txt that says ${marker}`,
-  );
-
-  await waitForRun(page, workerId, workerRunId);
-  await expect(
-    rpc<{ controlHolder: string; controlBotId: string | null }>(page, "computer/status", {
-      botId: workerId,
-    }),
-  ).resolves.toMatchObject({ controlHolder: "user", controlBotId: chiefId });
-  await expect(readFile(page, workerId, "notes/result.txt")).resolves.toContain(marker);
-  await captureScreenshot(page, testInfo, "46-team-computer-user-control-allows-parallel-bot");
-
-  await rpc(page, "computer/release", { botId: chiefId });
-  await expect(
-    rpc<{ controlHolder: string; controlBotId: string | null }>(page, "computer/status", {
-      botId: chiefId,
-    }),
-  ).resolves.toMatchObject({ controlHolder: "bot", controlBotId: null });
-
-  await expect(readFileResponse(page, chiefId, "notes/result.txt")).resolves.toMatchObject({
-    ok: false,
-  });
-  await captureScreenshot(page, testInfo, "47-team-computer-control-released");
-});
-
-test("a failed control release keeps the computer open for retry", async ({ page }, testInfo) => {
-  await signup(page, `team-release-${Date.now()}@rakazo.test`, "password12", "Team Release");
-  await completeOnboarding(page);
-  await page.getByTitle("Agent computer").click();
+  await captureScreenshot(page, testInfo, "computer-tab-asleep");
   await page.getByTestId("computer-preview").hover();
   await page.getByTestId("computer-preview-open").click();
   const chrome = page.getByTestId("computer-chrome");
-  const release = chrome.getByRole("button", { name: "Release", exact: true });
+  const screen = page.getByTitle("Bot screen").last();
+  const take = chrome.getByRole("button", { name: "Take control", exact: true });
+  const release = chrome.getByRole("button", { name: "Release control", exact: true });
+  const more = chrome.getByRole("button", { name: "More computer actions" });
+  // The overlay covers the conversation header, which drags the desktop window.
+  await expect(chrome).toHaveCSS("-webkit-app-region", "no-drag");
+  const checkViewOnly = async () => {
+    await expect(take).toBeVisible();
+    await expect(release).toHaveCount(0);
+    await expect(screen).toHaveAttribute("src", /view_only=true/);
+    await expect(screen).toHaveCSS("pointer-events", "none");
+    await more.click();
+    await expect(page.getByRole("menuitem", { name: "Recover computer" })).toBeVisible();
+    await expect(page.getByRole("menuitem", { name: "Reset computer" })).toBeVisible();
+    await more.click();
+  };
+  await checkViewOnly();
+  expect(takeovers).toBe(0);
+  await captureScreenshot(page, testInfo, "computer-open-view-only");
+  await take.click();
+  await expect(release).toBeVisible();
+  await expect(take).toHaveCount(0);
+  await expect(screen).toHaveAttribute("src", /view_only=false/);
+  await expect(screen).toHaveCSS("pointer-events", "auto");
+  expect(takeovers).toBe(1);
+  await more.click();
+  await expect(page.getByRole("menuitem", { name: "Recover computer" })).toBeVisible();
+  await more.click();
+  await captureScreenshot(page, testInfo, "computer-controlling");
+  await release.click();
+  await checkViewOnly();
+  expect(takeovers).toBe(1);
+  await captureScreenshot(page, testInfo, "computer-released-view-only");
+  await page.getByRole("button", { name: "Close computer" }).click();
+  await expect(page.getByTitle("Bot screen preview")).toBeVisible();
+  await captureScreenshot(page, testInfo, "computer-tab-running");
+  await page.getByTestId("computer-preview").hover();
+  await page.getByTestId("computer-preview-open").click();
+  await expect(take).toBeVisible();
+
+  // A release that fails keeps the computer open so it can be retried.
+  await take.click();
   await expect(release).toBeVisible();
   await page.route("**/rpc/computer/release", (route) =>
     route.fulfill({ status: 500, body: "release unavailable" }),
@@ -143,7 +76,9 @@ test("a failed control release keeps the computer open for retry", async ({ page
   await captureScreenshot(page, testInfo, "48-team-computer-release-retry");
   await page.unroute("**/rpc/computer/release");
   await release.click();
-  await expect(page.getByRole("button", { name: "Close computer" })).toBeHidden();
+  await expect(take).toBeVisible();
+  await chrome.getByRole("button", { name: "Close computer" }).click();
+  await expect(chrome).toBeHidden();
 });
 
 test("an active Team bot must be stopped before user takeover", async ({ page }, testInfo) => {
@@ -186,7 +121,7 @@ test("an active Team bot must be stopped before user takeover", async ({ page },
     .poll(async () => (await threadSnapshot(page, chiefId)).run?.status ?? "idle")
     .toBe("running");
 
-  await page.getByTitle("Agent computer").click();
+  await openBotPanelTab(page, "Computer");
   const sidePanel = page.getByTestId("side-panel");
   await expect(sidePanel.getByRole("button", { name: /Take control/i })).toHaveCount(0);
   await page.getByTestId("computer-preview").hover();
@@ -217,65 +152,24 @@ test("an active Team bot must be stopped before user takeover", async ({ page },
     )
     .toBeNull();
 
-  // After stop, Open via hover is the takeover path (no Take control button).
+  // After stop, opening stays view-only until Take control is clicked.
   await page.getByTestId("computer-preview").hover();
   await page.getByTestId("computer-preview-open").click();
   await expect(page.getByRole("button", { name: "Close computer" })).toBeVisible();
+  await expect(chrome.getByText("You have control", { exact: true })).toHaveCount(0);
+  await chrome.getByRole("button", { name: "Take control", exact: true }).click();
   await expect(chrome.getByText("You have control", { exact: true })).toBeVisible();
-  await expect(chrome.getByRole("button", { name: /Take control/i })).toHaveCount(0);
-  await expect(chrome.getByRole("button", { name: "Release", exact: true })).toBeVisible();
+  await expect(chrome.getByRole("button", { name: "Release control", exact: true })).toBeVisible();
   await captureScreenshot(page, testInfo, "49-team-computer-open-after-stop");
-  await chrome.getByRole("button", { name: "Release", exact: true }).click();
-  // Release closes the overlay and clears control without a DB edit.
-  await expect(page.getByRole("button", { name: "Close computer" })).toHaveCount(0);
+  await chrome.getByRole("button", { name: "Release control", exact: true }).click();
+  await expect(chrome.getByRole("button", { name: "Take control", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Close computer" })).toBeVisible();
 });
 
-async function createBot(page: Page, name: string, mode: "team" | "dedicated") {
-  return createNamedBot(page, name, { computerMode: mode });
-}
-
-async function setComputerMode(
-  page: Page,
-  botName: string,
-  botId: string,
-  mode: "team" | "dedicated",
-) {
-  await page.getByRole("button", { name: botName, exact: true }).last().click();
-  const settings = page.getByTestId("bot-settings");
-  await expect(settings.locator("label:has-text('Name') input")).toHaveValue(botName);
-  const advanced = settings.getByTestId("bot-settings-advanced");
-  await advanced.evaluate((element) => {
-    (element as HTMLDetailsElement).open = true;
-  });
-  await settings
-    .getByRole("button", { name: mode === "team" ? "Team" : "Private", exact: true })
-    .click();
-  await settings.getByRole("button", { name: "Save", exact: true }).click();
-  await expect
-    .poll(async () => {
-      const bots = await rpc<Array<{ id: string; computerMode: string }>>(page, "bots/list", {});
-      return bots.find((bot) => bot.id === botId)?.computerMode;
-    })
-    .toBe(mode);
-}
-
-async function openBot(page: Page, name: string) {
-  await page
-    .getByRole("complementary")
-    .getByRole("button", { name: new RegExp(`^${name}`) })
-    .click();
-  await expect(page.getByPlaceholder(`Message ${name}`)).toBeVisible();
-}
-
 async function openComputerPanel(page: Page) {
-  await page.getByTitle("Agent computer").click();
+  await openBotPanelTab(page, "Computer");
   await expect(page.getByTestId("computer-preview")).toBeVisible();
   await expect(page.getByTestId("computer-preview-open")).toHaveCount(1);
-}
-
-async function sendAndWait(page: Page, botId: string, text: string) {
-  const runId = await sendMessage(page, text);
-  await waitForRun(page, botId, runId);
 }
 
 async function sendMessage(page: Page, text: string) {
@@ -293,22 +187,6 @@ async function sendMessage(page: Page, text: string) {
   return result.json.runId;
 }
 
-async function waitForRun(page: Page, botId: string, runId: string) {
-  await expect
-    .poll(
-      async () => {
-        const snapshot = await threadSnapshot(page, botId);
-        if (snapshot.run?.id === runId) return false;
-        return snapshot.messages.some((message) => message.runId === runId);
-      },
-      {
-        timeout: realSandboxTimeout(90_000, 20_000),
-        message: `run ${runId} must finish before its result is inspected`,
-      },
-    )
-    .toBe(true);
-}
-
 async function waitForIdle(page: Page, botId: string) {
   await expect
     .poll(async () => (await threadSnapshot(page, botId)).run?.status ?? "idle", {
@@ -322,15 +200,6 @@ function threadSnapshot(page: Page, botId: string) {
     run: { id: string; status: string } | null;
     messages: Array<{ runId?: string | null }>;
   }>(page, "threads/get", { botId });
-}
-
-async function readFile(page: Page, botId: string, path: string) {
-  const result = await rpc<{ content: string }>(page, "computer/readFile", { botId, path });
-  return result.content;
-}
-
-async function readFileResponse(page: Page, botId: string, path: string) {
-  return rpcResponse(page, "computer/readFile", { botId, path });
 }
 
 async function rpcResponse(page: Page, procedure: string, body: unknown) {

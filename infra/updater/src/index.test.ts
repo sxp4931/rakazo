@@ -3,11 +3,12 @@ import os from "node:os";
 import path from "node:path";
 import type { ServerUpdateRun } from "@rakazo/contracts";
 import { afterEach, describe, expect, it } from "vitest";
+import type { UpdaterCommandRunner } from "./index.js";
 import {
   commandEnvironment,
   createUpdaterApp,
   restoreCheckoutArgv,
-  type UpdaterCommandRunner,
+  runHostCommand,
 } from "./index.js";
 import { resolveUpdaterConfig } from "./updater-logic.js";
 
@@ -40,11 +41,11 @@ async function deployment(env = "RAKAZO_IMAGE_TAG=v1.0.0\nRAKAZO_IMAGE_TAG_PREVI
 }
 
 function ok(output = "") {
-  return { ok: true, exitCode: 0, output };
+  return { ok: true, exitCode: 0, stdout: output, output };
 }
 
 function failed(output: string) {
-  return { ok: false, exitCode: 1, output };
+  return { ok: false, exitCode: 1, stdout: "", output };
 }
 
 function request(app: ReturnType<typeof createUpdaterApp>, pathname: string, body?: unknown) {
@@ -153,6 +154,32 @@ describe("updater HTTP surface", () => {
     const response = await app.request("/state", { headers: authorized });
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toMatchObject({ error: expect.stringMatching(/\.env/) });
+  });
+
+  it("refuses a failed plan without leaving a rejection that could stop the process", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const subject = createUpdaterApp(
+        resolveUpdaterConfig({
+          RAKAZO_DEPLOY_DIR: "/rakazo-updater-tests-no-such-directory",
+          RAKAZO_UPDATER_TOKEN: token,
+        }),
+      );
+      const input = { repoUrl: "https://github.com/elie222/rakazo", branch: "main" };
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const response = await request(subject, "/plan", input);
+        expect(response.status).toBe(400);
+        await expect(response.json()).resolves.toMatchObject({
+          error: expect.stringMatching(/\.env/),
+        });
+      }
+      await new Promise((resolve) => setImmediate(resolve));
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+    expect(unhandled).toEqual([]);
   });
 });
 
@@ -365,6 +392,24 @@ describe("updater orchestration", () => {
     expect(await readFile(envFile, "utf8")).toMatch(/FAKE_SETTING=kept/);
   });
 
+  it("adds a missing app database password before recreating, so newer Compose files start", async () => {
+    const fixture = await deployment("POSTGRES_PASSWORD=kept\nRAKAZO_IMAGE_TAG=v1.0.0\n");
+    const envFile = path.join(fixture.deployDir, ".env");
+    let envAtRecreate = "";
+    const run: UpdaterCommandRunner = async (command, args) => {
+      if (command === "git") return ok(`${targetCommit}\trefs/tags/v1.1.0\n`);
+      if (args.includes("up")) envAtRecreate = await readFile(envFile, "utf8");
+      return ok();
+    };
+    const response = await request(createUpdaterApp(fixture.config, { run }), "/apply", {
+      repoUrl: "https://github.com/elie222/rakazo",
+      branch: "main",
+    });
+    await expect(response.json()).resolves.toMatchObject({ ok: true });
+    expect(envAtRecreate).toMatch(/^POSTGRES_APP_PASSWORD=[0-9a-f]{32}$/m);
+    expect(envAtRecreate).toMatch(/^POSTGRES_PASSWORD=kept$/m);
+  });
+
   it("refuses to replace a symlinked deployment environment", async () => {
     const fixture = await deployment();
     const envFile = path.join(fixture.deployDir, ".env");
@@ -412,7 +457,7 @@ describe("child process environment", () => {
   it("declares the deployment directory safe so git works on a non-root checkout", () => {
     // The child environment is rebuilt from an allowlist, so GIT_CONFIG_* set on the Compose
     // service never reaches git. Without these three, every git call exits 128 with "detected
-    // dubious ownership" on the layout docs/self-host.md recommends.
+    // dubious ownership" on the layout docs/self-host-production.md recommends.
     const env = commandEnvironment({ RAKAZO_DEPLOY_DIR: "/srv/rakazo" });
     expect(env.GIT_CONFIG_COUNT).toBe("1");
     expect(env.GIT_CONFIG_KEY_0).toBe("safe.directory");
@@ -476,5 +521,57 @@ describe("child process environment", () => {
       "deploy",
       currentCommit,
     ]);
+  });
+});
+
+describe("runHostCommand", () => {
+  it("passes shell syntax to git as one argument and refuses any other program", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "rakazo-host-command-"));
+    temporaryDirectories.push(dir);
+    const bin = path.join(dir, "bin");
+    await mkdir(bin);
+    const out = path.join(dir, "argv.json");
+    const git = path.join(bin, "git");
+    await writeFile(
+      git,
+      `#!${process.execPath}\nconst fs = require("node:fs");\nfs.writeFileSync(process.env.ARGV_OUT, JSON.stringify(process.argv.slice(2)));\n`,
+    );
+    await chmod(git, 0o755);
+    const payload = "a; touch pwned $(id)";
+    const result = await runHostCommand("git", ["status", payload], {
+      cwd: dir,
+      timeoutMs: 5_000,
+      env: { PATH: bin, ARGV_OUT: out },
+    });
+    expect(result.ok).toBe(true);
+    expect(JSON.parse(await readFile(out, "utf8"))).toEqual(["status", payload]);
+
+    const marker = path.join(dir, "pwned");
+    const bash = path.join(bin, "bash");
+    await writeFile(
+      bash,
+      `#!${process.execPath}\nrequire("node:fs").writeFileSync(${JSON.stringify(marker)}, "ran");\n`,
+    );
+    await chmod(bash, 0o755);
+    const refused = await runHostCommand("bash", ["-c", payload], {
+      cwd: dir,
+      timeoutMs: 1_000,
+      env: { PATH: bin },
+    });
+    expect(refused).toEqual({
+      ok: false,
+      exitCode: null,
+      stdout: "",
+      output: "Refusing to run an unexpected program.",
+    });
+    await expect(readFile(marker, "utf8")).rejects.toThrow();
+
+    const nul = await runHostCommand("docker", ["a\0b"], { cwd: dir, timeoutMs: 1_000 });
+    expect(nul).toEqual({
+      ok: false,
+      exitCode: null,
+      stdout: "",
+      output: "Refusing to run an unexpected program.",
+    });
   });
 });

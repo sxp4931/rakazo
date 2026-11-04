@@ -1,14 +1,19 @@
 import { Trans, useLingui } from "@lingui/react/macro";
+import { useLinkPrompt } from "@rakazo/chat-ui/web";
 import type { MessageBlock } from "@rakazo/contracts";
-import { abortableDelay } from "@rakazo/core";
+import { appConnectedInput, waitForConnection } from "@rakazo/core";
 import { Button, Dialog, DialogClose, DialogContent, DialogTitle } from "@rakazo/ui-web";
 import { X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { BuiCard, SuccessPop } from "../../components/ai/primitives";
-import { type ArtifactTarget, decodeArtifactBase64 } from "../../lib/artifact-open";
+import { OptionRow } from "../../components/OptionRow";
+import type { ArtifactTarget } from "../../lib/artifact-open";
 import { chartViewport } from "../../lib/chart-viewport";
 import { connectMcpOauth } from "../../lib/mcp-connect";
+import { importChunk } from "../../lib/preload-recovery";
 import { rpc } from "../../lib/rpc";
+import { useArtifactImage } from "../../lib/use-artifact-image";
+import { errorText } from "../../lib/user-error";
 
 export function ChoiceCard({
   botId,
@@ -32,7 +37,7 @@ export function ChoiceCard({
       await rpc.onboarding.choose({ botId, optionId });
       await onBotChanged();
     } catch (err) {
-      setError(err instanceof Error ? err.message : t`Could not save this choice`);
+      setError(errorText(err, t`Could not save this choice`));
       setPending(false);
     }
   }
@@ -45,7 +50,7 @@ export function ChoiceCard({
       setLocallyDismissed(true);
       void onBotChanged().catch(() => undefined);
     } catch (err) {
-      setError(err instanceof Error ? err.message : t`Could not dismiss`);
+      setError(errorText(err, t`Could not dismiss`));
       setPending(false);
     }
   }
@@ -54,7 +59,7 @@ export function ChoiceCard({
 
   return (
     <div className="flex justify-start">
-      <div className="relative w-[420px] max-w-full rounded-[20px] border border-border bg-card px-[18px] py-[14px]">
+      <BuiCard className="relative w-[420px] max-w-full px-[18px] py-[14px]">
         {!block.answerId ? (
           <Button
             variant="ghost"
@@ -73,44 +78,34 @@ export function ChoiceCard({
         {block.subtitle ? (
           <div className="mt-0.5 text-[13px] text-foreground/75">{block.subtitle}</div>
         ) : null}
-        <div className="mt-3 space-y-2.5">
-          {block.options
-            .filter((option) => !block.answerId || option.id === block.answerId)
-            .map((option) => (
-              <button
-                key={option.id}
-                type="button"
-                disabled={Boolean(block.answerId) || pending}
-                onClick={() => void choose(option.id)}
-                className={`flex w-full items-start gap-3 rounded-xl px-3.5 py-3.5 text-start text-foreground disabled:opacity-60 ${block.answerId ? "bg-accent" : "bg-muted hover:bg-accent"}`}
-              >
-                <span className="mt-0.5 grid h-[24px] w-[24px] shrink-0 place-items-center rounded-[7px] bg-background text-[12.5px] font-medium text-foreground/75">
-                  {option.letter}
-                </span>
-                <span
-                  className={`flex-1 text-[15px] leading-[1.35] ${block.answerId ? "text-foreground/75" : "text-foreground"}`}
-                >
-                  <OnboardingFocusOptionLabel
-                    id={option.id}
-                    label={option.label}
-                    question={block.question}
-                  />
-                </span>
-                {block.answerId === option.id ? (
-                  <span className="mt-0.5 text-foreground/75">✓</span>
-                ) : null}
-              </button>
-            ))}
+        <div className="mt-2.5 space-y-0.5">
+          {block.options.map((option) => (
+            <OptionRow
+              key={option.id}
+              letter={option.letter}
+              selected={block.answerId === option.id}
+              disabled={Boolean(block.answerId) || pending}
+              onClick={() => void choose(option.id)}
+            >
+              <OnboardingFocusOptionLabel
+                id={option.id}
+                label={option.label}
+                question={block.question}
+              />
+            </OptionRow>
+          ))}
         </div>
         {error ? <p className="mt-2 text-xs text-destructive">{error}</p> : null}
-      </div>
+      </BuiCard>
     </div>
   );
 }
 
+const FOCUS_QUESTION = "What do you want me on first?";
+
 /** First-run Chief focus card: API stores English; UI locale catalogs translate it. */
 function OnboardingFocusQuestion({ question }: { question: string }) {
-  if (question === "What do you want me on first?") {
+  if (question === FOCUS_QUESTION) {
     return <Trans>What do you want me on first?</Trans>;
   }
   return question;
@@ -125,7 +120,7 @@ function OnboardingFocusOptionLabel({
   label: string;
   question: string;
 }) {
-  if (question !== "What do you want me on first?") return label;
+  if (question !== FOCUS_QUESTION) return label;
   switch (id) {
     case "day":
       return <Trans>Day-to-day work</Trans>;
@@ -142,9 +137,13 @@ function OnboardingFocusOptionLabel({
 
 export function AppConnectCard({
   botId,
+  threadId,
+  messageId,
   block,
 }: {
   botId: string;
+  threadId: string;
+  messageId?: string;
   block: Extract<MessageBlock, { kind: "app_connect" }>;
 }) {
   const { t } = useLingui();
@@ -170,25 +169,23 @@ export function AppConnectCard({
       if (started.authorizationUrl) {
         window.open(started.authorizationUrl, "rakazo-app-connect", "popup,width=560,height=720");
       }
-      for (let i = 0; i < 60; i += 1) {
-        if (controller.signal.aborted) return;
-        const row = await rpc.connections
-          .complete({ connectionId: started.connectionId })
+      const result = await waitForConnection(
+        started.connectionId,
+        (input) => rpc.connections.complete(input, { signal: controller.signal }),
+        { signal: controller.signal, attempts: 60 },
+      );
+      if (result.status === "aborted") return;
+      if (result.status === "connected") {
+        setLocalStatus("connected");
+        await rpc.onboarding
+          .appConnected(appConnectedInput(botId, threadId, block, messageId))
           .catch(() => undefined);
-        if (row?.status === "connected") {
-          if (controller.signal.aborted) return;
-          setLocalStatus("connected");
-          await rpc.onboarding
-            .appConnected({ botId, provider: block.provider, connectorId: block.connectorId })
-            .catch(() => undefined);
-          return;
-        }
-        await abortableDelay(2_000, controller.signal);
+        return;
       }
-      if (!controller.signal.aborted) setError(t`Authorization timed out. Please try again.`);
+      setError(t`Authorization timed out. Please try again.`);
     } catch (error) {
       if (!controller.signal.aborted) {
-        setError(error instanceof Error ? error.message : t`Could not authorize this app`);
+        setError(errorText(error, t`Could not authorize this app`));
       }
     } finally {
       if (connectionAttempt.current === controller) {
@@ -201,14 +198,14 @@ export function AppConnectCard({
     <BuiCard
       role="group"
       aria-label={t`${block.name} connection`}
-      className="w-[min(420px,80%)] px-4 py-3.5"
+      className="w-full max-w-[440px] px-4 py-3.5"
     >
       <div className="flex items-center gap-3.5">
         {block.logo ? (
           <img
             src={block.logo}
             alt=""
-            className="h-10 w-10 rounded-[10px] bg-white object-contain p-1"
+            className="h-10 w-10 rounded-[10px] bg-favicon-plate object-contain p-1"
           />
         ) : (
           <span className="grid h-10 w-10 place-items-center rounded-[10px] bg-muted text-[15px] text-foreground">
@@ -224,13 +221,8 @@ export function AppConnectCard({
         {status === "connected" ? (
           <SuccessPop label={t`Connected`} />
         ) : (
-          <Button
-            variant="secondary"
-            className="rounded-full hover:border-border hover:bg-accent hover:text-foreground"
-            disabled={busy}
-            onClick={() => void authorize()}
-          >
-            {busy ? t`Waiting…` : t`Authorize`}
+          <Button disabled={busy} onClick={() => void authorize()}>
+            {busy ? t`Waiting…` : t`Connect`}
           </Button>
         )}
       </div>
@@ -252,6 +244,7 @@ function ChartCanvas({
 }) {
   const { t } = useLingui();
   const ref = useRef<HTMLDivElement>(null);
+  const linkDialog = useLinkPrompt(ref);
   const [error, setError] = useState<string | null>(null);
   const [meta, setMeta] = useState<{
     title?: string;
@@ -262,7 +255,7 @@ function ChartCanvas({
     // Plot loads lazily so threads without charts never pay for the library.
     void (async () => {
       try {
-        const { buildPlotParts } = await import("@rakazo/core/plot");
+        const { buildPlotParts } = await importChunk(() => import("@rakazo/core/plot"));
         if (cancelled || !ref.current) return;
         // Hover inspection by default: give the first mark a tooltip unless
         // the spec already asks for one somewhere.
@@ -283,7 +276,7 @@ function ChartCanvas({
         setError(null);
         ref.current.replaceChildren(parts.plotted);
       } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : t`Could not render chart`);
+        if (!cancelled) setError(errorText(err, t`Could not render chart`));
       }
     })();
     return () => {
@@ -318,7 +311,8 @@ function ChartCanvas({
           ))}
         </div>
       ) : null}
-      <div ref={ref} className="[&_svg]:max-w-full" />
+      <div ref={ref} className="overflow-hidden [contain:paint] [&_svg]:max-w-full" />
+      {linkDialog}
     </div>
   );
 }
@@ -326,52 +320,81 @@ function ChartCanvas({
 type McpApprovalState = "pending" | "connecting" | "connected" | "dismissed";
 
 /** Approval card for an agent-created MCP server: the user completes browser
- * OAuth (or confirms no authorization is needed) without leaving the chat. */
+ * OAuth (or confirms no authorization is needed) without leaving the chat.
+ * The decision persists on the block, so the card keeps showing it after the
+ * thread remounts. */
 export function McpApprovalCard({
   botId,
-  name,
-  serverId,
-  transport,
-  endpoint,
-  needsOAuth,
+  threadId,
+  block,
 }: {
   botId: string | undefined;
-  name: string;
-  serverId: string;
-  transport: string;
-  endpoint: string | null;
-  needsOAuth: boolean;
+  threadId: string | undefined;
+  block: Extract<MessageBlock, { kind: "mcp_approval" }>;
 }) {
   const { t } = useLingui();
-  const [state, setState] = useState<McpApprovalState>("pending");
+  const { name, serverId, transport, endpoint, needsOAuth, status: savedStatus } = block;
+  const [localStatus, setLocalStatus] = useState<McpApprovalState>("pending");
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  // A removal repaints the block to pending. Drop an in-session connected
+  // override so the card does not keep the old decision.
+  useEffect(() => {
+    if (savedStatus === "connected" || savedStatus === "dismissed") return;
+    setLocalStatus((current) =>
+      current === "connected" || current === "dismissed" ? "pending" : current,
+    );
+  }, [savedStatus]);
+  // Blocks saved before the status field existed have none and count as pending.
+  const state =
+    savedStatus === "connected" || savedStatus === "dismissed" ? savedStatus : localStatus;
 
   async function authorize() {
-    if (!botId) {
-      setError(t`This server cannot be assigned without a bot.`);
+    if (!botId || busy) {
+      if (!botId) setError(t`This server cannot be assigned without a bot.`);
       return;
     }
-    setState("connecting");
+    setBusy(true);
+    setLocalStatus("connecting");
     setError(null);
     try {
       if (needsOAuth) {
         const result = await connectMcpOauth(serverId);
         if (result === "cancelled") {
-          setState("pending");
+          setLocalStatus("pending");
           return;
         }
       }
-      await rpc.mcp.assignments.approve({ botId, serverId });
-      setState("connected");
+      await rpc.mcp.assignments.approve({ botId, serverId, threadId });
+      setLocalStatus("connected");
     } catch (err) {
-      setError(err instanceof Error ? err.message : t`Could not approve this server`);
-      setState("pending");
+      setError(errorText(err, t`Could not approve this server`));
+      setLocalStatus("pending");
+    } finally {
+      setBusy(false);
     }
   }
 
-  const summary = endpoint ?? `stdio · ${transport}`;
+  async function dismiss() {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      if (botId) {
+        await rpc.mcp.assignments.dismiss({ botId, serverId, threadId });
+      }
+      setLocalStatus("dismissed");
+    } catch (err) {
+      setLocalStatus("pending");
+      setError(errorText(err, t`Could not dismiss this server`));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const summary = endpoint ?? `stdio (${transport})`;
   return (
-    <BuiCard className="max-w-[74%] p-4">
+    <BuiCard data-testid="mcp-approval-card" className="w-full min-w-0 max-w-xl p-4">
       <div className="flex items-center gap-2">
         <span className="grid h-7 w-7 place-items-center rounded-lg bg-muted text-xs text-foreground">
           M
@@ -389,18 +412,14 @@ export function McpApprovalCard({
               : t`Approve this server to let your agent use its tools.`}
           </p>
           {error ? <p className="mt-2 text-xs text-destructive">{error}</p> : null}
-          <div className="mt-3 flex gap-2">
-            <Button
-              className="rounded-full"
-              disabled={state === "connecting"}
-              onClick={() => void authorize()}
-            >
+          <div className="mt-3 flex flex-wrap gap-2">
+            <Button disabled={state !== "pending" || busy} onClick={() => void authorize()}>
               {state === "connecting" ? t`Connecting…` : needsOAuth ? t`Authorize` : t`Approve`}
             </Button>
             <Button
               variant="secondary"
-              className="rounded-full"
-              onClick={() => setState("dismissed")}
+              disabled={state !== "pending" || busy}
+              onClick={() => void dismiss()}
             >
               <Trans>Not now</Trans>
             </Button>
@@ -409,7 +428,7 @@ export function McpApprovalCard({
       ) : null}
       {state === "connected" ? (
         <div className="mt-3">
-          <SuccessPop label={t`Connected. Its tools are available from your next message.`} />
+          <SuccessPop label={t`Connected`} />
         </div>
       ) : null}
       {state === "dismissed" ? (
@@ -446,7 +465,7 @@ export function ChartBlockView({
   const expandedViewport = chartViewport(viewport.width, viewport.height);
   return (
     <>
-      <div className="group relative max-w-[74%] rounded-[20px] bg-muted p-4">
+      <div className="group relative w-[552px] max-w-full rounded-[20px] bg-muted p-4">
         <ChartCanvas spec={spec} data={data} width={520} />
         <Button
           variant="outline"
@@ -495,12 +514,10 @@ export function ArtifactImage({
   name: string;
 }) {
   const { t } = useLingui();
-  const [src, setSrc] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
   const [visible, setVisible] = useState(false);
   const container = useRef<HTMLDivElement>(null);
-  const targetBotId = "botId" in target ? target.botId : undefined;
-  const targetGroupId = "groupId" in target ? target.groupId : undefined;
+  const src = useArtifactImage(target, artifactId, visible);
 
   useEffect(() => {
     const element = container.current;
@@ -521,32 +538,6 @@ export function ArtifactImage({
     return () => observer.disconnect();
   }, []);
 
-  useEffect(() => {
-    if (!visible) return;
-    let cancelled = false;
-    let objectUrl: string | null = null;
-    setSrc(null);
-    void rpc.artifacts
-      .get(
-        targetBotId
-          ? { botId: targetBotId, artifactId }
-          : { groupId: targetGroupId ?? "", artifactId },
-      )
-      .then((artifact) => {
-        const bytes = decodeArtifactBase64(artifact.contentBase64);
-        objectUrl = URL.createObjectURL(
-          new Blob([new Uint8Array(bytes)], { type: artifact.mimeType }),
-        );
-        if (cancelled) URL.revokeObjectURL(objectUrl);
-        else setSrc(objectUrl);
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-    };
-  }, [artifactId, targetBotId, targetGroupId, visible]);
-
   return (
     <div ref={container}>
       {src ? (
@@ -558,7 +549,7 @@ export function ArtifactImage({
           <img src={src} alt={name} className="max-h-48 w-full object-cover" />
         </button>
       ) : (
-        <div className="rounded-[20px] border border-border bg-muted px-4 py-3 text-[14px] text-muted-foreground">
+        <div className="rounded-[20px] bg-muted px-4 py-3 text-[14px] text-muted-foreground">
           {name}
         </div>
       )}

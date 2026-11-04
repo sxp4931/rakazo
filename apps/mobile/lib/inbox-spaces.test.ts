@@ -1,19 +1,21 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  adoptDeletedSpaceFallback,
-  type MobileBot,
-  rpc,
-  selectedSpaceId,
-  selectSpace,
-} from "./api";
+import type { MobileBot } from "./api";
+import { adoptDeletedSpaceFallback, rpc, selectedSpaceId, selectSpace } from "./api";
+import { activateUiLocale } from "./i18n";
+import type { InboxSpace } from "./inbox-spaces";
 import {
   canDeleteInboxSpace,
-  type InboxSpace,
+  deleteSpaceTitle,
+  inboxHasNoChats,
+  inboxNeedsCreateHint,
+  inboxSignal,
   removeInboxSpace,
   retryInboxSpaceFallback,
   selectInboxSpace,
   spaceInboxItems,
 } from "./inbox-spaces";
+import { mobileLogoAvatarActivity } from "./logo-avatar-activity";
+import { offscreenUnreads } from "./offscreen-unreads";
 
 vi.mock("./api", () => ({
   adoptDeletedSpaceFallback: vi.fn(),
@@ -40,7 +42,6 @@ const bot: MobileBot = {
   id: "bot-1",
   name: "Helper",
   preview: "",
-  title: "",
   color: "gray",
   computerMode: "team",
   notifyOnFinish: true,
@@ -54,9 +55,50 @@ const bot: MobileBot = {
   modelProvider: null,
   modelId: null,
   thinkingLevel: null,
+  autoSpeak: false,
+  fleetManagement: false,
 };
 
 describe("spaceInboxItems", () => {
+  it("updates built-in headings with the locale without translating custom names", () => {
+    const input = space({
+      isDefault: true,
+      name: "Unassigned",
+      bots: [
+        { ...bot, pinned: true },
+        { ...bot, id: "loose" },
+      ],
+      botSections: [
+        {
+          id: "custom",
+          name: "Pinned",
+          position: 0,
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+    });
+    try {
+      activateUiLocale("de");
+      expect(
+        spaceInboxItems([input])
+          .filter((item) => item.type === "heading")
+          .map((item) => [item.key, item.title]),
+      ).toEqual([
+        [`${input.id}:pinned`, "Angeheftet"],
+        [`${input.id}:section:custom`, "Pinned"],
+        [`${input.id}:unassigned`, "Nicht zugewiesen"],
+      ]);
+      activateUiLocale("en");
+      expect(
+        spaceInboxItems([input])
+          .filter((item) => item.type === "heading")
+          .map((item) => item.title),
+      ).toEqual(["Pinned", "Pinned", "Unassigned"]);
+    } finally {
+      activateUiLocale("en");
+    }
+  });
   it("keeps an empty space visible and selectable by its own id", () => {
     const empty = space();
     expect(spaceInboxItems([empty])).toEqual([
@@ -70,6 +112,14 @@ describe("spaceInboxItems", () => {
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({ type: "heading", space: personal });
     expect(canDeleteInboxSpace(personal)).toBe(false);
+    expect(inboxNeedsCreateHint(items)).toBe(true);
+  });
+
+  it("does not ask for a create hint once a space has a bot", () => {
+    expect(inboxNeedsCreateHint(spaceInboxItems([space({ isDefault: true, bots: [bot] })]))).toBe(
+      false,
+    );
+    expect(inboxNeedsCreateHint([])).toBe(false);
   });
 
   it("renders space actions once, separate from pinned and named bot sections", () => {
@@ -95,6 +145,46 @@ describe("spaceInboxItems", () => {
     ]);
   });
 
+  it("keeps empty section headings actionable only in the selected space", () => {
+    const section = {
+      id: "empty",
+      name: "Old ideas",
+      position: 0,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    };
+    const current = space({
+      bots: [
+        { ...bot, pinned: true },
+        { ...bot, id: "loose" },
+      ],
+      botSections: [section],
+    });
+    const other = space({ id: "other", botSections: [{ ...section, id: "other-section" }] });
+    const headings = spaceInboxItems([current, other], new Set(), current.id).filter(
+      (item) => item.type === "heading",
+    );
+    expect(headings.find((item) => item.title === "Old ideas")).toMatchObject({
+      sectionId: "empty",
+    });
+    expect(headings.filter((item) => item.sectionId).map((item) => item.sectionId)).toEqual([
+      "empty",
+    ]);
+    expect(
+      spaceInboxItems([current]).some((item) => item.type === "heading" && item.sectionId),
+    ).toBe(false);
+    expect(
+      spaceInboxItems([space({ isDefault: true, botSections: [section] })], new Set(), current.id),
+    ).toContainEqual({
+      type: "heading",
+      key: `${current.id}:section:empty`,
+      title: "Old ideas",
+      sectionId: "empty",
+      collapsed: false,
+      count: 0,
+    });
+  });
+
   it("keeps populated default-space chrome minimal and retains group rows", () => {
     const group = {
       id: "group-1",
@@ -109,6 +199,93 @@ describe("spaceInboxItems", () => {
     };
     const items = spaceInboxItems([space({ isDefault: true, bots: [bot], groups: [group] })]);
     expect(items.map((item) => item.type)).toEqual(["bot", "group"]);
+    expect(items[0]).toMatchObject({ type: "bot", bot });
+  });
+
+  it("lists created bots as peers in roster order, ignoring saved parent collapse state", () => {
+    const chief = { ...bot, id: "chief", parentBotId: null };
+    const created = { ...bot, id: "created", parentBotId: "chief" };
+    const peer = { ...bot, id: "peer", parentBotId: null };
+    const items = spaceInboxItems(
+      [space({ isDefault: true, bots: [created, peer, chief] })],
+      new Set(["chief"]),
+    );
+    expect(items).toEqual([
+      { type: "bot", bot: created },
+      { type: "bot", bot: peer },
+      { type: "bot", bot: chief },
+    ]);
+  });
+
+  it("collapses one section heading and counts its chats", () => {
+    const work = space({
+      bots: [
+        { ...bot, id: "pinned", pinned: true },
+        { ...bot, id: "parent", sectionId: "section-1" },
+        { ...bot, id: "child", parentBotId: "parent", sectionId: "section-1" },
+        { ...bot, id: "loose" },
+      ],
+      botSections: [
+        {
+          id: "section-1",
+          name: "Research",
+          position: 0,
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+    });
+    const rows = (collapsed: Set<string>) =>
+      spaceInboxItems([work], collapsed).map((item) =>
+        item.type === "heading"
+          ? [item.title, item.collapsed, item.count]
+          : item.type === "bot"
+            ? item.bot.id
+            : item.type,
+      );
+    expect(rows(new Set())).toEqual([
+      ["Work", undefined, undefined],
+      ["Pinned", false, 1],
+      "pinned",
+      ["Research", false, 2],
+      "parent",
+      "child",
+      ["Unassigned", false, 1],
+      "loose",
+    ]);
+    // The space heading switches spaces, so its own key never collapses it.
+    expect(
+      rows(new Set([work.id, `${work.id}:section:section-1`, `${work.id}:unassigned`])),
+    ).toEqual([
+      ["Work", undefined, undefined],
+      ["Pinned", false, 1],
+      "pinned",
+      ["Research", true, 2],
+      ["Unassigned", true, 1],
+    ]);
+    expect(rows(new Set([`${work.id}:pinned`]))).toEqual([
+      ["Work", undefined, undefined],
+      ["Pinned", true, 1],
+      ["Research", false, 2],
+      "parent",
+      "child",
+      ["Unassigned", false, 1],
+      "loose",
+    ]);
+  });
+
+  it("does not ask for a create hint when every section with chats is collapsed", () => {
+    const personal = space({ isDefault: true, bots: [{ ...bot, pinned: true }, bot] });
+    const items = spaceInboxItems(
+      [personal],
+      new Set([`${personal.id}:pinned`, `${personal.id}:unassigned`]),
+    );
+    expect(items.every((item) => item.type === "heading")).toBe(true);
+    expect(inboxNeedsCreateHint(items)).toBe(false);
+    // A failed refresh must keep these headings, or the collapsed chats can't be reached.
+    expect(inboxHasNoChats(items)).toBe(false);
+    expect(inboxHasNoChats(spaceInboxItems([space()]))).toBe(true);
+    expect(inboxHasNoChats([])).toBe(true);
   });
 
   it("keeps empty spaces beside a populated space", () => {
@@ -124,12 +301,26 @@ describe("spaceInboxItems", () => {
     expect(canDeleteInboxSpace(space({ canDelete }))).toBe(false);
   });
 
-  it("offers deletion for an explicitly authorized empty non-default space", () => {
+  it("offers deletion for an explicitly authorized non-default space", () => {
     expect(canDeleteInboxSpace(space())).toBe(true);
   });
 
-  it("hides deletion while a space still has content", () => {
-    expect(canDeleteInboxSpace(space({ hasContent: true }))).toBe(false);
+  it("offers deletion for a space that still has bots, which go with it", () => {
+    expect(canDeleteInboxSpace(space({ hasContent: true, bots: [bot] }))).toBe(true);
+  });
+
+  it("names every bot deletion removes, not only the visible ones", () => {
+    expect(deleteSpaceTitle(space({ bots: [bot], botCount: 3 }))).toBe(
+      "Delete Work and its 3 bots?",
+    );
+    expect(deleteSpaceTitle(space({ bots: [], botCount: 1 }))).toBe("Delete Work and its bot?");
+    expect(deleteSpaceTitle(space({ bots: [bot], botCount: 0 }))).toBe("Delete Work?");
+    // Older servers send no count; fall back to the listed bots.
+    expect(deleteSpaceTitle(space({ bots: [bot] }))).toBe("Delete Work and its bot?");
+  });
+
+  it("never offers deletion for the default space", () => {
+    expect(canDeleteInboxSpace(space({ isDefault: true }))).toBe(false);
   });
 });
 
@@ -231,5 +422,115 @@ describe("removeInboxSpace", () => {
     await expect(removeInboxSpace("space-work", refresh)).rejects.toThrow("Space is not empty");
     expect(selectSpace).not.toHaveBeenCalled();
     expect(refresh).not.toHaveBeenCalled();
+  });
+});
+
+describe("inbox attention pills", () => {
+  beforeEach(() => mobileLogoAvatarActivity.clear());
+
+  it("does not count a read legacy row with a routine wait and no waiting indicator", () => {
+    const waiting = { ...bot, status: "waiting_input", sectionId: "custom" };
+    const items = spaceInboxItems([
+      space({
+        isDefault: true,
+        bots: [
+          waiting,
+          ...Array.from({ length: 20 }, (_, index) => ({ ...bot, id: `loose-${index}` })),
+        ],
+        botSections: [
+          {
+            id: "custom",
+            name: "Research",
+            position: 0,
+            createdAt: bot.updatedAt,
+            updatedAt: bot.updatedAt,
+          },
+        ],
+      }),
+    ]);
+    const signals = items.map(inboxSignal);
+    expect(signals.every((signal) => signal.unread === 0 && signal.attention === 0)).toBe(true);
+    expect(offscreenUnreads(signals, { first: 0, last: 0 })).toEqual({
+      above: undefined,
+      below: undefined,
+    });
+    expect(offscreenUnreads(signals, { first: 10, last: 20 })).toEqual({
+      above: undefined,
+      below: undefined,
+    });
+  });
+
+  it("still jumps to a genuinely waiting avatar above or below the viewport", () => {
+    const waiting = { ...bot, avatarSet: "rakazo" as const, status: "waiting_input" };
+    const signals = [
+      inboxSignal({ type: "heading", key: "custom", title: "Research" }),
+      inboxSignal({ type: "bot", bot: waiting }),
+      { unread: 0, attention: 0 },
+    ];
+    expect(offscreenUnreads(signals, { first: 0, last: 0 }).below).toEqual({
+      kind: "attention",
+      count: 1,
+      index: 1,
+    });
+    expect(offscreenUnreads(signals, { first: 2, last: 2 }).above).toEqual({
+      kind: "attention",
+      count: 1,
+      index: 1,
+    });
+    expect(inboxSignal({ type: "pinned", chats: [{ kind: "bot", bot: waiting }] })).toEqual({
+      unread: 0,
+      attention: 1,
+    });
+  });
+
+  it("honors live activity instead of a stale waiting status, including pinned chats", () => {
+    mobileLogoAvatarActivity.hydrate("test", {
+      threadId: bot.threadId,
+      botId: bot.id,
+      cursor: 1,
+      run: { id: "run", botId: bot.id, status: "running", trigger: "user" },
+    });
+    const waiting = { ...bot, avatarSet: "rakazo" as const, status: "waiting_input" };
+    expect(inboxSignal({ type: "bot", bot: waiting }).attention).toBe(0);
+    expect(inboxSignal({ type: "pinned", chats: [{ kind: "bot", bot: waiting }] }).attention).toBe(
+      0,
+    );
+    mobileLogoAvatarActivity.clear();
+  });
+
+  it("follows background suppression and live waits without changing unread counts", () => {
+    const waiting = { ...bot, avatarSet: "rakazo" as const, status: "waiting_input", unread: true };
+    const snapshot = {
+      threadId: bot.threadId,
+      botId: bot.id,
+      cursor: 1,
+      run: {
+        id: "run",
+        botId: bot.id,
+        status: "waiting_input" as const,
+        trigger: "tickets" as const,
+      },
+    };
+    mobileLogoAvatarActivity.hydrate("test", snapshot);
+    expect(inboxSignal({ type: "bot", bot: waiting })).toEqual({ unread: 1, attention: 0 });
+    mobileLogoAvatarActivity.hydrate("test", {
+      ...snapshot,
+      cursor: 2,
+      run: { ...snapshot.run, trigger: "user" },
+    });
+    expect(inboxSignal({ type: "bot", bot: { ...waiting, status: "idle" } })).toEqual({
+      unread: 1,
+      attention: 1,
+    });
+    mobileLogoAvatarActivity.clear();
+  });
+
+  it("does not count rows removed by a collapsed section or an archived avatar", () => {
+    const waiting = { ...bot, avatarSet: "rakazo" as const, pinned: true, status: "waiting_input" };
+    const items = spaceInboxItems([space({ bots: [waiting] })], new Set(["space-work:pinned"]));
+    expect(items.map(inboxSignal).every((signal) => signal.attention === 0)).toBe(true);
+    expect(
+      inboxSignal({ type: "bot", bot: { ...waiting, archivedAt: bot.updatedAt } }).attention,
+    ).toBe(0);
   });
 });

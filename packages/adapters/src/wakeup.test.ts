@@ -1,23 +1,82 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import type { BackgroundJobHandlers } from "@rakazo/adapter-kit";
+import { createLogger, createTestSink, installLogger } from "@rakazo/logging";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { InMemoryJobQueue } from "./wakeup.js";
+import { ABANDONED_SUSPEND_CLAIM_MS } from "./computer-idle.js";
+import {
+  createDeadJobPruner,
+  DEAD_JOB_RETENTION_DAYS,
+  InMemoryJobQueue,
+  JOB_DRAIN_TIMEOUT_MS,
+} from "./wakeup.js";
 
 function handlers(): BackgroundJobHandlers {
   return {
     "run.continue": vi.fn(async () => undefined),
     "routine.wakeup": vi.fn(async () => undefined),
+    "routine.retry": vi.fn(async () => undefined),
     "computer.update": vi.fn(async () => undefined),
     "computer.sleep": vi.fn(async () => undefined),
     "computer.control-expire": vi.fn(async () => undefined),
     "skill.teaching-expire": vi.fn(async () => undefined),
+    "call.expire": vi.fn(async () => undefined),
     "history.compact": vi.fn(async () => undefined),
     "messaging.deliver": vi.fn(async () => undefined),
+    "messaging.credential-cleanup": vi.fn(async () => undefined),
     "cloud_agent.poll": vi.fn(async () => undefined),
+    "purchase.poll": vi.fn(async () => undefined),
+    "push.receipt": vi.fn(async () => undefined),
   };
 }
 
 describe("InMemoryJobQueue", () => {
   afterEach(() => vi.useRealTimers());
+
+  it("reports failed descendants after draining without exposing payloads or errors", async () => {
+    const queue = new InMemoryJobQueue();
+    const target = handlers();
+    target["run.continue"] = async () => {
+      await queue.enqueue({ name: "history.compact", payload: { threadId: "fixture-thread" } });
+      await queue.enqueue({ name: "history.compact", payload: { threadId: "fixture-thread" } });
+    };
+    target["history.compact"] = async () => {
+      throw new Error("fixture-private-error");
+    };
+    await queue.start(target);
+    await queue.enqueue({ name: "run.continue", payload: { runId: "fixture-run" } });
+    await queue.awaitIdle();
+    const counts = queue.failureCounts();
+    expect(counts).toEqual([{ name: "history.compact", count: 2 }]);
+    expect(JSON.stringify(counts)).not.toContain("fixture-private");
+    counts[0]!.count = 99;
+    expect(queue.failureCounts()[0]!.count).toBe(2);
+    await queue.close();
+  });
+
+  it("waits for due descendants without closing the queue or running future work", async () => {
+    vi.useFakeTimers();
+    const queue = new InMemoryJobQueue();
+    const target = handlers();
+    target["run.continue"] = vi.fn(async () => {
+      await queue.enqueue({ name: "history.compact", payload: { threadId: "thread-1" } });
+    });
+    await queue.start(target);
+    await queue.enqueue({ name: "run.continue", payload: { runId: "run-1" } });
+    await queue.enqueue({
+      name: "computer.sleep",
+      payload: { computerId: "future" },
+      availableAt: new Date(Date.now() + 1_000),
+    });
+    await queue.awaitIdle();
+    expect(target["run.continue"]).toHaveBeenCalledTimes(1);
+    expect(target["history.compact"]).toHaveBeenCalledTimes(1);
+    expect(target["computer.sleep"]).not.toHaveBeenCalled();
+    await queue.enqueue({ name: "run.continue", payload: { runId: "run-2" } });
+    await queue.awaitIdle();
+    expect(target["run.continue"]).toHaveBeenCalledTimes(2);
+    await queue.close();
+  });
 
   it("delivers delayed jobs", async () => {
     vi.useFakeTimers();
@@ -67,6 +126,121 @@ describe("InMemoryJobQueue", () => {
     await queue.cancel("computer.sleep:2");
     await vi.advanceTimersByTimeAsync(1_000);
     expect(target["computer.sleep"]).toHaveBeenCalledTimes(1);
+    await queue.close();
+  });
+
+  it("leaves a keyed job in place when asked to keep the existing one", async () => {
+    vi.useFakeTimers();
+    const queue = new InMemoryJobQueue();
+    const target = handlers();
+    await queue.start(target);
+    await queue.enqueue({
+      name: "run.continue",
+      payload: { runId: "backed-off" },
+      availableAt: new Date(Date.now() + 5_000),
+      replaceKey: "run:run-1",
+    });
+    await queue.enqueue({
+      name: "run.continue",
+      payload: { runId: "pulled-forward" },
+      replaceKey: "run:run-1",
+      keepExisting: true,
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(target["run.continue"]).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(target["run.continue"]).toHaveBeenCalledTimes(1);
+    expect(target["run.continue"]).toHaveBeenCalledWith({ runId: "backed-off" });
+    await queue.close();
+  });
+
+  it("keeps attempts and run_at when the keyed job is still in backoff", async () => {
+    vi.useFakeTimers();
+    const queue = new InMemoryJobQueue();
+    const target = handlers();
+    await queue.start(target);
+    const runAt = new Date(Date.now() + 5_000);
+    await queue.enqueue({
+      name: "run.continue",
+      payload: { runId: "backed-off" },
+      availableAt: runAt,
+      replaceKey: "run:run-1",
+      maxAttempts: 3,
+    });
+    queue.recordFailedAttempt("run:run-1");
+    await queue.enqueue({
+      name: "run.continue",
+      payload: { runId: "pulled-forward" },
+      availableAt: new Date(Date.now() + 1_000),
+      replaceKey: "run:run-1",
+      keepExisting: true,
+    });
+    expect(queue.keyedJob("run:run-1")).toEqual({
+      attempts: 1,
+      maxAttempts: 3,
+      availableAt: runAt,
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(target["run.continue"]).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(target["run.continue"]).toHaveBeenCalledTimes(1);
+    expect(target["run.continue"]).toHaveBeenCalledWith({ runId: "backed-off" });
+    await queue.close();
+  });
+
+  it("re-enqueues an exhausted keyed job with fresh attempts", async () => {
+    vi.useFakeTimers();
+    const queue = new InMemoryJobQueue();
+    const target = handlers();
+    await queue.start(target);
+    await queue.enqueue({
+      name: "run.continue",
+      payload: { runId: "exhausted" },
+      availableAt: new Date(Date.now() + 60_000),
+      replaceKey: "run:run-1",
+      maxAttempts: 1,
+    });
+    queue.recordFailedAttempt("run:run-1");
+    const revivedAt = new Date(Date.now() + 1_000);
+    await queue.enqueue({
+      name: "run.continue",
+      payload: { runId: "revived" },
+      availableAt: revivedAt,
+      replaceKey: "run:run-1",
+      keepExisting: true,
+    });
+    expect(queue.keyedJob("run:run-1")).toEqual({
+      attempts: 0,
+      maxAttempts: 25,
+      availableAt: revivedAt,
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(target["run.continue"]).toHaveBeenCalledTimes(1);
+    expect(target["run.continue"]).toHaveBeenCalledWith({ runId: "revived" });
+    await queue.close();
+  });
+
+  it("enqueues a keepExisting job when none is queued for that key", async () => {
+    vi.useFakeTimers();
+    const queue = new InMemoryJobQueue();
+    const target = handlers();
+    await queue.start(target);
+    const runAt = new Date(Date.now() + 1_000);
+    await queue.enqueue({
+      name: "run.continue",
+      payload: { runId: "fresh" },
+      availableAt: runAt,
+      replaceKey: "run:missing",
+      keepExisting: true,
+    });
+    expect(queue.keyedJob("run:missing")).toEqual({
+      attempts: 0,
+      maxAttempts: 25,
+      availableAt: runAt,
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(target["run.continue"]).toHaveBeenCalledTimes(1);
+    expect(target["run.continue"]).toHaveBeenCalledWith({ runId: "fresh" });
     await queue.close();
   });
 
@@ -261,4 +435,64 @@ describe("InMemoryJobQueue", () => {
       payload: { runId: "run-rollback" },
     });
   });
+});
+
+describe("createDeadJobPruner", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    installLogger(createLogger({ service: "test", level: "off", sinks: [] }));
+  });
+
+  it("deletes old exhausted jobs in batches about once an hour and logs the count", async () => {
+    const sink = createTestSink();
+    installLogger(createLogger({ service: "test", sinks: [sink] }));
+    let now = new Date("2026-01-01T00:00:00.000Z").getTime();
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({ rowCount: 1_000 })
+      .mockResolvedValueOnce({ rowCount: 3 })
+      .mockResolvedValue({ rowCount: 0 });
+    const prune = createDeadJobPruner({ query } as never);
+
+    await prune();
+    await prune();
+
+    expect(query).toHaveBeenCalledTimes(2);
+    const [sql, params] = query.mock.calls[0]!;
+    expect(params).toEqual([DEAD_JOB_RETENTION_DAYS, 1_000]);
+    // Only exhausted, unlocked rows, rechecked by the delete itself, and never retry notices.
+    expect(sql).toContain("dead.attempts >= dead.max_attempts and dead.locked_at is null");
+    expect(sql).toContain("jobs.attempts >= jobs.max_attempts and jobs.locked_at is null");
+    expect(sql).toContain("tasks.identifier <> 'routine.retry'");
+    expect(sink.events).toContainEqual(
+      expect.objectContaining({ message: "jobs.dead_pruned", "jobs.removed": 1_003 }),
+    );
+
+    now += 60 * 60 * 1000;
+    await prune();
+    expect(query).toHaveBeenCalledTimes(3);
+    expect(sink.events.filter((event) => event.message === "jobs.dead_pruned")).toHaveLength(1);
+  });
+});
+
+describe("JOB_DRAIN_TIMEOUT_MS", () => {
+  it("ends before the idle sweep would replace a sleep job that is still draining", () => {
+    expect(JOB_DRAIN_TIMEOUT_MS).toBeLessThan(ABANDONED_SUSPEND_CLAIM_MS);
+  });
+
+  // Docker kills the worker once its stop_grace_period runs out, which would leave its jobs locked.
+  it.each(["docker-compose.yml", "docker-compose.images.yml", "docker-compose.prod.yml"])(
+    "ends before %s kills a stopping worker",
+    (file) => {
+      const compose = readFileSync(
+        path.resolve(import.meta.dirname, "../../../infra/compose", file),
+        "utf8",
+      );
+      const worker = compose.slice(compose.indexOf("\n  worker:\n") + 1);
+      const block = worker.slice(0, worker.search(/\n {2}[a-z]/));
+      const minutes = Number(/\n {4}stop_grace_period: (\d+)m\n/.exec(block)?.[1]);
+      expect(minutes * 60_000).toBeGreaterThanOrEqual(JOB_DRAIN_TIMEOUT_MS + 5 * 60_000);
+    },
+  );
 });

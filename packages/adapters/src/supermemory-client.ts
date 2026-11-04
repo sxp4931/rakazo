@@ -1,6 +1,9 @@
+import type { LocalServiceConnection } from "./local-service-endpoint.js";
+import { fetchLocalService, parseServiceBaseUrl } from "./local-service-endpoint.js";
 import { readBodyCapped } from "./web-ssrf.js";
 
 const SUPERMEMORY_TIMEOUT_MS = 15_000;
+export const SUPERMEMORY_CLOUD_BASE_URL = "https://api.supermemory.ai";
 
 /** Search responses contain at most five bounded memories plus small metadata. */
 export const MAX_SUPERMEMORY_RESPONSE_BYTES = 1024 * 1024;
@@ -24,33 +27,35 @@ export type SupermemorySearchResponse =
 export type SupermemorySaveResponse = { ok: true } | { ok: false; error: string };
 export type SupermemoryProbeResponse = { ok: true } | { ok: false; error: string };
 
-export interface SupermemoryConnectionConfig {
-  baseUrl: string;
+export interface SupermemoryConnectionConfig extends LocalServiceConnection {
   apiKey: string;
 }
 
-/** Base URLs are route prefixes, never credentials or request query/fragment state. */
-export function parseSupermemoryBaseUrl(baseUrl: string): URL {
-  const url = new URL(baseUrl);
-  if (
-    (url.protocol !== "http:" && url.protocol !== "https:") ||
-    url.username ||
-    url.password ||
-    // search/hash are empty for a bare ?/#, but those delimiters still swallow appended routes.
-    url.href.includes("?") ||
-    url.href.includes("#")
-  ) {
-    throw new Error(
-      "Memory base URL must use HTTP(S) without credentials, a query, or a fragment.",
-    );
-  }
-  return url;
-}
-
 function requestUrl(baseUrl: string, path: string): string {
-  const url = parseSupermemoryBaseUrl(baseUrl);
+  const url = parseServiceBaseUrl(baseUrl);
   url.pathname = `${url.pathname.replace(/\/+$/, "")}${path}`;
   return url.href;
+}
+
+function isSupermemoryCloud(baseUrl: string): boolean {
+  try {
+    return new URL(baseUrl).origin === new URL(SUPERMEMORY_CLOUD_BASE_URL).origin;
+  } catch {
+    return false;
+  }
+}
+
+async function fetchSupermemory(
+  config: SupermemoryConnectionConfig,
+  url: string,
+  init: RequestInit,
+): Promise<Response> {
+  if (isSupermemoryCloud(config.baseUrl)) return (config.fetch ?? fetch)(url, init);
+  return fetchLocalService(config, url, init);
+}
+
+async function releaseUnreadBody(response: Response): Promise<void> {
+  await response.body?.cancel().catch(() => undefined);
 }
 
 function requestSignal(signal?: AbortSignal): AbortSignal {
@@ -105,7 +110,7 @@ export async function searchSupermemory(
 ): Promise<SupermemorySearchResponse> {
   try {
     const requestAbort = requestSignal(signal);
-    const response = await fetch(requestUrl(config.baseUrl, "/v4/search"), {
+    const response = await fetchSupermemory(config, requestUrl(config.baseUrl, "/v4/search"), {
       method: "POST",
       headers: authHeaders(config),
       body: JSON.stringify({
@@ -118,6 +123,7 @@ export async function searchSupermemory(
       signal: requestAbort,
     });
     if (!response.ok) {
+      await releaseUnreadBody(response);
       return { ok: false, error: `Supermemory search failed: ${response.status}` };
     }
     return {
@@ -190,14 +196,21 @@ export async function searchSupermemoryContainers(
   };
 }
 
-/** Deletes every memory in a container, e.g. after the conversation they summarize is cleared. */
+export const SUPERMEMORY_DELETE_FORBIDDEN_ERROR =
+  "Supermemory needs an owner or admin API key to delete memory from cleared conversations.";
+
+/**
+ * Deletes every memory in a container, e.g. after the conversation they summarize is cleared.
+ * A missing container has nothing to delete.
+ */
 export async function deleteSupermemoryContainer(
   containerTag: string,
   config: SupermemoryConnectionConfig,
   signal?: AbortSignal,
 ): Promise<SupermemorySaveResponse> {
   try {
-    const response = await fetch(
+    const response = await fetchSupermemory(
+      config,
       requestUrl(config.baseUrl, `/v3/container-tags/${encodeURIComponent(containerTag)}`),
       {
         method: "DELETE",
@@ -206,10 +219,13 @@ export async function deleteSupermemoryContainer(
         signal: requestSignal(signal),
       },
     );
-    if (!response.ok) {
+    try {
+      if (response.ok || response.status === 404) return { ok: true };
+      if (response.status === 403) return { ok: false, error: SUPERMEMORY_DELETE_FORBIDDEN_ERROR };
       return { ok: false, error: `Supermemory container delete failed: ${response.status}` };
+    } finally {
+      await releaseUnreadBody(response);
     }
-    return { ok: true };
   } catch (error) {
     return { ok: false, error: unreachableError(error) };
   }
@@ -226,17 +242,21 @@ export async function saveSupermemoryMemory(
     return { ok: false, error: "Supermemory save skipped: memory content is empty." };
   }
   try {
-    const response = await fetch(requestUrl(config.baseUrl, "/v4/memories"), {
+    const response = await fetchSupermemory(config, requestUrl(config.baseUrl, "/v4/memories"), {
       method: "POST",
       headers: authHeaders(config),
       body: JSON.stringify({ containerTag, memories: [{ content: memory, isStatic: false }] }),
       redirect: "error",
       signal: requestSignal(signal),
     });
-    if (!response.ok) {
-      return { ok: false, error: `Supermemory save failed: ${response.status}` };
+    try {
+      if (!response.ok) {
+        return { ok: false, error: `Supermemory save failed: ${response.status}` };
+      }
+      return { ok: true };
+    } finally {
+      await releaseUnreadBody(response);
     }
-    return { ok: true };
   } catch (error) {
     return { ok: false, error: unreachableError(error) };
   }
@@ -272,16 +292,24 @@ export async function probeSupermemory(
   config: SupermemoryConnectionConfig,
 ): Promise<SupermemoryProbeResponse> {
   try {
-    const response = await fetch(requestUrl(config.baseUrl, "/v3/container-tags/list"), {
-      method: "GET",
-      headers: authHeaders(config),
-      redirect: "error",
-      signal: AbortSignal.timeout(SUPERMEMORY_TIMEOUT_MS),
-    });
-    if (!response.ok) {
-      return { ok: false, error: `Supermemory rejected the connection: ${response.status}` };
+    const response = await fetchSupermemory(
+      config,
+      requestUrl(config.baseUrl, "/v3/container-tags/list"),
+      {
+        method: "GET",
+        headers: authHeaders(config),
+        redirect: "error",
+        signal: AbortSignal.timeout(SUPERMEMORY_TIMEOUT_MS),
+      },
+    );
+    try {
+      if (!response.ok) {
+        return { ok: false, error: `Supermemory rejected the connection: ${response.status}` };
+      }
+      return { ok: true };
+    } finally {
+      await releaseUnreadBody(response);
     }
-    return { ok: true };
   } catch (error) {
     return { ok: false, error: unreachableError(error) };
   }

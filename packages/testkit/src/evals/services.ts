@@ -4,7 +4,7 @@ import type {
   ConnectorEvent,
   ConnectorTool,
 } from "@rakazo/adapter-kit";
-import { ComposioEmulator } from "@rakazo/adapters";
+import { ComposioConnector, FakeComposioClient } from "@rakazo/adapters";
 import { CUSTOMER_SUPPORT_PROVIDERS, CUSTOMER_SUPPORT_TOOLS } from "./service-contract.js";
 
 export const INBOX = [
@@ -29,8 +29,29 @@ export type ServiceCall = {
   outcome: ServiceCallOutcome;
 };
 
-/** State belongs to one trial. Reads observe state; invalid actions never advance it. */
-export class EvalServices extends ComposioEmulator {
+const DIRECTORY = [
+  { slug: "GMAIL", name: "Gmail", logo: null, noAuth: false },
+  { slug: "CRM", name: "CRM", logo: null, noAuth: false },
+  { slug: "GITHUB", name: "GitHub", logo: null, noAuth: false },
+  { slug: CUSTOMER_SUPPORT_PROVIDERS.salesforce, name: "Salesforce", logo: null, noAuth: false },
+  { slug: CUSTOMER_SUPPORT_PROVIDERS.zendesk, name: "Zendesk", logo: null, noAuth: false },
+];
+
+/**
+ * State belongs to one trial. Reads observe state; invalid actions never advance it.
+ * Catalog, connections and GitHub run through the real connector over a fake Composio client.
+ */
+export class EvalServices extends ComposioConnector {
+  private readonly composio: FakeComposioClient;
+  private diagnosticChain: Array<{ cursor: string; nextCursor: string | null }> = [];
+  enableDiagnosticChain(length = 12) {
+    if (!Number.isSafeInteger(length) || length < 2 || length > 50)
+      throw new Error("Invalid diagnostic chain length");
+    this.diagnosticChain = Array.from({ length }, (_, i) => ({
+      cursor: i ? `segment-${Math.imul(i + 73, 48271) >>> 0}` : "start",
+      nextCursor: i + 1 < length ? `segment-${Math.imul(i + 74, 48271) >>> 0}` : null,
+    }));
+  }
   readonly calls: ServiceCall[] = [];
   readonly notes: Array<{ recordId: string; text: string }> = [];
   readonly records = [
@@ -38,28 +59,15 @@ export class EvalServices extends ComposioEmulator {
     { id: "customer-2", name: "Example Books", status: "lead", priority: "normal" },
   ];
   inbox = INBOX.map((row) => ({ ...row }));
+  githubReadError = false;
   uncertainWrite = false;
   private faultUsed = false;
 
   constructor() {
-    super([
-      { slug: "GMAIL", name: "Gmail", logo: null, noAuth: false },
-      { slug: "CRM", name: "CRM", logo: null, noAuth: false },
-      { slug: "GITHUB", name: "GitHub", logo: null, noAuth: false },
-      {
-        slug: CUSTOMER_SUPPORT_PROVIDERS.salesforce,
-        name: "Salesforce",
-        logo: null,
-        noAuth: false,
-      },
-      {
-        slug: CUSTOMER_SUPPORT_PROVIDERS.zendesk,
-        name: "Zendesk",
-        logo: null,
-        noAuth: false,
-      },
-    ]);
-    this.seedGithubReleases([
+    const composio = new FakeComposioClient(DIRECTORY);
+    super({ client: composio });
+    this.composio = composio;
+    composio.seedGithubReleases([
       {
         owner: "example",
         repo: "widget",
@@ -81,6 +89,14 @@ export class EvalServices extends ComposioEmulator {
     ]);
   }
 
+  seedGithubReleases(releases: Parameters<FakeComposioClient["seedGithubReleases"]>[0]): void {
+    this.composio.seedGithubReleases(releases);
+  }
+
+  listGithubReleases() {
+    return this.composio.listGithubReleases();
+  }
+
   override async discoverTools(context: AdapterContext): Promise<ConnectorTool[]> {
     const connected =
       context.connectedConnections
@@ -96,6 +112,17 @@ export class EvalServices extends ComposioEmulator {
               "Read inbox messages, with urgency and full body.",
               {},
               [],
+              true,
+            ),
+          ]
+        : []),
+      ...(connected.includes("CRM") && this.diagnosticChain.length
+        ? [
+            tool(
+              "CRM_READ_DIAGNOSTIC",
+              "Read one Aurora diagnostic segment by cursor. Begin with start, then follow nextCursor until null. Only the last segment has the verified component.",
+              { cursor: { type: "string" } },
+              ["cursor"],
               true,
             ),
           ]
@@ -173,8 +200,22 @@ export class EvalServices extends ComposioEmulator {
     context: AdapterContext,
   ): AsyncIterable<ConnectorEvent> {
     if (call.tool.startsWith("GITHUB_")) {
-      this.calls.push({ tool: call.tool, args: call.args, outcome: "read" });
-      yield* super.execute(call, context);
+      const entry: ServiceCall = {
+        tool: call.tool,
+        args: structuredClone(call.args),
+        outcome: "rejected",
+      };
+      this.calls.push(entry);
+      if (this.githubReadError)
+        throw new Error("Release service unavailable; check did not complete.");
+      for await (const event of super.execute(call, context)) {
+        if (event.type === "result") {
+          const { data } = event.data as { data?: { ok?: unknown } };
+          entry.outcome = data?.ok === true ? "read" : "rejected";
+        }
+        if (event.type === "error") entry.outcome = "rejected";
+        yield event;
+      }
       return;
     }
     const entry: ServiceCall = {
@@ -183,6 +224,25 @@ export class EvalServices extends ComposioEmulator {
       outcome: "rejected",
     };
     this.calls.push(entry);
+    if (call.tool === "CRM_READ_DIAGNOSTIC") {
+      const index = this.diagnosticChain.findIndex(
+        (segment) => segment.cursor === call.args.cursor,
+      );
+      if (index < 0) throw new Error("Unknown diagnostic cursor");
+      const segment = this.diagnosticChain[index]!;
+      entry.outcome = "read";
+      yield {
+        type: "result",
+        data: {
+          segment: index + 1,
+          nextCursor: segment.nextCursor,
+          diagnostic: segment.nextCursor
+            ? "Synthetic detailed observation. ".repeat(800)
+            : "Verified Aurora component: ledger-indexer. Approval pending; no deployment.",
+        },
+      };
+      return;
+    }
     if (call.tool === "GMAIL_LIST_MESSAGES") {
       entry.outcome = "read";
       yield { type: "result", data: { messages: structuredClone(this.inbox) } };

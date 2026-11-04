@@ -1,28 +1,28 @@
 export const KO_MESSAGES: Record<string, string> = {
   "Hi {name},": "{name}님, 안녕하세요.",
   "Hi there,": "안녕하세요.",
-  "Verify your Rakazo email": "Rakazo 이메일을 인증하세요",
+  "Verify your OtterBot email": "OtterBot 이메일을 인증하세요",
   "Verify email": "이메일 인증",
-  "Then return to Rakazo to sign in.": "그런 다음 Rakazo로 돌아가 로그인하세요.",
+  "Then return to OtterBot to sign in.": "그런 다음 OtterBot로 돌아가 로그인하세요.",
   "This link expires in one hour. If you did not register, ignore this email.":
     "이 링크는 1시간 후에 만료됩니다. 가입하지 않았다면 이 이메일을 무시하세요.",
-  "Your Rakazo sign-in code": "Rakazo 로그인 코드",
-  "Enter this code to sign in to Rakazo:": "Rakazo에 로그인하려면 이 코드를 입력하세요:",
+  "Your OtterBot sign-in code": "OtterBot 로그인 코드",
+  "Enter this code to sign in to OtterBot:": "OtterBot에 로그인하려면 이 코드를 입력하세요:",
   "This code expires in ten minutes. If you did not request it, ignore this email.":
     "이 코드는 10분 후에 만료됩니다. 요청하지 않았다면 이 이메일을 무시하세요.",
-  "Reset your Rakazo password": "Rakazo 비밀번호 재설정",
-  "Reset your Rakazo password:": "Rakazo 비밀번호를 재설정하세요:",
+  "Reset your OtterBot password": "OtterBot 비밀번호 재설정",
+  "Reset your OtterBot password:": "OtterBot 비밀번호를 재설정하세요:",
   "Reset password": "비밀번호 재설정",
   "This link expires in one hour. If you did not request this, you can ignore this email.":
     "이 링크는 1시간 후에 만료됩니다. 요청하지 않았다면 이 이메일을 무시해도 됩니다.",
-  "Confirm Rakazo account deletion": "Rakazo 계정 삭제 확인",
-  "Enter this code in Rakazo to delete your account:":
-    "계정을 삭제하려면 Rakazo에서 이 코드를 입력하세요:",
+  "Confirm OtterBot account deletion": "OtterBot 계정 삭제 확인",
+  "Enter this code in OtterBot to delete your account:":
+    "계정을 삭제하려면 OtterBot에서 이 코드를 입력하세요:",
   "This code expires in ten minutes. If you did not request deletion, ignore this email.":
     "이 코드는 10분 후에 만료됩니다. 삭제를 요청하지 않았다면 이 이메일을 무시하세요.",
-  "Your Rakazo confirmation code": "Rakazo 확인 코드",
-  "Enter this code in Rakazo to confirm it's you:":
-    "본인임을 확인하려면 Rakazo에서 이 코드를 입력하세요:",
+  "Your OtterBot confirmation code": "OtterBot 확인 코드",
+  "Enter this code in OtterBot to confirm it's you:":
+    "본인임을 확인하려면 OtterBot에서 이 코드를 입력하세요:",
   "Welcome to Rakazo": "Rakazo에 오신 것을 환영합니다",
   "Thanks for signing up for Rakazo.": "Rakazo에 가입해 주셔서 감사합니다.",
   "Rakazo also has apps for": "Rakazo는 다음 플랫폼용 앱도 제공합니다:",

@@ -1,6 +1,6 @@
 {
   "name": "@rakazo/desktop",
-  "productName": "Rakazo",
+  "productName": "OtterBot",
   "version": "0.6.0",
   "author": {
     "name": "Rakazo"
@@ -72,8 +72,8 @@
       "entitlements": "assets/entitlements.mac.plist",
       "entitlementsInherit": "assets/entitlements.mac.plist",
       "extendInfo": {
-        "NSMicrophoneUsageDescription": "Rakazo uses the microphone for dictation and voice calls with your bots.",
-        "NSSpeechRecognitionUsageDescription": "Rakazo turns what you say into text for dictation and voice calls with your bots."
+        "NSMicrophoneUsageDescription": "OtterBot uses the microphone for dictation and voice calls with your bots.",
+        "NSSpeechRecognitionUsageDescription": "OtterBot turns what you say into text for dictation and voice calls with your bots."
       },
       "extraResources": [
         {

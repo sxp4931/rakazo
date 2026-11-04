@@ -527,6 +527,7 @@ model Invitation {
   inviterId      String
   user           User         @relation(fields: [inviterId], references: [id], onDelete: Cascade)
 
+  @@index([inviterId])
   @@index([organizationId])
   @@index([email])
   @@map("invitation")
@@ -959,6 +960,8 @@ model Task {
   runs      Run[]
 
   @@index([spaceId, botId])
+  @@index([botId])
+  @@index([threadId])
   @@map("tasks")
 }
 
@@ -1223,6 +1226,7 @@ model Routine {
 
   @@index([active, nextRunAt])
   @@index([spaceId, botId])
+  @@index([botId])
   @@map("routines")
 }
 
@@ -1378,6 +1382,7 @@ model MemoryDocument {
 
   @@unique([spaceId, scope, botId, path])
   @@index([spaceId, userId])
+  @@index([botId])
   @@map("memory_documents")
 }
 
@@ -1586,6 +1591,7 @@ model Artifact {
 
   @@unique([spaceId, userId, clientNonce])
   @@index([spaceId, botId])
+  @@index([botId])
   @@index([groupId])
   @@index([rootArtifactId])
   // artifacts_family_version_key is raw SQL: Prisma cannot express COALESCE indexes.
@@ -1675,6 +1681,8 @@ model UsageRecord {
   createdAt          DateTime @default(now())
 
   @@index([spaceId, userId, createdAt])
+  @@index([botId])
+  @@index([runId])
   @@map("usage_records")
 }
 

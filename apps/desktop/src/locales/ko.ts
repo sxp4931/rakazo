@@ -3,7 +3,6 @@ export const KO_MESSAGES: Record<string, string> = {
   "Check for Updates…": "업데이트 확인…",
   "Computer Access…": "컴퓨터 접근…",
   "Revoke Local Computer Access": "로컬 컴퓨터 접근 취소",
-  "Change Rakazo Server…": "Rakazo 서버 변경…",
   "Stop Local Stack": "로컬 스택 중지",
   "Hide {name}": "{name} 가리기",
   "Hide Others": "기타 가리기",
@@ -51,8 +50,6 @@ export const KO_MESSAGES: Record<string, string> = {
   "Move Rakazo to Applications to install updates.":
     "업데이트를 설치하려면 Rakazo를 응용 프로그램 폴더로 옮기세요.",
   "Free up disk space to install updates.": "업데이트를 설치하려면 디스크 공간을 확보하세요.",
-  "This update could not be verified. Reinstall Rakazo from a trusted download.":
-    "이 업데이트를 확인할 수 없습니다. 신뢰할 수 있는 다운로드에서 Rakazo를 다시 설치하세요.",
   "The update could not be completed. Try again later.":
     "업데이트를 완료할 수 없습니다. 나중에 다시 시도하세요.",
   "Could not reach the update server.": "업데이트 서버에 연결할 수 없습니다.",
@@ -71,12 +68,6 @@ export const KO_MESSAGES: Record<string, string> = {
     "이미 로그인 시도가 진행 중입니다. 취소한 후 다시 시도하세요.",
   "Could not open browser sign-in. Close other sign-in attempts and retry.":
     "브라우저 로그인을 열 수 없습니다. 다른 로그인 시도를 닫고 다시 시도하세요.",
-  "Sign-in callback rejected. Return to Rakazo to retry.":
-    "로그인 응답이 거부되었습니다. Rakazo로 돌아가 다시 시도하세요.",
-  "You can close this tab and return to Rakazo.": "이 탭을 닫고 Rakazo로 돌아가세요.",
-  "Set up Rakazo": "Rakazo 설정",
-  "Quit Rakazo": "Rakazo 종료",
-  "Welcome to Rakazo": "Rakazo에 오신 것을 환영합니다",
   "Choose which server this app should use.": "이 앱에서 사용할 서버를 선택하세요.",
   Instance: "인스턴스",
   "This computer": "이 컴퓨터",
@@ -91,14 +82,10 @@ export const KO_MESSAGES: Record<string, string> = {
   "Check again": "다시 확인",
   Retry: "다시 시도",
   "Getting ready…": "준비 중…",
-  "Downloading Rakazo…": "Rakazo 다운로드 중…",
-  "Starting Rakazo…": "Rakazo 시작 중…",
   "Almost ready…": "거의 완료…",
-  "Rakazo is ready.": "Rakazo가 준비되었습니다.",
   "{size} downloaded": "{size} 다운로드됨",
   "Connecting…": "연결 중…",
   "Checking…": "확인 중…",
-  "Rakazo answered at {url}.": "Rakazo가 {url}에서 응답했습니다.",
   "Enter a server address first.": "먼저 서버 주소를 입력하세요.",
   "Could not save that address.": "해당 주소를 저장할 수 없습니다.",
   "Could not save that address. Try again.": "해당 주소를 저장할 수 없습니다. 다시 시도하세요.",
@@ -107,17 +94,11 @@ export const KO_MESSAGES: Record<string, string> = {
   "Could not start the local stack. Try again.": "로컬 스택을 시작할 수 없습니다. 다시 시도하세요.",
   "Could not run the connection check. Try again.": "연결을 확인할 수 없습니다. 다시 시도하세요.",
   "Setup bridge unavailable.": "설정 브리지를 사용할 수 없습니다.",
-  "Setup could not start. Quit Rakazo and try again.":
-    "설정을 시작할 수 없습니다. Rakazo를 종료하고 다시 시도하세요.",
   "Enter a server address.": "서버 주소를 입력하세요.",
   "Enter a valid http:// or https:// address.": "올바른 http:// 또는 https:// 주소를 입력하세요.",
   "Enter a valid server address. Public servers require HTTPS; a new local instance must use localhost.":
     "올바른 서버 주소를 입력하세요. 공개 서버는 HTTPS가 필요하며, 새 로컬 인스턴스는 localhost를 사용해야 합니다.",
   "Invalid custom headers": "사용자 지정 헤더가 올바르지 않습니다",
-  "That address redirects elsewhere. Enter the final Rakazo server address.":
-    "해당 주소는 다른 곳으로 리디렉션됩니다. 최종 Rakazo 서버 주소를 입력하세요.",
-  "That address did not respond like a Rakazo server.":
-    "해당 주소가 Rakazo 서버처럼 응답하지 않았습니다.",
   "The server answered with HTTP {status}.": "서버가 HTTP {status}(으)로 응답했습니다.",
   "Timed out reaching that address.": "해당 주소에 연결하는 중 시간이 초과되었습니다.",
   "Nothing is listening at that address yet.": "해당 주소에서 아직 수신 대기 중인 것이 없습니다.",
@@ -142,8 +123,6 @@ export const KO_MESSAGES: Record<string, string> = {
     "설정을 저장할 수 없습니다. 이전 인스턴스를 복원했습니다.",
   "Connected, but could not save setup for the next launch. Try Continue again.":
     "연결되었지만 다음 실행을 위해 설정을 저장할 수 없습니다. 계속을 다시 클릭하세요.",
-  "The app-managed Rakazo services are not ready. Retry setup.":
-    "앱에서 관리하는 Rakazo 서비스가 준비되지 않았습니다. 설정을 다시 시도하세요.",
   "Docker is not installed on this computer.": "이 컴퓨터에 Docker가 설치되어 있지 않습니다.",
   "Docker is installed, but Docker Compose is missing. Install Docker Desktop or the docker-compose-plugin.":
     "Docker는 설치되어 있지만 Docker Compose가 없습니다. Docker Desktop 또는 docker-compose-plugin을 설치하세요.",
@@ -167,10 +146,6 @@ export const KO_MESSAGES: Record<string, string> = {
     "Docker가 응답하지 않습니다. Docker를 시작한 후 다시 시도하세요.",
   "Docker Compose is missing. Install Docker Desktop or the docker-compose-plugin, then retry.":
     "Docker Compose가 없습니다. Docker Desktop 또는 docker-compose-plugin을 설치한 후 다시 시도하세요.",
-  "Downloading Rakazo images failed. Check the output below, then retry.":
-    "Rakazo 이미지를 다운로드하지 못했습니다. 아래 출력을 확인한 후 다시 시도하세요.",
-  "Rakazo services did not start. Check the output below, then retry.":
-    "Rakazo 서비스가 시작되지 않았습니다. 아래 출력을 확인한 후 다시 시도하세요.",
   "The stack started but the web app did not answer. Retry, and check the output below.":
     "스택은 시작되었지만 웹 앱이 응답하지 않았습니다. 다시 시도하고 아래 출력을 확인하세요.",
   "Could not prepare the local stack. Retry.": "로컬 스택을 준비할 수 없습니다. 다시 시도하세요.",
@@ -187,4 +162,30 @@ export const KO_MESSAGES: Record<string, string> = {
   "Toggle Sidebar": "사이드바 전환",
   "Search…": "검색…",
   "The window closed before the app loaded.": "앱을 불러오기 전에 윈도우가 닫혔습니다.",
+  "Change OtterBot Server…": "OtterBot 서버 변경…",
+  "This update could not be verified. Reinstall OtterBot from a trusted download.":
+    "이 업데이트를 확인할 수 없습니다. 신뢰할 수 있는 다운로드에서 OtterBot를 다시 설치하세요.",
+  "Sign-in callback rejected. Return to OtterBot to retry.":
+    "로그인 응답이 거부되었습니다. OtterBot로 돌아가 다시 시도하세요.",
+  "You can close this tab and return to OtterBot.": "이 탭을 닫고 OtterBot로 돌아가세요.",
+  "Set up OtterBot": "OtterBot 설정",
+  "Quit OtterBot": "OtterBot 종료",
+  "Welcome to OtterBot": "OtterBot에 오신 것을 환영합니다",
+  "Downloading OtterBot…": "OtterBot 다운로드 중…",
+  "Starting OtterBot…": "OtterBot 시작 중…",
+  "OtterBot is ready.": "OtterBot가 준비되었습니다.",
+  "OtterBot answered at {url}.": "OtterBot가 {url}에서 응답했습니다.",
+  "Setup could not start. Quit OtterBot and try again.":
+    "설정을 시작할 수 없습니다. OtterBot를 종료하고 다시 시도하세요.",
+  "That address redirects elsewhere. Enter the final OtterBot server address.":
+    "해당 주소는 다른 곳으로 리디렉션됩니다. 최종 OtterBot 서버 주소를 입력하세요.",
+  "That address did not respond like an OtterBot server.":
+    "해당 주소가 OtterBot 서버처럼 응답하지 않았습니다.",
+  "The app-managed OtterBot services are not ready. Retry setup.":
+    "앱에서 관리하는 OtterBot 서비스가 준비되지 않았습니다. 설정을 다시 시도하세요.",
+  "Downloading OtterBot images failed. Check the output below, then retry.":
+    "OtterBot 이미지를 다운로드하지 못했습니다. 아래 출력을 확인한 후 다시 시도하세요.",
+  "OtterBot services did not start. Check the output below, then retry.":
+    "OtterBot 서비스가 시작되지 않았습니다. 아래 출력을 확인한 후 다시 시도하세요.",
+  OtterBot: "OtterBot",
 };

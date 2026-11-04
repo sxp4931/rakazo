@@ -1,28 +1,29 @@
 export const DE_MESSAGES: Record<string, string> = {
   "Hi {name},": "Hallo {name},",
   "Hi there,": "Hallo,",
-  "Verify your Rakazo email": "Bestätige deine E-Mail-Adresse für Rakazo",
+  "Verify your OtterBot email": "Bestätige deine E-Mail-Adresse für OtterBot",
   "Verify email": "E-Mail-Adresse bestätigen",
-  "Then return to Rakazo to sign in.": "Kehre danach zu Rakazo zurück, um dich anzumelden.",
+  "Then return to OtterBot to sign in.": "Kehre danach zu OtterBot zurück, um dich anzumelden.",
   "This link expires in one hour. If you did not register, ignore this email.":
     "Dieser Link läuft in einer Stunde ab. Wenn du dich nicht registriert hast, ignoriere diese E-Mail.",
-  "Your Rakazo sign-in code": "Dein Anmeldecode für Rakazo",
-  "Enter this code to sign in to Rakazo:": "Gib diesen Code ein, um dich bei Rakazo anzumelden:",
+  "Your OtterBot sign-in code": "Dein Anmeldecode für OtterBot",
+  "Enter this code to sign in to OtterBot:":
+    "Gib diesen Code ein, um dich bei OtterBot anzumelden:",
   "This code expires in ten minutes. If you did not request it, ignore this email.":
     "Dieser Code läuft in zehn Minuten ab. Wenn du ihn nicht angefordert hast, ignoriere diese E-Mail.",
-  "Reset your Rakazo password": "Setze dein Rakazo-Passwort zurück",
-  "Reset your Rakazo password:": "Setze dein Rakazo-Passwort zurück:",
+  "Reset your OtterBot password": "Setze dein OtterBot-Passwort zurück",
+  "Reset your OtterBot password:": "Setze dein OtterBot-Passwort zurück:",
   "Reset password": "Passwort zurücksetzen",
   "This link expires in one hour. If you did not request this, you can ignore this email.":
     "Dieser Link läuft in einer Stunde ab. Wenn du das nicht angefordert hast, kannst du diese E-Mail ignorieren.",
-  "Confirm Rakazo account deletion": "Bestätige die Löschung deines Rakazo-Kontos",
-  "Enter this code in Rakazo to delete your account:":
-    "Gib diesen Code in Rakazo ein, um dein Konto zu löschen:",
+  "Confirm OtterBot account deletion": "Bestätige die Löschung deines OtterBot-Kontos",
+  "Enter this code in OtterBot to delete your account:":
+    "Gib diesen Code in OtterBot ein, um dein Konto zu löschen:",
   "This code expires in ten minutes. If you did not request deletion, ignore this email.":
     "Dieser Code läuft in zehn Minuten ab. Wenn du die Löschung nicht angefordert hast, ignoriere diese E-Mail.",
-  "Your Rakazo confirmation code": "Dein Bestätigungscode für Rakazo",
-  "Enter this code in Rakazo to confirm it's you:":
-    "Gib diesen Code in Rakazo ein, um zu bestätigen, dass du es bist:",
+  "Your OtterBot confirmation code": "Dein Bestätigungscode für OtterBot",
+  "Enter this code in OtterBot to confirm it's you:":
+    "Gib diesen Code in OtterBot ein, um zu bestätigen, dass du es bist:",
   "Welcome to Rakazo": "Willkommen bei Rakazo",
   "Thanks for signing up for Rakazo.": "Danke, dass du dich bei Rakazo registriert hast.",
   "Rakazo also has apps for": "Rakazo gibt es auch als App für",

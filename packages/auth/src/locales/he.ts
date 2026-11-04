@@ -1,28 +1,28 @@
 export const HE_MESSAGES: Record<string, string> = {
   "Hi {name},": "היי {name},",
   "Hi there,": "היי,",
-  "Verify your Rakazo email": "אימות כתובת האימייל שלך ב-Rakazo",
+  "Verify your OtterBot email": "אימות כתובת האימייל שלך ב-OtterBot",
   "Verify email": "אימות האימייל",
-  "Then return to Rakazo to sign in.": "אחר כך אפשר לחזור ל-Rakazo כדי להתחבר.",
+  "Then return to OtterBot to sign in.": "אחר כך אפשר לחזור ל-OtterBot כדי להתחבר.",
   "This link expires in one hour. If you did not register, ignore this email.":
     "הקישור יפוג בעוד שעה. אם לא נרשמת, אפשר להתעלם מהאימייל הזה.",
-  "Your Rakazo sign-in code": "קוד ההתחברות שלך ל-Rakazo",
-  "Enter this code to sign in to Rakazo:": "יש להזין את הקוד הזה כדי להתחבר ל-Rakazo:",
+  "Your OtterBot sign-in code": "קוד ההתחברות שלך ל-OtterBot",
+  "Enter this code to sign in to OtterBot:": "יש להזין את הקוד הזה כדי להתחבר ל-OtterBot:",
   "This code expires in ten minutes. If you did not request it, ignore this email.":
     "הקוד יפוג בעוד עשר דקות. אם לא ביקשת אותו, אפשר להתעלם מהאימייל הזה.",
-  "Reset your Rakazo password": "איפוס הסיסמה שלך ב-Rakazo",
-  "Reset your Rakazo password:": "איפוס הסיסמה שלך ב-Rakazo:",
+  "Reset your OtterBot password": "איפוס הסיסמה שלך ב-OtterBot",
+  "Reset your OtterBot password:": "איפוס הסיסמה שלך ב-OtterBot:",
   "Reset password": "איפוס סיסמה",
   "This link expires in one hour. If you did not request this, you can ignore this email.":
     "הקישור יפוג בעוד שעה. אם לא ביקשת זאת, אפשר להתעלם מהאימייל הזה.",
-  "Confirm Rakazo account deletion": "אישור מחיקת החשבון שלך ב-Rakazo",
-  "Enter this code in Rakazo to delete your account:":
-    "יש להזין את הקוד הזה ב-Rakazo כדי למחוק את החשבון שלך:",
+  "Confirm OtterBot account deletion": "אישור מחיקת החשבון שלך ב-OtterBot",
+  "Enter this code in OtterBot to delete your account:":
+    "יש להזין את הקוד הזה ב-OtterBot כדי למחוק את החשבון שלך:",
   "This code expires in ten minutes. If you did not request deletion, ignore this email.":
     "הקוד יפוג בעוד עשר דקות. אם לא ביקשת למחוק את החשבון, אפשר להתעלם מהאימייל הזה.",
-  "Your Rakazo confirmation code": "קוד האישור שלך ל-Rakazo",
-  "Enter this code in Rakazo to confirm it's you:":
-    "יש להזין את הקוד הזה ב-Rakazo כדי לאשר שזה באמת את/ה:",
+  "Your OtterBot confirmation code": "קוד האישור שלך ל-OtterBot",
+  "Enter this code in OtterBot to confirm it's you:":
+    "יש להזין את הקוד הזה ב-OtterBot כדי לאשר שזה באמת את/ה:",
   "Welcome to Rakazo": "ברוכים הבאים ל-Rakazo",
   "Thanks for signing up for Rakazo.": "תודה שנרשמת ל-Rakazo.",
   "Rakazo also has apps for": "ל-Rakazo יש גם אפליקציות עבור",

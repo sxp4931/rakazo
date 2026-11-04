@@ -1,6 +1,6 @@
 # Changelog
 
-Notable product changes in Rakazo. See GitHub Releases for tagged builds.
+Notable product changes in OtterBot. See GitHub Releases for tagged builds.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
@@ -118,6 +118,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - The API and worker load optional vendor SDKs only when they are configured, not on every boot.
 - Android download links on the website, in the app and in the welcome email now go to Google Play instead of an APK.
 - Long screen tasks carry at most nine screenshots per model call instead of seventeen, so each step is faster. A screenshot removed this way keeps its text result.
+- Structured pino logging helper in `@rakazo/core` (`createLogger`). API/worker use `@rakazo/logging`. `LOG_LEVEL` still applies.
+- Rate limiting on the API: strict limits on sign-in and sign-up attempts, moderate limits on auth traffic, and a generous global backstop, returning `429` with `Retry-After`.
+- Database indexes for hot foreign keys (`tasks`, `runs`, `routines`, `memory_documents`, `artifacts`, `usage_records`, `invitation`). Migration `0009_fk_indexes`.
+- Voice mode: spoken replies, hold-to-talk dictation, and half-duplex calls with ElevenLabs, OpenAI, Cartesia, or Fish Audio.
+- Desktop owners using Docker can opt into running bot shell commands directly on their computer. This grants access under the owner's OS account; see [computer providers](docs/self-host.md#choosing-a-computer-provider).
+- GitHub Copilot and SuperGrok / X Premium sign-in for model access.
+- Spawn peer bots (each with its own thread and computer) and short-lived in-thread subagents.
+- ChatGPT Plus or Pro sign-in for model access.
+- Mobile: point the app at a self-hosted API origin, a native iOS inbox, and take control of the live desktop.
+- Provider-neutral integrations: managed apps through Composio or Pipedream Connect, plus encrypted user-installed Treg, HTTPS MCP, and OpenAPI tool sources on web and mobile.
+- Disconnect connected Composio plugins.
+- Routines in plain language instead of raw cron.
 
 ### Removed
 

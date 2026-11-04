@@ -268,9 +268,9 @@ export default function SignIn() {
                 {resetSent || codeStep
                   ? t("Check your email")
                   : mode === "in"
-                    ? t("Sign in to Rakazo")
+                    ? t("Sign in to OtterBot")
                     : mode === "up"
-                      ? t("Sign up for Rakazo")
+                      ? t("Sign up for OtterBot")
                       : t("Reset your password")}
               </Text>
               {resetSent ? (

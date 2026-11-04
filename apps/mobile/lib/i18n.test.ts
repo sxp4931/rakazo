@@ -62,7 +62,7 @@ describe("mobile i18n", () => {
     const { resetI18nForTests, t } = await import("./i18n");
     resetI18nForTests("zh-CN");
     expect(t("Account")).toBe("账户");
-    expect(t("Sign in to Rakazo")).toBe("登录 Rakazo");
+    expect(t("Sign in to OtterBot")).toBe("登录 OtterBot");
     expect(t("New bot")).toBe("新建 Bot");
     expect(t("{runs} runs, {tokens} tokens", { runs: 3, tokens: 12 })).toBe(
       "3 次运行，12 个 token",
@@ -71,7 +71,7 @@ describe("mobile i18n", () => {
 
     resetI18nForTests("ru");
     expect(t("Account")).toBe("Аккаунт");
-    expect(t("Sign in to Rakazo")).toBe("Войти в Rakazo");
+    expect(t("Sign in to OtterBot")).toBe("Войти в OtterBot");
     expect(t("New bot")).toBe("Новый бот");
     expect(t("{runs} runs, {tokens} tokens", { runs: 3, tokens: 12 })).toBe(
       "Запусков: 3, токенов: 12",

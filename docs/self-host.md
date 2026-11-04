@@ -1,4 +1,4 @@
-# Self-hosting Rakazo
+# Self-hosting OtterBot
 
 Run the API, worker, web app, database and bot computers on a machine you control.
 
@@ -143,4 +143,4 @@ paths or message content; servers, bots and runs appear only as short hashes.
 
 When a user asks their bot to report a bug or send feedback, the report is saved on your server
 in the `feedback_reports` table, with the chat, bot and run it came from. Nothing is sent to the
-Rakazo project.
+OtterBot project.

@@ -152,7 +152,7 @@ export interface PiSessionRecorder {
 /**
  * Persists the low-level Agent transcript using Pi's format-4 JSONL records.
  * Pi 1.0 removed its session writer; keep the recording subset local.
- * This is deliberately a recorder only: Rakazo remains responsible for running
+ * This is deliberately a recorder only: OtterBot remains responsible for running
  * the agent and for its product history in Postgres.
  */
 export class PiJsonlSessionRecorder implements PiSessionRecorder {

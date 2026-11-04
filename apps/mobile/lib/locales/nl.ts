@@ -1354,6 +1354,11 @@ export const NL_MESSAGES: Record<string, string> = {
   "Could not load": "Kon niet laden",
   "Enable mobile notifications to receive delay alerts.":
     "Schakel mobiele meldingen in om vertragingsmeldingen te ontvangen.",
+  "Paste the OpenAI-compatible address from your server. OtterBot adds /v1 if needed.":
+    "Plak het OpenAI-compatibele adres van je server. OtterBot voegt zo nodig /v1 toe.",
+  "Sign in to OtterBot": "Aanmelden bij OtterBot",
+  "Sign up for OtterBot": "Registreer je voor OtterBot",
+  "That URL did not look like an OtterBot server": "Die URL leek geen OtterBot-server",
 };
 
 export const PEER_MESSAGE_FORMS: Partial<Record<Intl.LDMLPluralRule, string>> = {

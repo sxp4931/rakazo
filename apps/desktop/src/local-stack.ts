@@ -301,8 +301,8 @@ export function stackFailureMessage(
       );
     case "other":
       return phase === "pulling"
-        ? t("Downloading Rakazo images failed. Check the output below, then retry.")
-        : t("Rakazo services did not start. Check the output below, then retry.");
+        ? t("Downloading OtterBot images failed. Check the output below, then retry.")
+        : t("OtterBot services did not start. Check the output below, then retry.");
   }
 }
 

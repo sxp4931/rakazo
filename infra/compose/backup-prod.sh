@@ -236,7 +236,7 @@ while read -r dir; do
   fi
 done < <(snapshots)
 
-echo "Verified Rakazo backup written to ${SNAPSHOT_DIR}"
+echo "Verified OtterBot backup written to ${SNAPSHOT_DIR}"
 
 # Optional off-site copy through any rclone remote (S3-compatible storage, SFTP, ...), configured
 # with rclone's own settings. A failure here keeps the verified local snapshot but fails the run.

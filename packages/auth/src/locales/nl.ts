@@ -1,28 +1,28 @@
 export const NL_MESSAGES: Record<string, string> = {
   "Hi {name},": "Hoi {name},",
   "Hi there,": "Hoi,",
-  "Verify your Rakazo email": "Bevestig je e-mailadres voor Rakazo",
+  "Verify your OtterBot email": "Bevestig je e-mailadres voor OtterBot",
   "Verify email": "E-mailadres bevestigen",
-  "Then return to Rakazo to sign in.": "Ga daarna terug naar Rakazo om in te loggen.",
+  "Then return to OtterBot to sign in.": "Ga daarna terug naar OtterBot om in te loggen.",
   "This link expires in one hour. If you did not register, ignore this email.":
     "Deze link verloopt over een uur. Heb je je niet geregistreerd? Negeer dan deze e-mail.",
-  "Your Rakazo sign-in code": "Je inlogcode voor Rakazo",
-  "Enter this code to sign in to Rakazo:": "Voer deze code in om in te loggen bij Rakazo:",
+  "Your OtterBot sign-in code": "Je inlogcode voor OtterBot",
+  "Enter this code to sign in to OtterBot:": "Voer deze code in om in te loggen bij OtterBot:",
   "This code expires in ten minutes. If you did not request it, ignore this email.":
     "Deze code verloopt over tien minuten. Heb je hem niet aangevraagd? Negeer dan deze e-mail.",
-  "Reset your Rakazo password": "Stel je Rakazo-wachtwoord opnieuw in",
-  "Reset your Rakazo password:": "Stel je Rakazo-wachtwoord opnieuw in:",
+  "Reset your OtterBot password": "Stel je OtterBot-wachtwoord opnieuw in",
+  "Reset your OtterBot password:": "Stel je OtterBot-wachtwoord opnieuw in:",
   "Reset password": "Wachtwoord opnieuw instellen",
   "This link expires in one hour. If you did not request this, you can ignore this email.":
     "Deze link verloopt over een uur. Heb je dit niet aangevraagd? Dan kun je deze e-mail negeren.",
-  "Confirm Rakazo account deletion": "Bevestig het verwijderen van je Rakazo-account",
-  "Enter this code in Rakazo to delete your account:":
-    "Voer deze code in Rakazo in om je account te verwijderen:",
+  "Confirm OtterBot account deletion": "Bevestig het verwijderen van je OtterBot-account",
+  "Enter this code in OtterBot to delete your account:":
+    "Voer deze code in OtterBot in om je account te verwijderen:",
   "This code expires in ten minutes. If you did not request deletion, ignore this email.":
     "Deze code verloopt over tien minuten. Heb je niet gevraagd om je account te verwijderen? Negeer dan deze e-mail.",
-  "Your Rakazo confirmation code": "Je bevestigingscode voor Rakazo",
-  "Enter this code in Rakazo to confirm it's you:":
-    "Voer deze code in Rakazo in om te bevestigen dat jij het bent:",
+  "Your OtterBot confirmation code": "Je bevestigingscode voor OtterBot",
+  "Enter this code in OtterBot to confirm it's you:":
+    "Voer deze code in OtterBot in om te bevestigen dat jij het bent:",
   "Welcome to Rakazo": "Welkom bij Rakazo",
   "Thanks for signing up for Rakazo.": "Bedankt voor je aanmelding bij Rakazo.",
   "Rakazo also has apps for": "Rakazo heeft ook apps voor",

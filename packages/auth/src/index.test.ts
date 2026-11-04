@@ -6,6 +6,7 @@ import {
   createAuth,
   isBlockedAuthPath,
   passwordResetEmail,
+  resolveSignupPolicy,
   signInCodeEmail,
 } from "./index.js";
 
@@ -47,6 +48,7 @@ describe("auth policy", () => {
     const log = vi.fn();
     const auth = createAuth(
       {
+        deploymentSettings: { findUnique: vi.fn().mockResolvedValue(null) },
         user: {
           findFirst: vi.fn().mockRejectedValue(error),
           findMany: vi.fn().mockRejectedValue(error),
@@ -126,6 +128,41 @@ describe("authRateLimitOptions", () => {
   });
 });
 
+describe("resolveSignupPolicy", () => {
+  const env = { signupsEnabled: "true", signupAllowlist: "env@example.test" };
+
+  it("uses initialized deployment settings instead of the environment snapshot", async () => {
+    const findUnique = vi.fn().mockResolvedValue({
+      signupsEnabled: false,
+      signupAllowlist: "owner@example.test, @company.test",
+      signupPolicyInitialized: true,
+    });
+
+    await expect(
+      resolveSignupPolicy({ deploymentSettings: { findUnique } } as never, env),
+    ).resolves.toEqual({
+      enabled: false,
+      allowlist: ["owner@example.test", "@company.test"],
+    });
+    expect(findUnique).toHaveBeenCalledWith({
+      where: { id: "default" },
+      select: { signupsEnabled: true, signupAllowlist: true, signupPolicyInitialized: true },
+    });
+  });
+
+  it("falls back to environment settings until deployment policy is initialized", async () => {
+    const findUnique = vi.fn().mockResolvedValue({
+      signupsEnabled: false,
+      signupAllowlist: "old@example.test",
+      signupPolicyInitialized: false,
+    });
+
+    await expect(
+      resolveSignupPolicy({ deploymentSettings: { findUnique } } as never, env),
+    ).resolves.toEqual({ enabled: true, allowlist: ["env@example.test"] });
+  });
+});
+
 describe("buildTrustedOrigins", () => {
   it("adds the localhost twin for a 127.0.0.1 web origin", () => {
     expect(
@@ -160,7 +197,7 @@ describe("passwordResetEmail", () => {
 
     expect(message).toMatchObject({
       to: "ada@example.test",
-      subject: "Reset your Rakazo password",
+      subject: "Reset your OtterBot password",
     });
     expect(message.text).toContain("https://rakazo.test/reset-password?token=secret&next=1");
     expect(message.html).toContain("&lt;Ada &amp; &quot;team&quot;&gt;");
@@ -172,7 +209,10 @@ describe("passwordResetEmail", () => {
 describe("signInCodeEmail", () => {
   it("puts the code in plain text and HTML without links", async () => {
     const message = await signInCodeEmail("ada@example.test", "042517");
-    expect(message).toMatchObject({ to: "ada@example.test", subject: "Your Rakazo sign-in code" });
+    expect(message).toMatchObject({
+      to: "ada@example.test",
+      subject: "Your OtterBot sign-in code",
+    });
     expect(message.text).toContain("042517");
     expect(message.html).toContain("042517");
     expect(message.text).not.toMatch(/https?:/);

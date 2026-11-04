@@ -17,8 +17,8 @@ export function webManifest() {
   }));
   return {
     id: "/",
-    name: "Rakazo",
-    short_name: "Rakazo",
+    name: "OtterBot",
+    short_name: "OtterBot",
     description: "Your team of always-on agents.",
     start_url: "/",
     scope: "/",

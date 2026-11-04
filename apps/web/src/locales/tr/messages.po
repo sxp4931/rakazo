@@ -908,7 +908,7 @@ msgstr ""
 #: src/components/integrations/plugin-marketplace.tsx
 #: src/pages/PluginsOverlay.tsx
 msgid "Apps"
-msgstr ""
+msgstr "Uygulamalar"
 
 #: src/pages/BotContextMenu.tsx
 msgid "Archive"
@@ -1174,7 +1174,7 @@ msgstr "bayt"
 
 #: src/pages/shell/chat-header.tsx
 msgid "Call"
-msgstr ""
+msgstr "Ara"
 
 #: src/components/call/VoiceChatCard.tsx
 msgid "Call back"
@@ -2490,8 +2490,8 @@ msgid "Create space"
 msgstr ""
 
 #: src/pages/Auth.tsx
-msgid "Create your Rakazo"
-msgstr "Rakazo hesabını oluştur"
+msgid "Create your OtterBot"
+msgstr "OtterBot hesabını oluştur"
 
 #: src/components/AskCard.tsx
 msgid "Created"
@@ -3425,7 +3425,7 @@ msgstr "Yüksek"
 
 #: src/components/composer/HoldToTalk.tsx
 msgid "Hold to talk"
-msgstr ""
+msgstr "Konuşmak için basılı tut"
 
 #: src/components/composer/HoldToTalk.tsx
 msgid "Hold to talk, release to send"
@@ -3758,7 +3758,7 @@ msgstr ""
 
 #: src/components/composer/HoldToTalk.tsx
 msgid "Listening…"
-msgstr ""
+msgstr "Dinliyor…"
 
 #: src/pages/shell/transcript.tsx
 msgid "Load earlier messages"
@@ -5473,6 +5473,9 @@ msgid "Return to call with {0}"
 msgstr ""
 
 #: src/pages/McpOAuthCallback.tsx
+msgid "Return to OtterBot"
+msgstr "OtterBot'ya dön"
+
 #: src/pages/SlackInstallCallback.tsx
 msgid "Return to Rakazo"
 msgstr "Rakazo'ya dön"
@@ -5944,8 +5947,8 @@ msgid "Sign in at <0>{0}</0>, then paste the code here."
 msgstr "<0>{0}</0> adresinde oturum açın, ardından kodu buraya yapıştırın."
 
 #: src/pages/Auth.tsx
-msgid "Sign in to Rakazo"
-msgstr "Rakazo'da oturum aç"
+msgid "Sign in to OtterBot"
+msgstr "OtterBot'da oturum aç"
 
 #: src/lib/user-error.ts
 msgid "Sign in to your existing account to link SSO"

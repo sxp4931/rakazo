@@ -3,7 +3,6 @@ export const TR_MESSAGES: Record<string, string> = {
   "Check for Updates…": "Güncellemeleri Denetle…",
   "Computer Access…": "Bilgisayar Erişimi…",
   "Revoke Local Computer Access": "Yerel Bilgisayar Erişimini İptal Et",
-  "Change Rakazo Server…": "Rakazo Sunucusunu Değiştir…",
   "Stop Local Stack": "Yerel Yığını Durdur",
   "Hide {name}": "{name} Uygulamasını Gizle",
   "Hide Others": "Diğerlerini Gizle",
@@ -51,8 +50,6 @@ export const TR_MESSAGES: Record<string, string> = {
   "Move Rakazo to Applications to install updates.":
     "Güncellemeleri yüklemek için Rakazo’yu Uygulamalar klasörüne taşıyın.",
   "Free up disk space to install updates.": "Güncellemeleri yüklemek için diskte yer açın.",
-  "This update could not be verified. Reinstall Rakazo from a trusted download.":
-    "Bu güncelleme doğrulanamadı. Rakazo’yu güvenilir bir indirmeden yeniden yükleyin.",
   "The update could not be completed. Try again later.":
     "Güncelleme tamamlanamadı. Daha sonra yeniden deneyin.",
   "Could not reach the update server.": "Güncelleme sunucusuna ulaşılamadı.",
@@ -71,12 +68,6 @@ export const TR_MESSAGES: Record<string, string> = {
     "Zaten devam eden bir oturum açma denemesi var. Onu iptal edip yeniden deneyin.",
   "Could not open browser sign-in. Close other sign-in attempts and retry.":
     "Tarayıcıda oturum açma başlatılamadı. Diğer oturum açma denemelerini kapatıp yeniden deneyin.",
-  "Sign-in callback rejected. Return to Rakazo to retry.":
-    "Oturum açma yanıtı reddedildi. Yeniden denemek için Rakazo’ya dönün.",
-  "You can close this tab and return to Rakazo.": "Bu sekmeyi kapatıp Rakazo’ya dönebilirsiniz.",
-  "Set up Rakazo": "Rakazo’yu Kur",
-  "Quit Rakazo": "Rakazo’dan Çık",
-  "Welcome to Rakazo": "Rakazo’ya hoş geldiniz",
   "Choose which server this app should use.": "Bu uygulamanın hangi sunucuyu kullanacağını seçin.",
   Instance: "Örnek",
   "This computer": "Bu bilgisayar",
@@ -91,14 +82,10 @@ export const TR_MESSAGES: Record<string, string> = {
   "Check again": "Yeniden denetle",
   Retry: "Yeniden dene",
   "Getting ready…": "Hazırlanıyor…",
-  "Downloading Rakazo…": "Rakazo indiriliyor…",
-  "Starting Rakazo…": "Rakazo başlatılıyor…",
   "Almost ready…": "Neredeyse hazır…",
-  "Rakazo is ready.": "Rakazo hazır.",
   "{size} downloaded": "{size} indirildi",
   "Connecting…": "Bağlanıyor…",
   "Checking…": "Denetleniyor…",
-  "Rakazo answered at {url}.": "Rakazo {url} adresinde yanıt verdi.",
   "Enter a server address first.": "Önce bir sunucu adresi girin.",
   "Could not save that address.": "Bu adres kaydedilemedi.",
   "Could not save that address. Try again.": "Bu adres kaydedilemedi. Yeniden deneyin.",
@@ -107,17 +94,11 @@ export const TR_MESSAGES: Record<string, string> = {
   "Could not run the connection check. Try again.":
     "Bağlantı denetimi çalıştırılamadı. Yeniden deneyin.",
   "Setup bridge unavailable.": "Kurulum köprüsü kullanılamıyor.",
-  "Setup could not start. Quit Rakazo and try again.":
-    "Kurulum başlatılamadı. Rakazo’dan çıkıp yeniden deneyin.",
   "Enter a server address.": "Bir sunucu adresi girin.",
   "Enter a valid http:// or https:// address.": "Geçerli bir http:// veya https:// adresi girin.",
   "Enter a valid server address. Public servers require HTTPS; a new local instance must use localhost.":
     "Geçerli bir sunucu adresi girin. Herkese açık sunucular HTTPS gerektirir; yeni bir yerel örnek localhost kullanmalıdır.",
   "Invalid custom headers": "Geçersiz özel üst bilgiler",
-  "That address redirects elsewhere. Enter the final Rakazo server address.":
-    "Bu adres başka bir yere yönlendiriyor. Rakazo sunucusunun son adresini girin.",
-  "That address did not respond like a Rakazo server.":
-    "Bu adres bir Rakazo sunucusu gibi yanıt vermedi.",
   "The server answered with HTTP {status}.": "Sunucu HTTP {status} ile yanıt verdi.",
   "Timed out reaching that address.": "Bu adrese ulaşırken zaman aşımı oluştu.",
   "Nothing is listening at that address yet.": "Bu adreste henüz dinleyen bir şey yok.",
@@ -141,8 +122,6 @@ export const TR_MESSAGES: Record<string, string> = {
     "Kurulum kaydedilemedi. Önceki örnek geri yüklendi.",
   "Connected, but could not save setup for the next launch. Try Continue again.":
     "Bağlanıldı ancak kurulum bir sonraki açılış için kaydedilemedi. Devam’a yeniden tıklayın.",
-  "The app-managed Rakazo services are not ready. Retry setup.":
-    "Uygulamanın yönettiği Rakazo hizmetleri hazır değil. Kurulumu yeniden deneyin.",
   "Docker is not installed on this computer.": "Bu bilgisayarda Docker yüklü değil.",
   "Docker is installed, but Docker Compose is missing. Install Docker Desktop or the docker-compose-plugin.":
     "Docker yüklü ancak Docker Compose eksik. Docker Desktop’ı veya docker-compose-plugin’i yükleyin.",
@@ -166,10 +145,6 @@ export const TR_MESSAGES: Record<string, string> = {
     "Docker yanıt vermeyi bıraktı. Docker’ı başlatıp yeniden deneyin.",
   "Docker Compose is missing. Install Docker Desktop or the docker-compose-plugin, then retry.":
     "Docker Compose eksik. Docker Desktop’ı veya docker-compose-plugin’i yükleyip yeniden deneyin.",
-  "Downloading Rakazo images failed. Check the output below, then retry.":
-    "Rakazo görüntüleri indirilemedi. Aşağıdaki çıktıyı inceleyip yeniden deneyin.",
-  "Rakazo services did not start. Check the output below, then retry.":
-    "Rakazo hizmetleri başlamadı. Aşağıdaki çıktıyı inceleyip yeniden deneyin.",
   "The stack started but the web app did not answer. Retry, and check the output below.":
     "Yığın başladı ancak web uygulaması yanıt vermedi. Yeniden deneyin ve aşağıdaki çıktıyı inceleyin.",
   "Could not prepare the local stack. Retry.": "Yerel yığın hazırlanamadı. Yeniden deneyin.",
@@ -186,4 +161,31 @@ export const TR_MESSAGES: Record<string, string> = {
   "Toggle Sidebar": "Kenar Çubuğunu Aç/Kapat",
   "Search…": "Ara…",
   "The window closed before the app loaded.": "Pencere, uygulama yüklenmeden kapandı.",
+  "Change OtterBot Server…": "OtterBot Sunucusunu Değiştir…",
+  "This update could not be verified. Reinstall OtterBot from a trusted download.":
+    "Bu güncelleme doğrulanamadı. OtterBot’yu güvenilir bir indirmeden yeniden yükleyin.",
+  "Sign-in callback rejected. Return to OtterBot to retry.":
+    "Oturum açma yanıtı reddedildi. Yeniden denemek için OtterBot’ya dönün.",
+  "You can close this tab and return to OtterBot.":
+    "Bu sekmeyi kapatıp OtterBot’ya dönebilirsiniz.",
+  "Set up OtterBot": "OtterBot’yu Kur",
+  "Quit OtterBot": "OtterBot’dan Çık",
+  "Welcome to OtterBot": "OtterBot’ya hoş geldiniz",
+  "Downloading OtterBot…": "OtterBot indiriliyor…",
+  "Starting OtterBot…": "OtterBot başlatılıyor…",
+  "OtterBot is ready.": "OtterBot hazır.",
+  "OtterBot answered at {url}.": "OtterBot {url} adresinde yanıt verdi.",
+  "Setup could not start. Quit OtterBot and try again.":
+    "Kurulum başlatılamadı. OtterBot’dan çıkıp yeniden deneyin.",
+  "That address redirects elsewhere. Enter the final OtterBot server address.":
+    "Bu adres başka bir yere yönlendiriyor. OtterBot sunucusunun son adresini girin.",
+  "That address did not respond like an OtterBot server.":
+    "Bu adres bir OtterBot sunucusu gibi yanıt vermedi.",
+  "The app-managed OtterBot services are not ready. Retry setup.":
+    "Uygulamanın yönettiği OtterBot hizmetleri hazır değil. Kurulumu yeniden deneyin.",
+  "Downloading OtterBot images failed. Check the output below, then retry.":
+    "OtterBot görüntüleri indirilemedi. Aşağıdaki çıktıyı inceleyip yeniden deneyin.",
+  "OtterBot services did not start. Check the output below, then retry.":
+    "OtterBot hizmetleri başlamadı. Aşağıdaki çıktıyı inceleyip yeniden deneyin.",
+  OtterBot: "OtterBot",
 };

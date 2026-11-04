@@ -2,7 +2,7 @@
 
 Generated JSON reports are preserved locally under ignored `test-report/evals/archive/`, with a second backup outside the disposable worktree. They are not tracked documentation or repository downloads; maintained findings and synthetic fixtures remain in source control. Report references below identify local archived evidence, including every original failed and partial run.
 
-Rakazo separates deterministic execution regressions from real-model task quality.
+OtterBot separates deterministic execution regressions from real-model task quality.
 A scripted response can prove that a tool call executes correctly; only a real
 model can demonstrate that it chooses a useful action for a natural request.
 
@@ -58,7 +58,7 @@ serialization, model changes and context bounds without a database server.
 ## Deterministic Pi tests
 
 `packages/testkit/src/model-emulator.ts` serves a loopback OpenAI-compatible
-stream through Rakazo's existing generic connection. It does not replace Pi.
+stream through OtterBot's existing generic connection. It does not replace Pi.
 Each step validates the actual request before streaming a response, and tests
 must assert that all expected steps were consumed without unexpected requests.
 The next request must contain the tool result from real execution.
@@ -168,7 +168,7 @@ takes control through the product's takeover path, sees screenshots and clicks
 and types until it hands the screen back. `--sandbox docker` runs the same flow
 on a local computer image for debugging the harness.
 
-Grading reads the website's own records (orders, logins) and Rakazo state
+Grading reads the website's own records (orders, logins) and OtterBot state
 (routines, transcript); the bot's claims are not evidence. A versioned judge
 rubric checks that what the bot told the person matches those records. Each run
 writes `report.html` under `test-report/flows/`: the chat and the bot's screen

@@ -3,7 +3,6 @@ export const HI_MESSAGES: Record<string, string> = {
   "Check for Updates…": "अपडेट देखें…",
   "Computer Access…": "कंप्यूटर एक्सेस…",
   "Revoke Local Computer Access": "लोकल कंप्यूटर एक्सेस वापस लें",
-  "Change Rakazo Server…": "Rakazo सर्वर बदलें…",
   "Stop Local Stack": "लोकल स्टैक रोकें",
   "Hide {name}": "{name} छिपाएँ",
   "Hide Others": "अन्य छिपाएँ",
@@ -50,8 +49,6 @@ export const HI_MESSAGES: Record<string, string> = {
   "Move Rakazo to Applications to install updates.":
     "अपडेट इंस्टॉल करने के लिए Rakazo को Applications में ले जाएँ।",
   "Free up disk space to install updates.": "अपडेट इंस्टॉल करने के लिए डिस्क में जगह खाली करें।",
-  "This update could not be verified. Reinstall Rakazo from a trusted download.":
-    "इस अपडेट की पुष्टि नहीं हो सकी। किसी भरोसेमंद डाउनलोड से Rakazo को फिर से इंस्टॉल करें।",
   "The update could not be completed. Try again later.":
     "अपडेट पूरा नहीं हो सका। बाद में फिर से कोशिश करें।",
   "Could not reach the update server.": "अपडेट सर्वर तक नहीं पहुँच सके।",
@@ -70,12 +67,6 @@ export const HI_MESSAGES: Record<string, string> = {
     "साइन-इन की एक कोशिश पहले से चल रही है। उसे रद्द करके फिर से कोशिश करें।",
   "Could not open browser sign-in. Close other sign-in attempts and retry.":
     "ब्राउज़र साइन-इन नहीं खुल सका। साइन-इन की दूसरी कोशिशें बंद करके फिर से कोशिश करें।",
-  "Sign-in callback rejected. Return to Rakazo to retry.":
-    "साइन-इन का जवाब अस्वीकार कर दिया गया। फिर से कोशिश करने के लिए Rakazo पर लौटें।",
-  "You can close this tab and return to Rakazo.": "आप यह टैब बंद करके Rakazo पर लौट सकते हैं।",
-  "Set up Rakazo": "Rakazo सेट अप करें",
-  "Quit Rakazo": "Rakazo बंद करें",
-  "Welcome to Rakazo": "Rakazo में आपका स्वागत है",
   "Choose which server this app should use.": "चुनें कि यह ऐप कौन-सा सर्वर इस्तेमाल करे।",
   Instance: "इंस्टेंस",
   "This computer": "यह कंप्यूटर",
@@ -90,14 +81,10 @@ export const HI_MESSAGES: Record<string, string> = {
   "Check again": "फिर से जाँचें",
   Retry: "फिर से कोशिश करें",
   "Getting ready…": "तैयारी हो रही है…",
-  "Downloading Rakazo…": "Rakazo डाउनलोड हो रहा है…",
-  "Starting Rakazo…": "Rakazo शुरू हो रहा है…",
   "Almost ready…": "लगभग तैयार…",
-  "Rakazo is ready.": "Rakazo तैयार है।",
   "{size} downloaded": "{size} डाउनलोड हुआ",
   "Connecting…": "कनेक्ट हो रहा है…",
   "Checking…": "जाँच हो रही है…",
-  "Rakazo answered at {url}.": "Rakazo ने {url} पर जवाब दिया।",
   "Enter a server address first.": "पहले सर्वर का पता डालें।",
   "Could not save that address.": "वह पता सेव नहीं हो सका।",
   "Could not save that address. Try again.": "वह पता सेव नहीं हो सका। फिर से कोशिश करें।",
@@ -106,16 +93,11 @@ export const HI_MESSAGES: Record<string, string> = {
   "Could not start the local stack. Try again.": "लोकल स्टैक शुरू नहीं हो सका। फिर से कोशिश करें।",
   "Could not run the connection check. Try again.": "कनेक्शन की जाँच नहीं हो सकी। फिर से कोशिश करें।",
   "Setup bridge unavailable.": "सेटअप ब्रिज उपलब्ध नहीं है।",
-  "Setup could not start. Quit Rakazo and try again.":
-    "सेटअप शुरू नहीं हो सका। Rakazo बंद करके फिर से कोशिश करें।",
   "Enter a server address.": "सर्वर का पता डालें।",
   "Enter a valid http:// or https:// address.": "मान्य http:// या https:// पता डालें।",
   "Enter a valid server address. Public servers require HTTPS; a new local instance must use localhost.":
     "मान्य सर्वर पता डालें। सार्वजनिक सर्वर के लिए HTTPS ज़रूरी है; नए लोकल इंस्टेंस को localhost इस्तेमाल करना होगा।",
   "Invalid custom headers": "कस्टम हेडर अमान्य हैं",
-  "That address redirects elsewhere. Enter the final Rakazo server address.":
-    "वह पता कहीं और रीडायरेक्ट करता है। Rakazo सर्वर का अंतिम पता डालें।",
-  "That address did not respond like a Rakazo server.": "उस पते ने Rakazo सर्वर की तरह जवाब नहीं दिया।",
   "The server answered with HTTP {status}.": "सर्वर ने HTTP {status} के साथ जवाब दिया।",
   "Timed out reaching that address.": "उस पते तक पहुँचने में समय सीमा खत्म हो गई।",
   "Nothing is listening at that address yet.": "उस पते पर अभी कुछ भी सुन नहीं रहा है।",
@@ -139,8 +121,6 @@ export const HI_MESSAGES: Record<string, string> = {
     "सेटअप सेव नहीं हो सका। पिछला इंस्टेंस वापस लाया गया।",
   "Connected, but could not save setup for the next launch. Try Continue again.":
     "कनेक्ट हो गया, लेकिन अगली बार खोलने के लिए सेटअप सेव नहीं हो सका। फिर से जारी रखें पर क्लिक करें।",
-  "The app-managed Rakazo services are not ready. Retry setup.":
-    "ऐप से मैनेज होने वाली Rakazo सेवाएँ तैयार नहीं हैं। सेटअप फिर से करें।",
   "Docker is not installed on this computer.": "इस कंप्यूटर पर Docker इंस्टॉल नहीं है।",
   "Docker is installed, but Docker Compose is missing. Install Docker Desktop or the docker-compose-plugin.":
     "Docker इंस्टॉल है, लेकिन Docker Compose नहीं है। Docker Desktop या docker-compose-plugin इंस्टॉल करें।",
@@ -164,10 +144,6 @@ export const HI_MESSAGES: Record<string, string> = {
     "Docker ने जवाब देना बंद कर दिया। Docker शुरू करें, फिर से कोशिश करें।",
   "Docker Compose is missing. Install Docker Desktop or the docker-compose-plugin, then retry.":
     "Docker Compose नहीं है। Docker Desktop या docker-compose-plugin इंस्टॉल करें, फिर से कोशिश करें।",
-  "Downloading Rakazo images failed. Check the output below, then retry.":
-    "Rakazo इमेज डाउनलोड नहीं हो सके। नीचे दिया आउटपुट देखें, फिर से कोशिश करें।",
-  "Rakazo services did not start. Check the output below, then retry.":
-    "Rakazo सेवाएँ शुरू नहीं हुईं। नीचे दिया आउटपुट देखें, फिर से कोशिश करें।",
   "The stack started but the web app did not answer. Retry, and check the output below.":
     "स्टैक शुरू हो गया, लेकिन वेब ऐप ने जवाब नहीं दिया। फिर से कोशिश करें और नीचे दिया आउटपुट देखें।",
   "Could not prepare the local stack. Retry.": "लोकल स्टैक तैयार नहीं हो सका। फिर से कोशिश करें।",
@@ -184,4 +160,30 @@ export const HI_MESSAGES: Record<string, string> = {
   "Toggle Sidebar": "साइडबार दिखाएँ/छिपाएँ",
   "Search…": "खोजें…",
   "The window closed before the app loaded.": "ऐप लोड होने से पहले विंडो बंद हो गई।",
+  "Change OtterBot Server…": "OtterBot सर्वर बदलें…",
+  "This update could not be verified. Reinstall OtterBot from a trusted download.":
+    "इस अपडेट की पुष्टि नहीं हो सकी। किसी भरोसेमंद डाउनलोड से OtterBot को फिर से इंस्टॉल करें।",
+  "Sign-in callback rejected. Return to OtterBot to retry.":
+    "साइन-इन का जवाब अस्वीकार कर दिया गया। फिर से कोशिश करने के लिए OtterBot पर लौटें।",
+  "You can close this tab and return to OtterBot.": "आप यह टैब बंद करके OtterBot पर लौट सकते हैं।",
+  "Set up OtterBot": "OtterBot सेट अप करें",
+  "Quit OtterBot": "OtterBot बंद करें",
+  "Welcome to OtterBot": "OtterBot में आपका स्वागत है",
+  "Downloading OtterBot…": "OtterBot डाउनलोड हो रहा है…",
+  "Starting OtterBot…": "OtterBot शुरू हो रहा है…",
+  "OtterBot is ready.": "OtterBot तैयार है।",
+  "OtterBot answered at {url}.": "OtterBot ने {url} पर जवाब दिया।",
+  "Setup could not start. Quit OtterBot and try again.":
+    "सेटअप शुरू नहीं हो सका। OtterBot बंद करके फिर से कोशिश करें।",
+  "That address redirects elsewhere. Enter the final OtterBot server address.":
+    "वह पता कहीं और रीडायरेक्ट करता है। OtterBot सर्वर का अंतिम पता डालें।",
+  "That address did not respond like an OtterBot server.":
+    "उस पते ने OtterBot सर्वर की तरह जवाब नहीं दिया।",
+  "The app-managed OtterBot services are not ready. Retry setup.":
+    "ऐप से मैनेज होने वाली OtterBot सेवाएँ तैयार नहीं हैं। सेटअप फिर से करें।",
+  "Downloading OtterBot images failed. Check the output below, then retry.":
+    "OtterBot इमेज डाउनलोड नहीं हो सके। नीचे दिया आउटपुट देखें, फिर से कोशिश करें।",
+  "OtterBot services did not start. Check the output below, then retry.":
+    "OtterBot सेवाएँ शुरू नहीं हुईं। नीचे दिया आउटपुट देखें, फिर से कोशिश करें।",
+  OtterBot: "OtterBot",
 };

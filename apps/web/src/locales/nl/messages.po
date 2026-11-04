@@ -2490,8 +2490,8 @@ msgid "Create space"
 msgstr "Space aanmaken"
 
 #: src/pages/Auth.tsx
-msgid "Create your Rakazo"
-msgstr "Maak je Rakazo"
+msgid "Create your OtterBot"
+msgstr ""
 
 #: src/components/AskCard.tsx
 msgid "Created"
@@ -5473,6 +5473,9 @@ msgid "Return to call with {0}"
 msgstr "Terug naar het gesprek met {0}"
 
 #: src/pages/McpOAuthCallback.tsx
+msgid "Return to OtterBot"
+msgstr ""
+
 #: src/pages/SlackInstallCallback.tsx
 msgid "Return to Rakazo"
 msgstr "Terug naar Rakazo"
@@ -5944,8 +5947,8 @@ msgid "Sign in at <0>{0}</0>, then paste the code here."
 msgstr "Meld je aan op <0>{0}</0> en plak de code hier."
 
 #: src/pages/Auth.tsx
-msgid "Sign in to Rakazo"
-msgstr "Aanmelden bij Rakazo"
+msgid "Sign in to OtterBot"
+msgstr ""
 
 #: src/lib/user-error.ts
 msgid "Sign in to your existing account to link SSO"

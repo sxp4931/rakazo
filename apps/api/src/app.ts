@@ -143,6 +143,7 @@ import {
 } from "@rakazo/logging";
 import { markExpectedFailure, requestLogging } from "@rakazo/logging/hono";
 import { MarkdownMemoryStore } from "@rakazo/memory";
+import type { MiddlewareHandler } from "hono";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { deleteAccountContent } from "./account-deletion.js";
@@ -181,6 +182,7 @@ import { createMessagingReceipts } from "./messaging-receipts.js";
 import { mountMessagingWebhookRoutes } from "./messaging-webhook.js";
 import { monitoringRoutes } from "./monitoring.js";
 import { pluginSubmissionRoutes } from "./plugin-submissions.js";
+import { createRateLimiter } from "./rate-limit.js";
 import { sendReferralEmails } from "./referral-email.js";
 import { mountApiRequestBodyLimits, rpcBodyLimit } from "./request-body-limit.js";
 import { createRouter } from "./router.js";
@@ -865,6 +867,22 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
   app.use("*", inFlight.middleware);
   app.use("*", requestLogging(logger));
   app.use("*", clientIpMiddleware(clientIp, env.clientIpHeader));
+  const limitByResolvedClientIp =
+    (limiter: ReturnType<typeof createRateLimiter>): MiddlewareHandler =>
+    async (c, next) => {
+      const ip = requestClientIp(c);
+      if (!ip) return next();
+      const result = limiter.check(ip);
+      if (!result.allowed) {
+        c.header("Retry-After", String(result.retryAfterSec));
+        return c.json({ error: "too many requests" }, 429);
+      }
+      await next();
+    };
+  const globalLimiter = createRateLimiter({ windowMs: 5 * 60_000, max: 5000 }, "global");
+  const authLimiter = createRateLimiter({ windowMs: 5 * 60_000, max: 300 }, "auth");
+  app.use("*", limitByResolvedClientIp(globalLimiter));
+  app.use("/api/auth/*", limitByResolvedClientIp(authLimiter));
   app.use(
     "*",
     cors({

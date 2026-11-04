@@ -101,7 +101,8 @@ vi.mock("./api", () => ({
       };
     }
     if (procedure === "scratchpad/list") return mocks.work;
-    if (procedure === "memory/list") return mocks.docs;
+    if (procedure === "memory/list")
+      return (input as { scope?: string } | undefined)?.scope === "user" ? [] : mocks.docs;
     if (procedure === "me") return {};
     return [];
   },

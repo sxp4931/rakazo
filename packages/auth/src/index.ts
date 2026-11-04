@@ -8,6 +8,7 @@ import {
   MAX_PASSWORD_LENGTH,
   MESSAGING_EMAIL_SUFFIX,
   MIN_PASSWORD_LENGTH,
+  parseAllowlist,
   signupPolicyFromEnv,
 } from "@rakazo/core";
 import type { PrismaClient, SecurityEventType } from "@rakazo/db";
@@ -92,6 +93,23 @@ export interface AuthEnv {
 }
 
 type AuthSession = { id: string; userId: string };
+
+export async function resolveSignupPolicy(
+  prisma: Pick<PrismaClient, "deploymentSettings">,
+  env: Pick<AuthEnv, "signupsEnabled" | "signupAllowlist">,
+): Promise<{ enabled: boolean; allowlist: string[] }> {
+  const settings = await prisma.deploymentSettings.findUnique({
+    where: { id: "default" },
+    select: { signupsEnabled: true, signupAllowlist: true, signupPolicyInitialized: true },
+  });
+  if (settings?.signupPolicyInitialized) {
+    return {
+      enabled: settings.signupsEnabled,
+      allowlist: parseAllowlist(settings.signupAllowlist),
+    };
+  }
+  return signupPolicyFromEnv(env);
+}
 
 const SEND_SIGN_IN_CODE_PATH = "/email-otp/send-verification-otp";
 const CODE_SIGN_IN_PATH = "/sign-in/email-otp";
@@ -190,7 +208,7 @@ export function createAuth(prisma: PrismaClient, env: AuthEnv) {
   };
   /** Refuses a new account early, before creating it, once a single-person deployment has one. */
   const admission = async () => {
-    const policy = signupPolicyFromEnv(env);
+    const policy = await resolveSignupPolicy(prisma, env);
     if (!env.singleAccount || !policy.enabled) return policy;
     return (await hasAdmittedAccount(prisma)) ? { ...policy, enabled: false } : policy;
   };
@@ -214,7 +232,7 @@ export function createAuth(prisma: PrismaClient, env: AuthEnv) {
   let authContext: Promise<{ secretConfig: TokenKey }> | undefined;
   const tokenKey = async () => (await authContext!).secretConfig;
   const auth = betterAuth({
-    appName: "Rakazo",
+    appName: "OtterBot",
     logger: env.logger,
     secret: env.secret,
     baseURL: env.baseURL,
@@ -486,7 +504,7 @@ export function createAuth(prisma: PrismaClient, env: AuthEnv) {
           ctx.path === "/sign-up/email"
             ? await admission()
             : ctx.path === "/sign-in/email"
-              ? signupPolicyFromEnv(env)
+              ? await resolveSignupPolicy(prisma, env)
               : undefined;
         let requireEmailVerification = false;
         if (ctx.path === "/sign-up/email") {
@@ -550,7 +568,7 @@ export function createAuth(prisma: PrismaClient, env: AuthEnv) {
                     );
                     if (accounts.some((account) => account.providerId === "oidc")) return session;
                   }
-                  policy ??= signupPolicyFromEnv(env);
+                  policy ??= await resolveSignupPolicy(prisma, env);
                   return policy.allowlist.length === 0 ? session : null;
                 },
               },
@@ -607,7 +625,7 @@ export function createAuth(prisma: PrismaClient, env: AuthEnv) {
           before: async (session, ctx) => {
             // The auth adapter can still be inside the signup transaction.
             const user = await ctx?.context.internalAdapter.findUserById(session.userId);
-            const policy = signupPolicyFromEnv(env);
+            const policy = await resolveSignupPolicy(prisma, env);
             const oidcSignIn = isOidcCallback(ctx);
             const bypassAllowlist = oidcSignIn && env.oidc?.allowSignupBypass;
             if (!user || isMessagingEmail(user.email)) {

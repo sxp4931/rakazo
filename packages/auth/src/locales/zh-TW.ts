@@ -1,26 +1,27 @@
 export const ZH_TW_MESSAGES: Record<string, string> = {
   "Hi {name},": "{name}，你好：",
   "Hi there,": "你好：",
-  "Verify your Rakazo email": "驗證你的 Rakazo 電子郵件",
+  "Verify your OtterBot email": "驗證你的 OtterBot 電子郵件",
   "Verify email": "驗證電子郵件",
-  "Then return to Rakazo to sign in.": "接著返回 Rakazo 登入。",
+  "Then return to OtterBot to sign in.": "接著返回 OtterBot 登入。",
   "This link expires in one hour. If you did not register, ignore this email.":
     "此連結將在一小時後失效。如果你沒有註冊，請忽略這封郵件。",
-  "Your Rakazo sign-in code": "你的 Rakazo 登入驗證碼",
-  "Enter this code to sign in to Rakazo:": "輸入此驗證碼以登入 Rakazo：",
+  "Your OtterBot sign-in code": "你的 OtterBot 登入驗證碼",
+  "Enter this code to sign in to OtterBot:": "輸入此驗證碼以登入 OtterBot：",
   "This code expires in ten minutes. If you did not request it, ignore this email.":
     "此驗證碼將在十分鐘後失效。如果你沒有提出要求，請忽略這封郵件。",
-  "Reset your Rakazo password": "重設你的 Rakazo 密碼",
-  "Reset your Rakazo password:": "重設你的 Rakazo 密碼：",
+  "Reset your OtterBot password": "重設你的 OtterBot 密碼",
+  "Reset your OtterBot password:": "重設你的 OtterBot 密碼：",
   "Reset password": "重設密碼",
   "This link expires in one hour. If you did not request this, you can ignore this email.":
     "此連結將在一小時後失效。如果你沒有提出此要求，可以忽略這封郵件。",
-  "Confirm Rakazo account deletion": "確認刪除 Rakazo 帳號",
-  "Enter this code in Rakazo to delete your account:": "在 Rakazo 中輸入此驗證碼以刪除你的帳號：",
+  "Confirm OtterBot account deletion": "確認刪除 OtterBot 帳號",
+  "Enter this code in OtterBot to delete your account:":
+    "在 OtterBot 中輸入此驗證碼以刪除你的帳號：",
   "This code expires in ten minutes. If you did not request deletion, ignore this email.":
     "此驗證碼將在十分鐘後失效。如果你沒有要求刪除，請忽略這封郵件。",
-  "Your Rakazo confirmation code": "你的 Rakazo 確認碼",
-  "Enter this code in Rakazo to confirm it's you:": "在 Rakazo 中輸入此驗證碼以確認是你本人：",
+  "Your OtterBot confirmation code": "你的 OtterBot 確認碼",
+  "Enter this code in OtterBot to confirm it's you:": "在 OtterBot 中輸入此驗證碼以確認是你本人：",
   "Welcome to Rakazo": "歡迎使用 Rakazo",
   "Thanks for signing up for Rakazo.": "感謝你註冊 Rakazo。",
   "Rakazo also has apps for": "Rakazo 也提供以下平台的 App：",

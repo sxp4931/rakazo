@@ -908,7 +908,7 @@ msgstr ""
 #: src/components/integrations/plugin-marketplace.tsx
 #: src/pages/PluginsOverlay.tsx
 msgid "Apps"
-msgstr ""
+msgstr "Apps"
 
 #: src/pages/BotContextMenu.tsx
 msgid "Archive"
@@ -2490,8 +2490,8 @@ msgid "Create space"
 msgstr ""
 
 #: src/pages/Auth.tsx
-msgid "Create your Rakazo"
-msgstr "Dein Rakazo erstellen"
+msgid "Create your OtterBot"
+msgstr "Dein OtterBot erstellen"
 
 #: src/components/AskCard.tsx
 msgid "Created"
@@ -5473,6 +5473,9 @@ msgid "Return to call with {0}"
 msgstr "Zurück zum Anruf mit {0}"
 
 #: src/pages/McpOAuthCallback.tsx
+msgid "Return to OtterBot"
+msgstr "Zurück zu OtterBot"
+
 #: src/pages/SlackInstallCallback.tsx
 msgid "Return to Rakazo"
 msgstr "Zurück zu Rakazo"
@@ -5944,8 +5947,8 @@ msgid "Sign in at <0>{0}</0>, then paste the code here."
 msgstr "Melde dich bei <0>{0}</0> an und füge dann den Code hier ein."
 
 #: src/pages/Auth.tsx
-msgid "Sign in to Rakazo"
-msgstr "Bei Rakazo anmelden"
+msgid "Sign in to OtterBot"
+msgstr "Bei OtterBot anmelden"
 
 #: src/lib/user-error.ts
 msgid "Sign in to your existing account to link SSO"

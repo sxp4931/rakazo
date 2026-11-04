@@ -3,7 +3,6 @@ export const DE_MESSAGES: Record<string, string> = {
   "Check for Updates…": "Nach Updates suchen …",
   "Computer Access…": "Computerzugriff …",
   "Revoke Local Computer Access": "Zugriff auf lokalen Computer widerrufen",
-  "Change Rakazo Server…": "Rakazo-Server wechseln …",
   "Stop Local Stack": "Lokalen Stack stoppen",
   "Hide {name}": "{name} ausblenden",
   "Hide Others": "Andere ausblenden",
@@ -51,8 +50,6 @@ export const DE_MESSAGES: Record<string, string> = {
   "Move Rakazo to Applications to install updates.":
     "Bewege Rakazo in den Ordner „Programme“, um Updates zu installieren.",
   "Free up disk space to install updates.": "Gib Speicherplatz frei, um Updates zu installieren.",
-  "This update could not be verified. Reinstall Rakazo from a trusted download.":
-    "Dieses Update konnte nicht überprüft werden. Installiere Rakazo erneut aus einer vertrauenswürdigen Quelle.",
   "The update could not be completed. Try again later.":
     "Das Update konnte nicht abgeschlossen werden. Versuche es später erneut.",
   "Could not reach the update server.": "Der Update-Server ist nicht erreichbar.",
@@ -71,13 +68,6 @@ export const DE_MESSAGES: Record<string, string> = {
     "Eine Anmeldung läuft bereits. Brich sie ab und versuche es erneut.",
   "Could not open browser sign-in. Close other sign-in attempts and retry.":
     "Die Anmeldung im Browser konnte nicht geöffnet werden. Schließe andere Anmeldeversuche und versuche es erneut.",
-  "Sign-in callback rejected. Return to Rakazo to retry.":
-    "Die Anmeldeantwort wurde abgelehnt. Kehre zu Rakazo zurück, um es erneut zu versuchen.",
-  "You can close this tab and return to Rakazo.":
-    "Du kannst diesen Tab schließen und zu Rakazo zurückkehren.",
-  "Set up Rakazo": "Rakazo einrichten",
-  "Quit Rakazo": "Rakazo beenden",
-  "Welcome to Rakazo": "Willkommen bei Rakazo",
   "Choose which server this app should use.": "Wähle, welchen Server diese App verwenden soll.",
   Instance: "Instanz",
   "This computer": "Dieser Computer",
@@ -92,14 +82,10 @@ export const DE_MESSAGES: Record<string, string> = {
   "Check again": "Erneut prüfen",
   Retry: "Erneut versuchen",
   "Getting ready…": "Wird vorbereitet …",
-  "Downloading Rakazo…": "Rakazo wird heruntergeladen …",
-  "Starting Rakazo…": "Rakazo wird gestartet …",
   "Almost ready…": "Fast fertig …",
-  "Rakazo is ready.": "Rakazo ist bereit.",
   "{size} downloaded": "{size} heruntergeladen",
   "Connecting…": "Verbindung wird hergestellt …",
   "Checking…": "Wird geprüft …",
-  "Rakazo answered at {url}.": "Rakazo hat unter {url} geantwortet.",
   "Enter a server address first.": "Gib zuerst eine Serveradresse ein.",
   "Could not save that address.": "Diese Adresse konnte nicht gespeichert werden.",
   "Could not save that address. Try again.":
@@ -111,18 +97,12 @@ export const DE_MESSAGES: Record<string, string> = {
   "Could not run the connection check. Try again.":
     "Die Verbindungsprüfung konnte nicht ausgeführt werden. Versuche es erneut.",
   "Setup bridge unavailable.": "Die Einrichtungsbrücke ist nicht verfügbar.",
-  "Setup could not start. Quit Rakazo and try again.":
-    "Die Einrichtung konnte nicht starten. Beende Rakazo und versuche es erneut.",
   "Enter a server address.": "Gib eine Serveradresse ein.",
   "Enter a valid http:// or https:// address.":
     "Gib eine gültige http://- oder https://-Adresse ein.",
   "Enter a valid server address. Public servers require HTTPS; a new local instance must use localhost.":
     "Gib eine gültige Serveradresse ein. Öffentliche Server erfordern HTTPS; eine neue lokale Instanz muss localhost verwenden.",
   "Invalid custom headers": "Ungültige benutzerdefinierte Header",
-  "That address redirects elsewhere. Enter the final Rakazo server address.":
-    "Diese Adresse leitet woanders hin weiter. Gib die endgültige Adresse des Rakazo-Servers ein.",
-  "That address did not respond like a Rakazo server.":
-    "Diese Adresse hat nicht wie ein Rakazo-Server geantwortet.",
   "The server answered with HTTP {status}.": "Der Server hat mit HTTP {status} geantwortet.",
   "Timed out reaching that address.": "Zeitüberschreitung beim Erreichen dieser Adresse.",
   "Nothing is listening at that address yet.": "Unter dieser Adresse lauscht noch nichts.",
@@ -148,8 +128,6 @@ export const DE_MESSAGES: Record<string, string> = {
     "Die Einrichtung konnte nicht gespeichert werden. Die vorherige Instanz wurde wiederhergestellt.",
   "Connected, but could not save setup for the next launch. Try Continue again.":
     "Verbunden, aber die Einrichtung konnte nicht für den nächsten Start gespeichert werden. Klicke erneut auf „Weiter“.",
-  "The app-managed Rakazo services are not ready. Retry setup.":
-    "Die von der App verwalteten Rakazo-Dienste sind nicht bereit. Starte die Einrichtung erneut.",
   "Docker is not installed on this computer.": "Docker ist auf diesem Computer nicht installiert.",
   "Docker is installed, but Docker Compose is missing. Install Docker Desktop or the docker-compose-plugin.":
     "Docker ist installiert, aber Docker Compose fehlt. Installiere Docker Desktop oder das docker-compose-plugin.",
@@ -173,10 +151,6 @@ export const DE_MESSAGES: Record<string, string> = {
     "Docker antwortet nicht mehr. Starte Docker und versuche es erneut.",
   "Docker Compose is missing. Install Docker Desktop or the docker-compose-plugin, then retry.":
     "Docker Compose fehlt. Installiere Docker Desktop oder das docker-compose-plugin und versuche es erneut.",
-  "Downloading Rakazo images failed. Check the output below, then retry.":
-    "Die Rakazo-Images konnten nicht heruntergeladen werden. Sieh dir die Ausgabe unten an und versuche es erneut.",
-  "Rakazo services did not start. Check the output below, then retry.":
-    "Die Rakazo-Dienste wurden nicht gestartet. Sieh dir die Ausgabe unten an und versuche es erneut.",
   "The stack started but the web app did not answer. Retry, and check the output below.":
     "Der Stack wurde gestartet, aber die Web-App hat nicht geantwortet. Versuche es erneut und sieh dir die Ausgabe unten an.",
   "Could not prepare the local stack. Retry.":
@@ -195,4 +169,31 @@ export const DE_MESSAGES: Record<string, string> = {
   "Search…": "Suchen …",
   "The window closed before the app loaded.":
     "Das Fenster wurde geschlossen, bevor die App geladen war.",
+  "Change OtterBot Server…": "OtterBot-Server wechseln …",
+  "This update could not be verified. Reinstall OtterBot from a trusted download.":
+    "Dieses Update konnte nicht überprüft werden. Installiere OtterBot erneut aus einer vertrauenswürdigen Quelle.",
+  "Sign-in callback rejected. Return to OtterBot to retry.":
+    "Die Anmeldeantwort wurde abgelehnt. Kehre zu OtterBot zurück, um es erneut zu versuchen.",
+  "You can close this tab and return to OtterBot.":
+    "Du kannst diesen Tab schließen und zu OtterBot zurückkehren.",
+  "Set up OtterBot": "OtterBot einrichten",
+  "Quit OtterBot": "OtterBot beenden",
+  "Welcome to OtterBot": "Willkommen bei OtterBot",
+  "Downloading OtterBot…": "OtterBot wird heruntergeladen …",
+  "Starting OtterBot…": "OtterBot wird gestartet …",
+  "OtterBot is ready.": "OtterBot ist bereit.",
+  "OtterBot answered at {url}.": "OtterBot hat unter {url} geantwortet.",
+  "Setup could not start. Quit OtterBot and try again.":
+    "Die Einrichtung konnte nicht starten. Beende OtterBot und versuche es erneut.",
+  "That address redirects elsewhere. Enter the final OtterBot server address.":
+    "Diese Adresse leitet woanders hin weiter. Gib die endgültige Adresse des OtterBot-Servers ein.",
+  "That address did not respond like an OtterBot server.":
+    "Diese Adresse hat nicht wie ein OtterBot-Server geantwortet.",
+  "The app-managed OtterBot services are not ready. Retry setup.":
+    "Die von der App verwalteten OtterBot-Dienste sind nicht bereit. Starte die Einrichtung erneut.",
+  "Downloading OtterBot images failed. Check the output below, then retry.":
+    "Die OtterBot-Images konnten nicht heruntergeladen werden. Sieh dir die Ausgabe unten an und versuche es erneut.",
+  "OtterBot services did not start. Check the output below, then retry.":
+    "Die OtterBot-Dienste wurden nicht gestartet. Sieh dir die Ausgabe unten an und versuche es erneut.",
+  OtterBot: "OtterBot",
 };

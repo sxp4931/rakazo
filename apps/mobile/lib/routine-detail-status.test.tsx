@@ -13,6 +13,7 @@ const element =
     createElement(tag, null, children);
 
 vi.mock("./routine-store", () => ({ useBotRoutines: state.useBotRoutines }));
+vi.mock("./api", () => ({ selectedSpaceId: () => null, selectSpace: vi.fn() }));
 vi.mock("./i18n", () => {
   const t = (message: string) => message;
   return { useI18n: () => ({ t }) };
@@ -27,8 +28,10 @@ vi.mock("./routine", () => ({
 vi.mock("../components/glass-title", () => ({ glassHeaderOptions: () => ({}) }));
 vi.mock("../components/native-action-button", () => ({ NativeActionButton: () => null }));
 vi.mock("../components/routine-run-history", () => ({ RoutineRunHistory: () => null }));
+vi.mock("../components/routine-health", () => ({ RoutineHealth: () => null }));
 vi.mock("expo-router", () => ({
   Stack: { Screen: () => null },
+  useIsFocused: () => true,
   useLocalSearchParams: () => ({ botId: "bot-1", routineId: "routine-1", origin: "profile" }),
   useRouter: () => ({ push: vi.fn() }),
 }));

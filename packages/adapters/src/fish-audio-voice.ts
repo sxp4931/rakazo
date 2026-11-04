@@ -61,7 +61,7 @@ export class FishAudioVoiceProvider implements VoiceProvider {
     });
   }
 
-  /** Return user-owned then bounded public Fish Audio voices as Rakazo choices. */
+  /** Return user-owned then bounded public Fish Audio voices as OtterBot choices. */
   async listVoices(apiKey: string, context: AdapterContext): Promise<VoiceInfo[]> {
     const controller = new AbortController();
     const signal = voiceDeadline(
@@ -88,6 +88,7 @@ export class FishAudioVoiceProvider implements VoiceProvider {
     }
   }
 
+  /** Synthesize one OtterBot utterance as bounded MP3 audio. */
   async synthesize(request: VoiceSynthesizeRequest, context: AdapterContext): Promise<SpeechClip> {
     const signal = voiceDeadline(request.signal ?? context.signal, 60_000);
     const model = resolveFishSpeechModel(request.model);

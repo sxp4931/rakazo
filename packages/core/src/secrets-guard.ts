@@ -10,7 +10,7 @@ export const EXAMPLE_SCREEN_PROXY_SECRET_PLACEHOLDER =
 const EXAMPLE_ENCRYPTION_KEY_PLACEHOLDER = "replace-with-64-random-hex-characters";
 
 const RUNTIME_SECRETS_ERROR =
-  "Set BETTER_AUTH_SECRET and ENCRYPTION_KEY to long random strings before starting Rakazo outside local development or tests.";
+  "Set BETTER_AUTH_SECRET and ENCRYPTION_KEY to long random strings before starting OtterBot outside local development or tests.";
 
 const DEDICATED_SECRET_PLACEHOLDERS = new Set([
   DEV_SUPERVISOR_TOKEN_PLACEHOLDER,

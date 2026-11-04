@@ -3,7 +3,6 @@ export const ZH_TW_MESSAGES: Record<string, string> = {
   "Check for Updates…": "檢查更新項目…",
   "Computer Access…": "電腦存取權…",
   "Revoke Local Computer Access": "撤銷本機電腦存取權",
-  "Change Rakazo Server…": "更換 Rakazo 伺服器…",
   "Stop Local Stack": "停止本機服務堆疊",
   "Hide {name}": "隱藏 {name}",
   "Hide Others": "隱藏其他",
@@ -48,8 +47,6 @@ export const ZH_TW_MESSAGES: Record<string, string> = {
   "Move Rakazo to Applications to install updates.":
     "將 Rakazo 移到「應用程式」檔案夾以安裝更新項目。",
   "Free up disk space to install updates.": "釋放磁碟空間以安裝更新項目。",
-  "This update could not be verified. Reinstall Rakazo from a trusted download.":
-    "無法驗證此更新項目。請從可信任的來源重新下載並安裝 Rakazo。",
   "The update could not be completed. Try again later.": "無法完成更新。請稍後再試一次。",
   "Could not reach the update server.": "無法連線到更新伺服器。",
   "Allow local computer access?": "要允許存取本機電腦嗎？",
@@ -67,11 +64,6 @@ export const ZH_TW_MESSAGES: Record<string, string> = {
     "已有登入正在進行。請取消後再試一次。",
   "Could not open browser sign-in. Close other sign-in attempts and retry.":
     "無法開啟瀏覽器登入。請關閉其他登入嘗試後再試一次。",
-  "Sign-in callback rejected. Return to Rakazo to retry.": "登入回應遭拒。請返回 Rakazo 再試一次。",
-  "You can close this tab and return to Rakazo.": "你可以關閉此分頁並返回 Rakazo。",
-  "Set up Rakazo": "設定 Rakazo",
-  "Quit Rakazo": "結束 Rakazo",
-  "Welcome to Rakazo": "歡迎使用 Rakazo",
   "Choose which server this app should use.": "選擇此 App 要使用的伺服器。",
   Instance: "執行個體",
   "This computer": "這台電腦",
@@ -86,14 +78,10 @@ export const ZH_TW_MESSAGES: Record<string, string> = {
   "Check again": "再次檢查",
   Retry: "重試",
   "Getting ready…": "準備中…",
-  "Downloading Rakazo…": "正在下載 Rakazo…",
-  "Starting Rakazo…": "正在啟動 Rakazo…",
   "Almost ready…": "即將完成…",
-  "Rakazo is ready.": "Rakazo 已就緒。",
   "{size} downloaded": "已下載 {size}",
   "Connecting…": "正在連線…",
   "Checking…": "正在檢查…",
-  "Rakazo answered at {url}.": "Rakazo 已在 {url} 回應。",
   "Enter a server address first.": "請先輸入伺服器位址。",
   "Could not save that address.": "無法儲存該位址。",
   "Could not save that address. Try again.": "無法儲存該位址。請再試一次。",
@@ -101,15 +89,11 @@ export const ZH_TW_MESSAGES: Record<string, string> = {
   "Could not start the local stack. Try again.": "無法啟動本機服務堆疊。請再試一次。",
   "Could not run the connection check. Try again.": "無法檢查連線。請再試一次。",
   "Setup bridge unavailable.": "無法使用設定橋接。",
-  "Setup could not start. Quit Rakazo and try again.": "無法開始設定。請結束 Rakazo 後再試一次。",
   "Enter a server address.": "請輸入伺服器位址。",
   "Enter a valid http:// or https:// address.": "請輸入有效的 http:// 或 https:// 位址。",
   "Enter a valid server address. Public servers require HTTPS; a new local instance must use localhost.":
     "請輸入有效的伺服器位址。公開伺服器需要 HTTPS；新的本機執行個體必須使用 localhost。",
   "Invalid custom headers": "自訂標頭無效",
-  "That address redirects elsewhere. Enter the final Rakazo server address.":
-    "該位址會重新導向到其他位置。請輸入 Rakazo 伺服器的最終位址。",
-  "That address did not respond like a Rakazo server.": "該位址的回應不像 Rakazo 伺服器。",
   "The server answered with HTTP {status}.": "伺服器回應了 HTTP {status}。",
   "Timed out reaching that address.": "連線到該位址逾時。",
   "Nothing is listening at that address yet.": "該位址目前沒有任何服務在監聽。",
@@ -132,8 +116,6 @@ export const ZH_TW_MESSAGES: Record<string, string> = {
     "無法儲存設定。已還原先前的執行個體。",
   "Connected, but could not save setup for the next launch. Try Continue again.":
     "已連線，但無法為下次啟動儲存設定。請再按一次「繼續」。",
-  "The app-managed Rakazo services are not ready. Retry setup.":
-    "由 App 管理的 Rakazo 服務尚未就緒。請重新設定。",
   "Docker is not installed on this computer.": "這台電腦未安裝 Docker。",
   "Docker is installed, but Docker Compose is missing. Install Docker Desktop or the docker-compose-plugin.":
     "已安裝 Docker，但缺少 Docker Compose。請安裝 Docker Desktop 或 docker-compose-plugin。",
@@ -156,10 +138,6 @@ export const ZH_TW_MESSAGES: Record<string, string> = {
     "Docker 已停止回應。請啟動 Docker 後再試一次。",
   "Docker Compose is missing. Install Docker Desktop or the docker-compose-plugin, then retry.":
     "缺少 Docker Compose。請安裝 Docker Desktop 或 docker-compose-plugin 後再試一次。",
-  "Downloading Rakazo images failed. Check the output below, then retry.":
-    "無法下載 Rakazo 映像檔。請查看下方輸出後再試一次。",
-  "Rakazo services did not start. Check the output below, then retry.":
-    "Rakazo 服務未能啟動。請查看下方輸出後再試一次。",
   "The stack started but the web app did not answer. Retry, and check the output below.":
     "服務堆疊已啟動，但網頁 App 沒有回應。請重試並查看下方輸出。",
   "Could not prepare the local stack. Retry.": "無法準備本機服務堆疊。請再試一次。",
@@ -176,4 +154,29 @@ export const ZH_TW_MESSAGES: Record<string, string> = {
   "Toggle Sidebar": "切換側邊欄",
   "Search…": "搜尋…",
   "The window closed before the app loaded.": "App 載入完成前視窗已關閉。",
+  "Change OtterBot Server…": "更換 OtterBot 伺服器…",
+  "This update could not be verified. Reinstall OtterBot from a trusted download.":
+    "無法驗證此更新項目。請從可信任的來源重新下載並安裝 OtterBot。",
+  "Sign-in callback rejected. Return to OtterBot to retry.":
+    "登入回應遭拒。請返回 OtterBot 再試一次。",
+  "You can close this tab and return to OtterBot.": "你可以關閉此分頁並返回 OtterBot。",
+  "Set up OtterBot": "設定 OtterBot",
+  "Quit OtterBot": "結束 OtterBot",
+  "Welcome to OtterBot": "歡迎使用 OtterBot",
+  "Downloading OtterBot…": "正在下載 OtterBot…",
+  "Starting OtterBot…": "正在啟動 OtterBot…",
+  "OtterBot is ready.": "OtterBot 已就緒。",
+  "OtterBot answered at {url}.": "OtterBot 已在 {url} 回應。",
+  "Setup could not start. Quit OtterBot and try again.":
+    "無法開始設定。請結束 OtterBot 後再試一次。",
+  "That address redirects elsewhere. Enter the final OtterBot server address.":
+    "該位址會重新導向到其他位置。請輸入 OtterBot 伺服器的最終位址。",
+  "That address did not respond like an OtterBot server.": "該位址的回應不像 OtterBot 伺服器。",
+  "The app-managed OtterBot services are not ready. Retry setup.":
+    "由 App 管理的 OtterBot 服務尚未就緒。請重新設定。",
+  "Downloading OtterBot images failed. Check the output below, then retry.":
+    "無法下載 OtterBot 映像檔。請查看下方輸出後再試一次。",
+  "OtterBot services did not start. Check the output below, then retry.":
+    "OtterBot 服務未能啟動。請查看下方輸出後再試一次。",
+  OtterBot: "OtterBot",
 };

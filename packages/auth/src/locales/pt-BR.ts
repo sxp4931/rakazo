@@ -1,28 +1,28 @@
 export const PT_BR_MESSAGES: Record<string, string> = {
   "Hi {name},": "Olá, {name},",
   "Hi there,": "Olá,",
-  "Verify your Rakazo email": "Confirme seu e-mail do Rakazo",
+  "Verify your OtterBot email": "Confirme seu e-mail do OtterBot",
   "Verify email": "Confirmar e-mail",
-  "Then return to Rakazo to sign in.": "Depois, volte ao Rakazo para entrar.",
+  "Then return to OtterBot to sign in.": "Depois, volte ao OtterBot para entrar.",
   "This link expires in one hour. If you did not register, ignore this email.":
     "Este link expira em uma hora. Se você não se cadastrou, ignore este e-mail.",
-  "Your Rakazo sign-in code": "Seu código de acesso ao Rakazo",
-  "Enter this code to sign in to Rakazo:": "Digite este código para entrar no Rakazo:",
+  "Your OtterBot sign-in code": "Seu código de acesso ao OtterBot",
+  "Enter this code to sign in to OtterBot:": "Digite este código para entrar no OtterBot:",
   "This code expires in ten minutes. If you did not request it, ignore this email.":
     "Este código expira em dez minutos. Se você não o solicitou, ignore este e-mail.",
-  "Reset your Rakazo password": "Redefina sua senha do Rakazo",
-  "Reset your Rakazo password:": "Redefina sua senha do Rakazo:",
+  "Reset your OtterBot password": "Redefina sua senha do OtterBot",
+  "Reset your OtterBot password:": "Redefina sua senha do OtterBot:",
   "Reset password": "Redefinir senha",
   "This link expires in one hour. If you did not request this, you can ignore this email.":
     "Este link expira em uma hora. Se você não fez essa solicitação, pode ignorar este e-mail.",
-  "Confirm Rakazo account deletion": "Confirme a exclusão da sua conta do Rakazo",
-  "Enter this code in Rakazo to delete your account:":
-    "Digite este código no Rakazo para excluir sua conta:",
+  "Confirm OtterBot account deletion": "Confirme a exclusão da sua conta do OtterBot",
+  "Enter this code in OtterBot to delete your account:":
+    "Digite este código no OtterBot para excluir sua conta:",
   "This code expires in ten minutes. If you did not request deletion, ignore this email.":
     "Este código expira em dez minutos. Se você não solicitou a exclusão, ignore este e-mail.",
-  "Your Rakazo confirmation code": "Seu código de confirmação do Rakazo",
-  "Enter this code in Rakazo to confirm it's you:":
-    "Digite este código no Rakazo para confirmar que é você:",
+  "Your OtterBot confirmation code": "Seu código de confirmação do OtterBot",
+  "Enter this code in OtterBot to confirm it's you:":
+    "Digite este código no OtterBot para confirmar que é você:",
   "Welcome to Rakazo": "Boas-vindas ao Rakazo",
   "Thanks for signing up for Rakazo.": "Obrigado por se cadastrar no Rakazo.",
   "Rakazo also has apps for": "O Rakazo também tem apps para",

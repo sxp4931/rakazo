@@ -1305,6 +1305,12 @@ export const ES_MESSAGES: Record<string, string> = {
   "Could not load": "No se pudo cargar",
   "Enable mobile notifications to receive delay alerts.":
     "Activa las notificaciones móviles para recibir alertas de retraso.",
+  "Paste the OpenAI-compatible address from your server. OtterBot adds /v1 if needed.":
+    "Pega la dirección compatible con OpenAI de tu servidor. OtterBot agrega /v1 si es necesario.",
+  "Sign in to OtterBot": "Inicia sesión en OtterBot",
+  "Sign up for OtterBot": "Regístrate en OtterBot",
+  "That URL did not look like an OtterBot server":
+    "Esa URL no parece ser de un servidor de OtterBot",
 };
 
 export const PEER_MESSAGE_FORMS: Partial<Record<Intl.LDMLPluralRule, string>> = {

@@ -2490,8 +2490,8 @@ msgid "Create space"
 msgstr "Создайте пространство"
 
 #: src/pages/Auth.tsx
-msgid "Create your Rakazo"
-msgstr "Создайте свой Rakazo"
+msgid "Create your OtterBot"
+msgstr "Создайте свой OtterBot"
 
 #: src/components/AskCard.tsx
 msgid "Created"
@@ -4380,7 +4380,7 @@ msgstr "Нет аутентификации"
 
 #: src/components/integrations/agent-access.tsx
 msgid "No bots"
-msgstr ""
+msgstr "Нет ботов"
 
 #: src/pages/GroupPanel.tsx
 #: src/pages/shell/bot-picker.tsx
@@ -5473,6 +5473,9 @@ msgid "Return to call with {0}"
 msgstr "Вернуться к звонку с {0}"
 
 #: src/pages/McpOAuthCallback.tsx
+msgid "Return to OtterBot"
+msgstr "Вернуться в OtterBot"
+
 #: src/pages/SlackInstallCallback.tsx
 msgid "Return to Rakazo"
 msgstr "Вернуться в Rakazo"
@@ -5944,8 +5947,8 @@ msgid "Sign in at <0>{0}</0>, then paste the code here."
 msgstr "Войдите на <0>{0}</0>, затем вставьте код сюда."
 
 #: src/pages/Auth.tsx
-msgid "Sign in to Rakazo"
-msgstr "Войти в Rakazo"
+msgid "Sign in to OtterBot"
+msgstr "Войти в OtterBot"
 
 #: src/lib/user-error.ts
 msgid "Sign in to your existing account to link SSO"

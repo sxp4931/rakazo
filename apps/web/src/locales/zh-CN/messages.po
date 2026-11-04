@@ -2490,8 +2490,8 @@ msgid "Create space"
 msgstr "创建工作区"
 
 #: src/pages/Auth.tsx
-msgid "Create your Rakazo"
-msgstr "创建你的 Rakazo"
+msgid "Create your OtterBot"
+msgstr "创建你的 OtterBot"
 
 #: src/components/AskCard.tsx
 msgid "Created"
@@ -5473,6 +5473,9 @@ msgid "Return to call with {0}"
 msgstr "返回与 {0} 的通话"
 
 #: src/pages/McpOAuthCallback.tsx
+msgid "Return to OtterBot"
+msgstr "返回 OtterBot"
+
 #: src/pages/SlackInstallCallback.tsx
 msgid "Return to Rakazo"
 msgstr "返回 Rakazo"
@@ -5944,8 +5947,8 @@ msgid "Sign in at <0>{0}</0>, then paste the code here."
 msgstr "在 <0>{0}</0> 登录，然后将代码粘贴到这里。"
 
 #: src/pages/Auth.tsx
-msgid "Sign in to Rakazo"
-msgstr "登录 Rakazo"
+msgid "Sign in to OtterBot"
+msgstr "登录 OtterBot"
 
 #: src/lib/user-error.ts
 msgid "Sign in to your existing account to link SSO"

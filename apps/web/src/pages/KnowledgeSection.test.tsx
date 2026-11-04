@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 
+import { ORPCError } from "@orpc/client";
 import type { AgentSkillCatalogEntry } from "@rakazo/contracts";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ComponentProps, ReactNode } from "react";
@@ -125,6 +126,47 @@ it("edits the selected memory and offers undo", async () => {
     });
     await act(async () => button("Undo").click());
     expect(memoryApi.undoEntry).toHaveBeenCalledWith({ documentId: doc.id, expectedRevision: 3 });
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    vi.unstubAllGlobals();
+  }
+});
+
+it("reopens the latest memory after a selection edit conflicts", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const doc = {
+    id: "entry-doc",
+    scope: "bot" as const,
+    botId: "bot-fixture",
+    path: "MEMORY.md",
+    content: "old fact",
+    revision: 1,
+    updatedAt: "",
+  };
+  memoryApi.list
+    .mockReset()
+    .mockResolvedValueOnce([doc] as never)
+    .mockResolvedValue([{ ...doc, content: "new fact", revision: 2 }] as never);
+  memoryApi.editEntry.mockRejectedValueOnce(new ORPCError("CONFLICT"));
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  const button = (text: string) =>
+    [...container.querySelectorAll("button")].find((b) => b.textContent === text)!;
+  try {
+    await show(root, <KnowledgeSection botId="bot-fixture" />);
+    await act(async () => button("MEMORY.md").click());
+    const editor = container.querySelector("textarea")!;
+    editor.focus();
+    editor.setSelectionRange(0, 3);
+    await act(async () => document.dispatchEvent(new Event("selectionchange", { bubbles: true })));
+    await act(async () => button("Edit selection").click());
+    await act(async () => button("Replace").click());
+    expect(container.textContent).toContain("Document changed. Reopen to edit the latest version.");
+    await act(async () => button("Cancel").click());
+    await act(async () => button("MEMORY.md").click());
+    expect(container.querySelector("textarea")?.value).toBe("new fact");
   } finally {
     await act(async () => root.unmount());
     container.remove();

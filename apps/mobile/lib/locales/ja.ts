@@ -1387,6 +1387,11 @@ export const JA_MESSAGES: Record<string, string> = {
   "Could not load": "読み込めませんでした",
   "Enable mobile notifications to receive delay alerts.":
     "遅延アラートを受け取るにはモバイル通知を有効にしてください。",
+  "Paste the OpenAI-compatible address from your server. OtterBot adds /v1 if needed.":
+    "サーバーのOpenAI互換アドレスを貼り付けてください。必要に応じてOtterBotが/v1を追加します。",
+  "Sign in to OtterBot": "OtterBotにログイン",
+  "Sign up for OtterBot": "OtterBotに新規登録",
+  "That URL did not look like an OtterBot server": "そのURLはOtterBotサーバーではないようです",
 };
 
 export const PEER_MESSAGE_FORMS = { other: "{peer}とのメッセージ{count}件" };

@@ -1361,6 +1361,11 @@ export const ZH_TW_MESSAGES: Record<string, string> = {
   "View prompt memory": "檢視提示詞記憶",
   "Could not load": "無法載入",
   "Enable mobile notifications to receive delay alerts.": "啟用行動通知以接收延遲提醒。",
+  "Paste the OpenAI-compatible address from your server. OtterBot adds /v1 if needed.":
+    "貼上你伺服器的 OpenAI 相容地址。如有需要，OtterBot 會自動補上 /v1。",
+  "Sign in to OtterBot": "登入 OtterBot",
+  "Sign up for OtterBot": "註冊 OtterBot",
+  "That URL did not look like an OtterBot server": "該地址看起來不是 OtterBot 伺服器",
 };
 
 export const PEER_MESSAGE_FORMS = { other: "與{peer}的 {count} 則訊息" };

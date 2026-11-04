@@ -1,3 +1,4 @@
+-- deferred
 -- The previous release no longer reads these.
 ALTER TABLE "bots" DROP COLUMN "title";
 ALTER TABLE "bots" DROP COLUMN "selfUpdateInstructions";

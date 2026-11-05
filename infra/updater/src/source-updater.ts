@@ -40,7 +40,12 @@ export type SourceUpdateCommand =
 export type SourceUpdateCommandRunner = (
   command: SourceUpdateCommand,
   args: string[],
-  options: { cwd: string; timeoutMs: number; env?: Record<string, string> },
+  options: {
+    cwd: string;
+    timeoutMs: number;
+    env?: Record<string, string>;
+    maxOutputCharacters?: number;
+  },
 ) => Promise<CommandResult>;
 
 export interface SourceUpdateCandidate {
@@ -214,8 +219,12 @@ export function createSourceUpdater(config: SourceUpdaterConfig) {
       }
       await chown(tempRoot, owner.uid, owner.gid);
       const candidateDir = path.join(tempRoot, "candidate");
-      const candidateGit = (args: string[]) =>
-        run("git", args, { cwd: candidateDir, timeoutMs: GIT_TIMEOUT_MS });
+      const candidateGit = (args: string[], maxOutputCharacters?: number) =>
+        run("git", args, {
+          cwd: candidateDir,
+          timeoutMs: GIT_TIMEOUT_MS,
+          ...(maxOutputCharacters === undefined ? {} : { maxOutputCharacters }),
+        });
       let keepCandidate = false;
       try {
         const cloned = await run(
@@ -323,7 +332,7 @@ export function createSourceUpdater(config: SourceUpdaterConfig) {
             "--unified=2",
             base,
             targetCommit,
-          ]),
+          ], DIFF_LIMIT),
         ]);
         if (!fileResult.ok || !logResult.ok || !countResult.ok || !diffResult.ok) {
           return failure("The official changes could not be summarized.", {
@@ -866,10 +875,17 @@ export function createSourceUpdaterCommandRunner(
 ): SourceUpdateCommandRunner {
   return async (command, args, options) => {
     if (command === "git" || command === "pnpm") {
+      const env = options.env ?? safeGitEnvironment(source);
       return execFileResult(command, args, {
         cwd: options.cwd,
         timeoutMs: options.timeoutMs,
-        env: options.env ?? safeGitEnvironment(source),
+        env,
+        ...(command === "git" && options.maxOutputCharacters !== undefined
+          ? {
+              maxBuffer: options.maxOutputCharacters * 4,
+              outputLimitCharacters: options.maxOutputCharacters,
+            }
+          : {}),
       });
     }
     const actions = {
@@ -955,7 +971,13 @@ async function waitForApiHealth(timeoutMs: number): Promise<CommandResult> {
 function execFileResult(
   command: string,
   args: string[],
-  options: { cwd: string; timeoutMs: number; env?: Record<string, string> },
+  options: {
+    cwd: string;
+    timeoutMs: number;
+    env?: Record<string, string>;
+    maxBuffer?: number;
+    outputLimitCharacters?: number;
+  },
 ): Promise<CommandResult> {
   return new Promise((resolve) => {
     execFile(
@@ -964,17 +986,32 @@ function execFileResult(
       {
         cwd: options.cwd,
         timeout: options.timeoutMs,
-        maxBuffer: 4 * 1024 * 1024,
+        maxBuffer: options.maxBuffer ?? 4 * 1024 * 1024,
         windowsHide: true,
         shell: false,
         env: { PATH: process.env.PATH ?? "/usr/bin:/bin", LANG: process.env.LANG, ...options.env },
       },
       (error, stdout, stderr) => {
-        const output = `${stdout}${stderr}`.trimEnd();
+        const rawStdout = String(stdout);
+        const bufferLimited =
+          options.outputLimitCharacters !== undefined &&
+          error?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" &&
+          Buffer.byteLength(rawStdout) >= (options.maxBuffer ?? 4 * 1024 * 1024);
+        const outputStdout =
+          options.outputLimitCharacters === undefined
+            ? rawStdout
+            : rawStdout.slice(0, options.outputLimitCharacters);
+        const output = `${outputStdout}${stderr}`.trimEnd();
         resolve({
-          ok: !error,
-          exitCode: error && typeof error.code === "number" ? error.code : error ? null : 0,
-          stdout: String(stdout),
+          ok: !error || bufferLimited,
+          exitCode: bufferLimited
+            ? 0
+            : error && typeof error.code === "number"
+              ? error.code
+              : error
+                ? null
+                : 0,
+          stdout: outputStdout,
           output: output.length > 8_000 ? output.slice(-8_000) : output,
         });
       },

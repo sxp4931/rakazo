@@ -1,5 +1,5 @@
 import { Trans, useLingui } from "@lingui/react/macro";
-import type { AccountSecurity, UsageSummary } from "@rakazo/contracts";
+import type { AccountSecurity, BotAvatarSet, UsageSummary } from "@rakazo/contracts";
 import {
   accountDisplay,
   displayName,
@@ -33,7 +33,11 @@ import { AccountAccess, LinkSsoRow } from "../components/AccountAccess";
 import { AccountDataSettings } from "../components/AccountDataSettings";
 import { SuccessPop } from "../components/ai/primitives";
 import { ComputerDeviceSettings } from "../components/ComputerDeviceSettings";
-import { ComputersUnavailableHint } from "../components/ComputersUnavailableHint";
+import { ComputerProviderSettings } from "../components/ComputerProviderSettings";
+import {
+  ComputersUnavailableHint,
+  computersAreUnavailable,
+} from "../components/ComputersUnavailableHint";
 import { DesktopUpdateSection } from "../components/DesktopUpdates";
 import { PasskeySettings } from "../components/PasskeySettings";
 import { SettingsGroup, SettingsRow } from "../components/SettingsRows";
@@ -79,6 +83,9 @@ export type SettingsGeneralProps = {
   /** The user's saved IANA timezone, or null before one is set. */
   timezone?: string | null;
   onTimezoneChange?: (timezone: string) => Promise<void>;
+  /** The icon set new and unpinned bots wear; absent from servers that predate it. */
+  botAvatarSet?: BotAvatarSet;
+  onBotAvatarSetChange?: (set: BotAvatarSet) => Promise<void>;
   onAccountImported?: () => Promise<void>;
   onImportAgent?: () => void;
 };
@@ -89,6 +96,8 @@ export function GeneralSettingsPanels({
   onNameSaved,
   timezone = null,
   onTimezoneChange,
+  botAvatarSet,
+  onBotAvatarSetChange,
   onAccountImported,
   onImportAgent,
 }: SettingsGeneralProps) {
@@ -144,6 +153,8 @@ export function GeneralSettingsPanels({
     () => "comfortable",
   );
   const sidebarDensityLabelId = useId();
+  const botStyleLabelId = useId();
+  const [botStyleError, setBotStyleError] = useState<string | null>(null);
   const [streamReplies, setStreamReplies] = useState(
     () => getResponseStreamingPreference() === "on",
   );
@@ -289,6 +300,51 @@ export function GeneralSettingsPanels({
             />
           }
         />
+        {botAvatarSet && onBotAvatarSetChange ? (
+          <SettingsRow
+            label={
+              <span id={botStyleLabelId}>
+                <Trans>Bot style</Trans>
+              </span>
+            }
+            control={
+              <div className="space-y-1">
+                <ToggleGroup
+                  aria-labelledby={botStyleLabelId}
+                  data-testid="bot-style-select"
+                  value={[botAvatarSet]}
+                  onValueChange={([next]) => {
+                    if (!next || next === botAvatarSet) return;
+                    setBotStyleError(null);
+                    onBotAvatarSetChange(next as BotAvatarSet).catch(() =>
+                      setBotStyleError(t`Couldn't update bot style`),
+                    );
+                  }}
+                  spacing={1}
+                  className="grid min-w-0 grid-cols-2 rounded-lg bg-muted p-1"
+                >
+                  <ToggleGroupItem
+                    value="organic"
+                    className="text-[13px] aria-pressed:bg-background aria-pressed:shadow-sm"
+                  >
+                    <Trans>Original</Trans>
+                  </ToggleGroupItem>
+                  <ToggleGroupItem
+                    value="rakazo"
+                    className="text-[13px] aria-pressed:bg-background aria-pressed:shadow-sm"
+                  >
+                    <Trans>Rakazo</Trans>
+                  </ToggleGroupItem>
+                </ToggleGroup>
+                {botStyleError ? (
+                  <p role="alert" className="text-[12.5px] text-destructive">
+                    {botStyleError}
+                  </p>
+                ) : null}
+              </div>
+            }
+          />
+        ) : null}
         <SettingsRow
           label={
             <span id={sidebarDensityLabelId}>
@@ -482,24 +538,49 @@ export function UsageSettingsPanel({
     style: "currency",
     currency: "USD",
   });
+  const allowanceUsd = new Intl.NumberFormat(i18n.locale, {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 6,
+  });
   const number = (value: number | null | undefined) => (value == null ? "—" : count.format(value));
   const cost = (value: number | null | undefined) =>
     value == null ? "—" : value > 0 && value < 0.01 ? `<${usd.format(0.01)}` : usd.format(value);
   const models = usage?.models ?? [];
+  const stats: { label: string; value: string; note?: string }[] = usage
+    ? [
+        { label: t`Runs`, value: number(usage.runs) },
+        { label: t`Tokens`, value: number(usage.totalTokens) },
+        { label: t`Cost`, value: cost(usage.costUsd) },
+      ]
+    : [];
+  const hasAllowance = (usage?.allowanceCalls ?? 0) > 0 && usage?.allowanceUsd != null;
+  if (hasAllowance) {
+    stats.push({
+      label: t`Allowance used`,
+      value: allowanceUsd.format(usage?.allowanceUsd ?? 0),
+      note: t`Measured calls: ${count.format(usage.allowanceCalls ?? 0)}`,
+    });
+  }
+  const hasModelAllowance = models.some((row) => (row.allowanceCalls ?? 0) > 0);
   return (
     <div ref={panelRef} tabIndex={-1} data-testid="usage-settings" className="outline-none">
       {usage ? (
-        <dl className="grid grid-cols-3 gap-3">
-          {[
-            { label: t`Runs`, value: number(usage.runs) },
-            { label: t`Tokens`, value: number(usage.totalTokens) },
-            { label: t`Cost`, value: cost(usage.costUsd) },
-          ].map((stat) => (
+        <dl
+          className={
+            hasAllowance ? "grid grid-cols-2 gap-3 md:grid-cols-4" : "grid grid-cols-3 gap-3"
+          }
+        >
+          {stats.map((stat) => (
             <div key={stat.label} className="rounded-xl border border-border px-4 py-3">
               <dt className="text-[12.5px] text-muted-foreground">{stat.label}</dt>
               <dd className="mt-1 text-[18px] font-medium tabular-nums text-foreground">
                 {stat.value}
               </dd>
+              {stat.note ? (
+                <div className="mt-1 text-[12px] text-muted-foreground">{stat.note}</div>
+              ) : null}
             </div>
           ))}
         </dl>
@@ -524,6 +605,11 @@ export function UsageSettingsPanel({
                 <TableHead className="text-right text-muted-foreground">
                   <Trans>Cost</Trans>
                 </TableHead>
+                {hasModelAllowance ? (
+                  <TableHead className="text-right text-muted-foreground">
+                    <Trans>Allowance used</Trans>
+                  </TableHead>
+                ) : null}
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -543,6 +629,20 @@ export function UsageSettingsPanel({
                     {number(row.outputTokens)}
                   </TableCell>
                   <TableCell className="text-right tabular-nums">{cost(row.costUsd)}</TableCell>
+                  {hasModelAllowance ? (
+                    <TableCell className="text-right tabular-nums">
+                      {(row.allowanceCalls ?? 0) > 0 && row.allowanceUsd != null ? (
+                        <>
+                          <div>{allowanceUsd.format(row.allowanceUsd)}</div>
+                          <div className="text-[11px] text-muted-foreground">
+                            <Trans>Measured calls: {count.format(row.allowanceCalls ?? 0)}</Trans>
+                          </div>
+                        </>
+                      ) : (
+                        "—"
+                      )}
+                    </TableCell>
+                  ) : null}
                 </TableRow>
               ))}
             </TableBody>
@@ -557,11 +657,17 @@ export function ComputerSettingsPanel({
   sandboxProvider,
   onSandboxProviderChange,
   onRecoveryDismissed,
+  canConfigureComputers = false,
 }: {
   sandboxProvider?: string | null;
   onSandboxProviderChange?: (sandboxProvider: string) => void;
   onRecoveryDismissed?: () => void;
+  canConfigureComputers?: boolean;
 }) {
+  // Once shown, the hint stays mounted so a successful check can show its confirmation.
+  const unavailable = computersAreUnavailable(sandboxProvider);
+  const [hintShown, setHintShown] = useState(unavailable);
+  if (unavailable && !hintShown) setHintShown(true);
   return (
     <div
       data-testid="computers-setup-settings"
@@ -570,12 +676,21 @@ export function ComputerSettingsPanel({
       <h3 className="text-heading3 font-medium text-foreground">
         <Trans>Computers</Trans>
       </h3>
-      <ComputersUnavailableHint
-        className="mt-3 text-[13px] leading-relaxed text-muted-foreground"
-        sandboxProvider={sandboxProvider}
-        onRecovered={onSandboxProviderChange}
-        onRecoveryDismissed={onRecoveryDismissed}
-      />
+      {hintShown ? (
+        <ComputersUnavailableHint
+          className="mt-3 text-[13px] leading-relaxed text-muted-foreground"
+          sandboxProvider={sandboxProvider}
+          onRecovered={onSandboxProviderChange}
+          onRecoveryDismissed={onRecoveryDismissed}
+        />
+      ) : null}
+      {/* The server decides what an account may change, including removing keys it saved. */}
+      {canConfigureComputers || sandboxProvider ? (
+        <ComputerProviderSettings
+          scope={canConfigureComputers ? "deployment" : "account"}
+          onProviderChange={onSandboxProviderChange}
+        />
+      ) : null}
     </div>
   );
 }

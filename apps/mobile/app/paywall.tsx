@@ -1,5 +1,5 @@
 import { MenuView } from "@expo/ui/community/menu";
-import type { BillingStatus } from "@rakazo/contracts";
+import type { BillingStatus, ByokInterval } from "@rakazo/contracts";
 import {
   AI_PRIVACY_URL,
   DEFAULT_MONTHLY_CREDIT_AMOUNT,
@@ -27,7 +27,9 @@ import { useAccountDeletion } from "../components/account-deletion";
 import { BotAvatar } from "../components/bot-avatar";
 import { GlassIconButton } from "../components/glass-icon-button";
 import { NativeActionButton } from "../components/native-action-button";
+import { NativeSegmentedControl } from "../components/native-segmented-control";
 import { NativeSymbol } from "../components/native-symbol";
+import { useOrganizationMenuAction } from "../components/organization-menu";
 import { FORM_COLUMN_WIDTH } from "../lib/adaptive-layout";
 import { rpc, signOut } from "../lib/api";
 import { replaceWithSignIn } from "../lib/auth-routing";
@@ -41,9 +43,11 @@ import {
   setPaywallShown,
   subscribedPlan,
 } from "../lib/billing";
+import { endCallBeforeSessionEnd } from "../lib/call-session";
 import { translucentColor } from "../lib/color";
 import { dateLocaleForUi, useI18n } from "../lib/i18n";
 import { useMobileTokens } from "../lib/native";
+import { organizationSwitchActions, useOrganizations } from "../lib/organizations";
 import { errorText } from "../lib/user-error";
 
 type Amount = (typeof MODEL_CREDIT_AMOUNTS)[number];
@@ -73,8 +77,11 @@ export default function Paywall() {
   const [status, setStatus] = useState<BillingStatus | null>(null);
   const [plan, setPlan] = useState<Plan>("byok");
   const [amount, setAmount] = useState<Amount>(DEFAULT_MONTHLY_CREDIT_AMOUNT);
+  const [interval, setByokInterval] = useState<ByokInterval>("month");
   const [pending, setPending] = useState(false);
   const deletion = useAccountDeletion();
+  const organizations = useOrganizations(!dismissible).data;
+  const organizationAction = useOrganizationMenuAction(organizations);
   useEffect(() => {
     if (deletion.error) Alert.alert(deletion.error);
   }, [deletion.error]);
@@ -139,8 +146,8 @@ export default function Paywall() {
               client: "mobile",
             })
           : status.byokFreeUntil
-            ? await rpc("billing/checkout", { client: "mobile" })
-            : await rpc("billing/selectFunding", { funding: "byok", client: "mobile" });
+            ? await rpc("billing/checkout", { client: "mobile", interval })
+            : await rpc("billing/selectFunding", { funding: "byok", client: "mobile", interval });
       const next = url ? await openBillingPage(url) : await rpc("billing/refresh");
       setStatus(next);
       if (purchaseCompleted(status, next)) setStarted(plan);
@@ -153,6 +160,8 @@ export default function Paywall() {
 
   async function leave() {
     try {
+      // Hang up while the session still exists, so the server records the call's end.
+      await endCallBeforeSessionEnd();
       await signOut();
       replaceWithSignIn();
     } catch (err) {
@@ -178,13 +187,15 @@ export default function Paywall() {
       ) : (
         <MenuView
           actions={[
+            ...organizationSwitchActions(organizations),
             { id: "sign-out", title: t("Sign out") },
             { id: "delete", title: t("Delete account") },
           ]}
           onPressAction={({ nativeEvent }) => {
             if (pending || deletion.pending) return;
             if (nativeEvent.event === "delete") void deletion.request();
-            else void leave();
+            else if (nativeEvent.event === "sign-out") void leave();
+            else organizationAction(nativeEvent.event);
           }}
         >
           <View
@@ -271,7 +282,12 @@ export default function Paywall() {
   const offer = ownKeyOffer(status);
   // From Billing, the plan already paid for is marked and cannot be bought again.
   const subscribed = dismissible ? subscribedPlan(status) : null;
-  const ownKeyPrice = status.byokPriceCents ? `$${status.byokPriceCents / 100}` : null;
+  const annualCents = status.byokPriceCents ? status.byokAnnualPriceCents : null;
+  const yearly = interval === "year" && annualCents;
+  const monthlyPrice = status.byokPriceCents ? `$${status.byokPriceCents / 100}` : null;
+  const annualMonthlyPrice = annualCents ? `$${Math.round(annualCents / 12) / 100}` : null;
+  // What the chosen plan bills each period, as the terms and trial timeline state it.
+  const ownKeyPrice = yearly ? `$${yearly / 100}` : monthlyPrice;
   const creditPrice = `$${amount / 100}`;
   const features: { label: string; ios: string; android: SymbolName; color: string }[] = [
     {
@@ -303,12 +319,19 @@ export default function Paywall() {
     plan === "credits"
       ? t("{price} / month. Cancel anytime.", { price: creditPrice })
       : offer === "trial" && ownKeyPrice
-        ? t("{days} days free, then {price} / month. Cancel anytime.", {
-            days: status.trialDays,
-            price: ownKeyPrice,
-          })
+        ? yearly
+          ? t("{days} days free, then {price} / year. Cancel anytime.", {
+              days: status.trialDays,
+              price: ownKeyPrice,
+            })
+          : t("{days} days free, then {price} / month. Cancel anytime.", {
+              days: status.trialDays,
+              price: ownKeyPrice,
+            })
         : ownKeyPrice
-          ? t("{price} / month. Cancel anytime.", { price: ownKeyPrice })
+          ? yearly
+            ? t("{price} / year. Cancel anytime.", { price: ownKeyPrice })
+            : t("{price} / month. Cancel anytime.", { price: ownKeyPrice })
           : null;
 
   return (
@@ -366,7 +389,34 @@ export default function Paywall() {
             selected={plan === "byok"}
             onPress={() => setPlan("byok")}
             title={t("Your subscription or API key")}
-            price={ownKeyPrice ? t("{price} / month", { price: ownKeyPrice }) : t("Free")}
+            price={
+              monthlyPrice
+                ? t("{price} / month", {
+                    price: yearly && annualMonthlyPrice ? annualMonthlyPrice : monthlyPrice,
+                  })
+                : t("Free")
+            }
+            accessory={
+              monthlyPrice && annualCents && status.byokPriceCents ? (
+                <NativeSegmentedControl
+                  accessibilityLabel={t("Billing period")}
+                  value={interval}
+                  onChange={(next) => {
+                    setByokInterval(next);
+                    setPlan("byok");
+                  }}
+                  options={[
+                    { value: "month", label: t("Monthly") },
+                    {
+                      value: "year",
+                      label: t("Yearly −{percent}%", {
+                        percent: Math.round((1 - annualCents / (status.byokPriceCents * 12)) * 100),
+                      }),
+                    },
+                  ]}
+                />
+              ) : undefined
+            }
             detail={t("Works with your ChatGPT or Claude plan.")}
             badge={
               subscribed === "byok"
@@ -380,33 +430,41 @@ export default function Paywall() {
             <PlanCard
               selected={plan === "credits"}
               onPress={() => setPlan("credits")}
-              title={t("Rakazo credits")}
+              title={t("Credits")}
               badge={subscribed === "credits" ? t("Current plan") : undefined}
-              price={
-                <MenuView
-                  actions={MODEL_CREDIT_AMOUNTS.map((value) => ({
-                    id: String(value),
-                    title: t("{price} / month", { price: `$${value / 100}` }),
-                    state: amount === value ? ("on" as const) : ("off" as const),
-                  }))}
-                  onPressAction={({ nativeEvent }) => {
-                    setAmount(ModelCreditAmountSchema.parse(Number(nativeEvent.event)));
-                    setPlan("credits");
-                  }}
-                >
-                  <View style={styles.amount}>
-                    <Text style={[styles.price, { color: tokens.foreground }]}>
-                      {t("{price} / month", { price: creditPrice })}
-                    </Text>
-                    <NativeSymbol
-                      ios="chevron.up.chevron.down"
-                      android="chevron-expand"
-                      size={12}
-                      color={tokens.mutedForeground}
-                    />
-                  </View>
-                </MenuView>
-              }
+              price={{
+                label: t("{price} / month", { price: creditPrice }),
+                control: (
+                  <MenuView
+                    actions={MODEL_CREDIT_AMOUNTS.map((value) => ({
+                      id: String(value),
+                      title: t("{price} / month", { price: `$${value / 100}` }),
+                      state: amount === value ? ("on" as const) : ("off" as const),
+                    }))}
+                    onPressAction={({ nativeEvent }) => {
+                      setAmount(ModelCreditAmountSchema.parse(Number(nativeEvent.event)));
+                      setPlan("credits");
+                    }}
+                  >
+                    <View
+                      accessible
+                      accessibilityRole="button"
+                      accessibilityLabel={t("{price} / month", { price: creditPrice })}
+                      style={styles.amount}
+                    >
+                      <Text style={[styles.price, { color: tokens.foreground }]}>
+                        {t("{price} / month", { price: creditPrice })}
+                      </Text>
+                      <NativeSymbol
+                        ios="chevron.up.chevron.down"
+                        android="chevron-expand"
+                        size={12}
+                        color={tokens.mutedForeground}
+                      />
+                    </View>
+                  </MenuView>
+                ),
+              }}
               detail={t("All {price} goes to model usage.", { price: creditPrice })}
             />
           )}
@@ -425,7 +483,11 @@ export default function Paywall() {
               ios="creditcard.fill"
               android="card"
               title={t("Day {days}", { days: status.trialDays })}
-              detail={t("{price} / month begins", { price: ownKeyPrice })}
+              detail={
+                yearly
+                  ? t("{price} / year begins", { price: ownKeyPrice })
+                  : t("{price} / month begins", { price: ownKeyPrice })
+              }
             />
           </View>
         ) : null}
@@ -475,21 +537,20 @@ function PlanCard({
   price,
   detail,
   badge,
+  accessory,
 }: {
   selected: boolean;
   onPress: () => void;
   title: string;
-  price: ReactNode;
+  /** Text, or a control that picks it with its text as the label read for the plan. */
+  price: string | { label: string; control: ReactNode };
   detail: string;
   badge?: string;
+  accessory?: ReactNode;
 }) {
   const tokens = useMobileTokens();
   return (
-    <Pressable
-      accessibilityRole="radio"
-      accessibilityState={{ checked: selected }}
-      accessibilityLabel={title}
-      onPress={onPress}
+    <View
       style={[
         styles.plan,
         {
@@ -501,31 +562,44 @@ function PlanCard({
         },
       ]}
     >
-      <View style={styles.planHeader}>
-        <NativeSymbol
-          ios={selected ? "checkmark.circle.fill" : "circle"}
-          android={selected ? "checkmark-circle" : "ellipse-outline"}
-          size={22}
-          color={selected ? tokens.primary : tokens.faintForeground}
-        />
-        <Text style={[styles.planTitle, { color: tokens.foreground }]}>{title}</Text>
-      </View>
-      <View style={styles.planBody}>
-        <View style={styles.priceRow}>
-          {typeof price === "string" ? (
-            <Text style={[styles.price, { color: tokens.foreground }]}>{price}</Text>
-          ) : (
-            price
-          )}
-          {badge ? (
-            <View style={[styles.badge, { backgroundColor: tokens.primary }]}>
-              <Text style={[styles.badgeLabel, { color: tokens.primaryForeground }]}>{badge}</Text>
-            </View>
-          ) : null}
+      <Pressable
+        accessibilityRole="radio"
+        accessibilityState={{ checked: selected }}
+        accessibilityLabel={[title, typeof price === "string" ? price : price.label, badge, detail]
+          .filter(Boolean)
+          .join(", ")}
+        onPress={onPress}
+        style={styles.planPress}
+      >
+        <View style={styles.planHeader}>
+          <NativeSymbol
+            ios={selected ? "checkmark.circle.fill" : "circle"}
+            android={selected ? "checkmark-circle" : "ellipse-outline"}
+            size={22}
+            color={selected ? tokens.primary : tokens.faintForeground}
+          />
+          <Text style={[styles.planTitle, { color: tokens.foreground }]}>{title}</Text>
         </View>
-        <Text style={[styles.planDetail, { color: tokens.mutedForeground }]}>{detail}</Text>
-      </View>
-    </Pressable>
+        <View style={styles.planBody}>
+          <View style={styles.priceRow}>
+            {typeof price === "string" ? (
+              <Text style={[styles.price, { color: tokens.foreground }]}>{price}</Text>
+            ) : null}
+            {badge ? (
+              <View style={[styles.badge, { backgroundColor: tokens.primary }]}>
+                <Text style={[styles.badgeLabel, { color: tokens.primaryForeground }]}>
+                  {badge}
+                </Text>
+              </View>
+            ) : null}
+          </View>
+          <Text style={[styles.planDetail, { color: tokens.mutedForeground }]}>{detail}</Text>
+        </View>
+      </Pressable>
+      {/* Controls sit outside the radio, so VoiceOver can reach each one. */}
+      {typeof price === "string" ? null : <View style={styles.planAccessory}>{price.control}</View>}
+      {accessory ? <View style={styles.planAccessory}>{accessory}</View> : null}
+    </View>
   );
 }
 
@@ -615,6 +689,8 @@ const styles = StyleSheet.create({
   planHeader: { flexDirection: "row", alignItems: "center", gap: 10 },
   planTitle: { ...typeScale.cardTitle, flex: 1 },
   planBody: { paddingLeft: 32, gap: 2 },
+  planPress: { gap: 8 },
+  planAccessory: { marginTop: 4, marginLeft: 32 },
   price: { fontSize: 22, lineHeight: 28, fontWeight: "600" },
   planDetail: typeScale.secondary,
   amount: { flexDirection: "row", alignItems: "center", gap: 6, alignSelf: "flex-start" },

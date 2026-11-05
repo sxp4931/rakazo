@@ -12,12 +12,14 @@ import type {
 } from "@rakazo/contracts";
 import { afterEach, describe, expect, it } from "vitest";
 import { ES_MESSAGES } from "./locales/es.js";
+import { HE_MESSAGES } from "./locales/he.js";
+import { PL_MESSAGES } from "./locales/pl.js";
 
 type DesktopSetupResult = Awaited<ReturnType<RakazoSetup["save"]>>;
 
 const DEFAULT_LOCAL_URL = "http://127.0.0.1:6130";
 const CLOUD_URL = "https://cloud.rakazo.example";
-const ENGLISH: RakazoSetup["locale"] = { lang: "en", messages: {} };
+const ENGLISH: RakazoSetup["locale"] = { lang: "en", dir: "ltr", messages: {} };
 
 // The jsdom environment replaces the global URL, so resolve the sibling files via Node's.
 const srcDir = path.dirname(fileURLToPath(import.meta.url));
@@ -404,9 +406,17 @@ describe("setup", () => {
     expect(element<HTMLButtonElement>("continue").disabled).toBe(false);
   });
 
+  it("lays a right-to-left language out right to left", async () => {
+    await boot(null, { lang: "he", dir: "rtl", messages: HE_MESSAGES });
+    expect(document.documentElement.lang).toBe("he");
+    expect(document.documentElement.dir).toBe("rtl");
+    expect(element("continue").textContent).toBe(HE_MESSAGES.Continue);
+  });
+
   it("renders the page and its messages in the app's language", async () => {
-    const ui = await boot(null, { lang: "es", messages: ES_MESSAGES });
+    const ui = await boot(null, { lang: "es", dir: "ltr", messages: ES_MESSAGES });
     expect(document.documentElement.lang).toBe("es");
+    expect(document.documentElement.dir).toBe("ltr");
     expect(document.querySelector("h1")?.textContent).toBe("Te damos la bienvenida a Rakazo");
     expect(document.querySelector('label[for="mode-new"]')?.textContent?.trim()).toBe(
       "Esta computadora",
@@ -436,5 +446,38 @@ describe("setup", () => {
     await flush();
     expect(element("stack-phase").textContent).toBe("Descargando Rakazo…");
     expect(element("stack-detail").textContent).toBe("3 MB descargados");
+  });
+
+  it("renders Polish setup controls and interpolates connection and download status", async () => {
+    const ui = await boot(null, { lang: "pl", dir: "ltr", messages: PL_MESSAGES });
+    expect(document.documentElement.lang).toBe("pl");
+    expect(document.documentElement.dir).toBe("ltr");
+    expect(document.querySelector("h1")?.textContent).toBe("Witaj w Rakazo");
+    expect(element("continue").textContent).toBe(PL_MESSAGES.Continue);
+    expect(element("stack-details").getAttribute("aria-label")).toBe(
+      PL_MESSAGES["Technical details"],
+    );
+    expect(element<HTMLTextAreaElement>("server-headers").placeholder).toBe(
+      PL_MESSAGES["Name: value"],
+    );
+
+    selectMode("existing");
+    await flush();
+    element<HTMLInputElement>("server-url").value = "one.example";
+    element<HTMLButtonElement>("check").click();
+    await flush();
+    expect(element("status").textContent).toBe(PL_MESSAGES["Checking…"]);
+    ui.resolveCheck({ ok: true, url: "https://one.example" });
+    await flush();
+    expect(element("status").textContent).toBe(
+      "Rakazo odpowiedziało pod adresem https://one.example.",
+    );
+
+    selectMode("new");
+    submitForm();
+    ui.startResult.resolve({ ...stackState("pulling"), layerBytes: { layer: 2.5e6 } });
+    await flush();
+    expect(element("stack-phase").textContent).toBe(PL_MESSAGES["Downloading Rakazo…"]);
+    expect(element("stack-detail").textContent).toBe("Pobrano 3 MB");
   });
 });

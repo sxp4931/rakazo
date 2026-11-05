@@ -1,4 +1,6 @@
+import { createHash } from "node:crypto";
 import { createSlackAdapter } from "@chat-adapter/slack";
+import type { TelegramAdapter } from "@chat-adapter/telegram";
 import {
   createTelegramAdapter,
   escapeMarkdownV2,
@@ -18,6 +20,7 @@ import { ConsoleLogger, convertEmojiPlaceholders, markdownToPlainText } from "ch
 import { createSendblueAdapter } from "chat-adapter-sendblue";
 import type { ClientOptions as SendblueClientOptions } from "sendblue";
 import type { MessagingPlatform } from "./chat-sdk-surface.js";
+import { boundInboundMarkdown } from "./chat-sdk-surface.js";
 import { LazyLarkAdapter } from "./lark/lazy-adapter.js";
 import { Domain } from "./lark/thread-id.js";
 import { LazyPhotonAdapter } from "./photon/lazy-adapter.js";
@@ -219,6 +222,7 @@ export function messagingPlatformsFromEnv(
         adapter.encodeThreadId({ fromNumber: lineNumber, contactNumber: address }),
       peekStatuses: parseSendblueStatuses,
       participants: (raw) => sendblueParticipants(raw, lineNumber),
+      rosterAt: (raw) => sendblueRosterAt(raw),
       channelName: (raw) => sendblueGroupName(raw),
       transport: (raw) => sendblueTransport(raw),
     });
@@ -237,6 +241,7 @@ export function messagingPlatformsFromEnv(
         timeout: MESSAGING_SEND_TIMEOUT_MS,
       },
     });
+    boundInboundMarkdown(adapter);
     // Slack's reactions.add fails with already_reacted when a replayed inbound reacts twice.
     const addReaction = adapter.addReaction.bind(adapter);
     Object.assign(adapter, {
@@ -285,7 +290,7 @@ export function messagingPlatformsFromEnv(
     platforms.push({
       provider: "telegram",
       capabilities: { direct: true, groups: true, receipt: null, files: true },
-      adapter,
+      ...withTelegramRedelivery(adapter),
       ...telegramGroupHooks(adapter),
       isPermanentSendError: isTelegramBlocked,
     });
@@ -307,7 +312,7 @@ export function messagingPlatformsFromEnv(
       provider: `telegram-${bot.name}`,
       adapterName: "telegram",
       capabilities: { direct: true, groups: true, receipt: null, files: true },
-      adapter,
+      ...withTelegramRedelivery(adapter),
       ...telegramGroupHooks(adapter),
       isPermanentSendError: isTelegramBlocked,
     });
@@ -414,6 +419,21 @@ const WHATSAPP_REENGAGEMENT_REQUIRED = 131047;
 
 /** WhatsApp and Telegram both cap a text message at 4096 UTF-16 units. */
 const MESSAGE_PART_LIMIT = 4096;
+
+/**
+ * The key the Telegram adapter claims each webhook update under (chat-adapter
+ * 4.43), released when processing fails so Telegram's retry is processed. The
+ * redelivery test fails if an SDK upgrade moves it.
+ */
+function withTelegramRedelivery(adapter: TelegramAdapter) {
+  return {
+    adapter,
+    redeliveryKeys: (payload: unknown) => {
+      const scope = createHash("sha256").update(adapter.botUserId!).digest("hex");
+      return [`${adapter.name}:webhook-update:${scope}:${asRecord(payload)?.update_id}`];
+    },
+  };
+}
 
 /** Split before enqueueing so retries only resend the parts that failed. */
 export function splitOutboundBody(provider: string, body: string): string[] {
@@ -663,6 +683,15 @@ function sendblueParticipants(raw: unknown, lineNumber: string): string[] {
   return participants.filter(
     (entry): entry is string => typeof entry === "string" && entry !== lineNumber,
   );
+}
+
+/** When Sendblue says the roster was current: the message's send time. */
+function sendblueRosterAt(raw: unknown): Date | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const sent = (raw as { date_sent?: unknown }).date_sent;
+  if (typeof sent !== "string") return null;
+  const at = new Date(sent);
+  return Number.isNaN(at.getTime()) ? null : at;
 }
 
 function sendblueGroupName(raw: unknown): string | null {

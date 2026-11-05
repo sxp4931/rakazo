@@ -63,6 +63,11 @@ export const DESKTOP_MENU_COMMANDS = [
   "forward",
   "next-bot",
   "previous-bot",
+  "new-group",
+  "integrations",
+  "chat-panel",
+  "shortcuts",
+  "find",
 ] as const;
 
 export type DesktopMenuCommand = (typeof DESKTOP_MENU_COMMANDS)[number];
@@ -107,6 +112,11 @@ export interface RakazoDesktop {
   passkeys?: {
     /** Relying parties this build is associated with for system passkeys (macOS); others fail. */
     rpIds: () => Promise<string[]>;
+  };
+  /** Absent on older desktop releases. */
+  server?: {
+    /** Opens the desktop setup window to pick another Rakazo server. */
+    change: () => Promise<void>;
   };
   /** Absent on older desktop releases, which have no Settings… menu item. */
   settings?: {
@@ -225,7 +235,7 @@ export interface RakazoSetup {
   /** Used only to reserve space for native window controls in the local setup UI. */
   platform: string;
   /** The page's language and its translations, keyed by the English text; empty for English. */
-  locale: { lang: string; messages: Readonly<Record<string, string>> };
+  locale: { lang: string; dir: "ltr" | "rtl"; messages: Readonly<Record<string, string>> };
   state: () => Promise<DesktopSetupState>;
   test: (url: string, headers?: Record<string, string>) => Promise<DesktopReachability>;
   save: (setup: DesktopSetup) => Promise<{ ok: boolean; error?: string }>;

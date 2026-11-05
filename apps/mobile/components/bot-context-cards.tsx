@@ -1,6 +1,7 @@
 import type { MemoryDocument, ScratchpadItem } from "@rakazo/contracts";
 import { isEmptyBotMemory } from "@rakazo/contracts";
-import { useEffect, useState } from "react";
+import { useFocusEffect, useRouter } from "expo-router";
+import { useCallback, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { rpc } from "../lib/api";
 import { useI18n } from "../lib/i18n";
@@ -13,6 +14,7 @@ import { ProfileEditDialog } from "./profile-edit-dialog";
 
 export function BotContextCards({ botId }: { botId: string }) {
   const { t } = useI18n();
+  const router = useRouter();
   const tokens = useMobileTokens();
   const [work, setWork] = useState<ScratchpadItem[]>([]);
   const [docs, setDocs] = useState<MemoryDocument[]>([]);
@@ -20,28 +22,31 @@ export function BotContextCards({ botId }: { botId: string }) {
   const [allDocs, setAllDocs] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [openMemory, setOpenMemory] = useState<{ doc: MemoryDocument | null } | null>(null);
-  useEffect(() => {
-    setOpenMemory(null);
-    let current = true;
-    void rpc("scratchpad/list", { botId })
-      .then((items) => {
-        if (current) setWork(items);
-      })
-      .catch((err) => {
-        if (current) setError(errorText(err));
-      });
-    void rpc("memory/list", { botId, scope: "bot" })
-      .then((documents) => {
-        if (current) setDocs(documents.filter((doc) => !isEmptyBotMemory(doc)));
-      })
-      .catch((err) => {
-        if (current) setError(errorText(err));
-      });
-    return () => {
-      current = false;
-    };
-  }, [botId]);
+  const [viewPromptMemory, setViewPromptMemory] = useState(false);
+  // Reload on return, so an edited or deleted note shows its saved state.
+  useFocusEffect(
+    useCallback(() => {
+      let current = true;
+      setError(null);
+      void rpc("scratchpad/list", { botId })
+        .then((items) => {
+          if (current) setWork(items);
+        })
+        .catch((err) => {
+          if (current) setError(errorText(err));
+        });
+      void rpc("memory/list", { botId, scope: "bot" })
+        .then((documents) => {
+          if (current) setDocs(documents.filter((doc) => !isEmptyBotMemory(doc)));
+        })
+        .catch((err) => {
+          if (current) setError(errorText(err));
+        });
+      return () => {
+        current = false;
+      };
+    }, [botId]),
+  );
   const heading = { color: tokens.mutedForeground, fontSize: 12, fontWeight: "500" as const };
   const card = { backgroundColor: native.fill, borderRadius: 12, padding: 16, gap: 12 };
   return (
@@ -135,7 +140,7 @@ export function BotContextCards({ botId }: { botId: string }) {
           </View>
         </View>
       ) : null}
-      {
+      {docs.length ? (
         <View style={{ marginTop: 24 }}>
           <Text accessibilityRole="header" style={[heading, { marginBottom: 8 }]}>
             {t("Memory")}
@@ -146,7 +151,9 @@ export function BotContextCards({ botId }: { botId: string }) {
                 key={doc.id}
                 accessibilityRole="button"
                 accessibilityLabel={doc.path}
-                onPress={() => setOpenMemory({ doc })}
+                onPress={() =>
+                  router.push({ pathname: "/memory-note", params: { id: doc.id, botId } })
+                }
                 style={{
                   minHeight: 44,
                   flexDirection: "row",
@@ -166,11 +173,6 @@ export function BotContextCards({ botId }: { botId: string }) {
                 />
               </Pressable>
             ))}
-            <NativeActionButton
-              label={t("View prompt memory")}
-              prominence="plain"
-              onPress={() => setOpenMemory({ doc: null })}
-            />
             {!allDocs && docs.length > 5 ? (
               <Pressable
                 accessibilityRole="button"
@@ -182,17 +184,22 @@ export function BotContextCards({ botId }: { botId: string }) {
             ) : null}
           </View>
         </View>
-      }
+      ) : null}
+      {!docs.length ? (
+        <NativeActionButton
+          label={t("View prompt memory")}
+          prominence="plain"
+          onPress={() => setViewPromptMemory(true)}
+        />
+      ) : null}
       {error ? <Text style={{ color: tokens.destructive, marginTop: 16 }}>{error}</Text> : null}
-      {openMemory ? (
+      {viewPromptMemory ? (
         <MemoryEntries
-          initial={openMemory.doc}
+          initial={null}
           botId={botId}
-          onClose={() => setOpenMemory(null)}
-          onUpdate={(updated) =>
-            setDocs((current) => current.map((doc) => (doc.id === updated.id ? updated : doc)))
-          }
-          onRefresh={async () => setDocs(await rpc("memory/list", { botId, scope: "bot" }))}
+          onClose={() => setViewPromptMemory(false)}
+          onUpdate={() => undefined}
+          onRefresh={async () => undefined}
         />
       ) : null}
     </>

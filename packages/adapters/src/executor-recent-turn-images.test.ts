@@ -30,14 +30,23 @@ const VISION_MODEL = "openai/gpt-4o";
 type Deferred<T> = { promise: Promise<T>; resolve: (value: T) => void };
 type Gate = { reached: Deferred<void>; release: Deferred<void> };
 type RunHooks = {
+  computer?: { defaultModelId?: string; checkpoint?: string };
   runtimeGate?: Gate;
   notificationGate?: Gate;
   computerLeaseRenewal?: () => Promise<boolean>;
   /** The model lists the computer's files before answering, which starts the computer. */
   useComputer?: boolean;
   trigger?: string;
+  sourceMessageId?: string;
   /** A reply bound to this run as steering, claimed before any tool runs. */
   steeringBlocks?: MessageBlock[];
+  /** Run in a group thread with this stored history (newest first) and these bot records. */
+  group?: {
+    messages: ReturnType<typeof historyMessages>;
+    bots: Array<{ id: string; name: string }>;
+  };
+  /** The newest user message points at this run, sends a picture and may wait for its own run. */
+  pictureMessage?: { waiting: boolean };
 };
 
 function deferred<T>(): Deferred<T> {
@@ -48,7 +57,7 @@ function deferred<T>(): Deferred<T> {
   return { promise, resolve };
 }
 
-function historyMessages(): Array<{
+function historyMessages(pictureMessage?: { waiting: boolean }): Array<{
   id: string;
   threadId: string;
   seq: number;
@@ -58,6 +67,7 @@ function historyMessages(): Array<{
   replyToMessageId: null;
   replyQuote: null;
   replyTo: null;
+  steeringMessages: Array<{ id: string }>;
 }> {
   return [
     {
@@ -66,10 +76,23 @@ function historyMessages(): Array<{
       seq: 2,
       role: "user",
       runId: "run-1",
-      blocks: [{ kind: "text", text: "what was in the screenshot?" }],
+      blocks: [
+        { kind: "text", text: "what was in the screenshot?" },
+        ...(pictureMessage
+          ? [
+              {
+                kind: "image" as const,
+                artifactId: "art-2",
+                mimeType: "image/png",
+                name: "reply.png",
+              },
+            ]
+          : []),
+      ],
       replyToMessageId: null,
       replyQuote: null,
       replyTo: null,
+      steeringMessages: pictureMessage?.waiting ? [{ id: "held-steering" }] : [],
     },
     {
       id: "earlier",
@@ -81,6 +104,7 @@ function historyMessages(): Array<{
       replyToMessageId: null,
       replyQuote: null,
       replyTo: null,
+      steeringMessages: [],
     },
   ];
 }
@@ -106,6 +130,7 @@ async function runWithModel(
     userId: "user-1",
     status: "queued",
     trigger: hooks?.trigger ?? "user",
+    sourceMessageId: hooks?.sourceMessageId ?? null,
     leaseFence: 0,
   };
   const get = vi.fn(async () => new Uint8Array([1, 2, 3, 4]));
@@ -146,13 +171,28 @@ async function runWithModel(
     run: {
       findUnique: vi.fn(async () => run),
       findUniqueOrThrow: vi.fn(async () => run),
-      findFirst: vi.fn(async () => ({ bot: { notifyOnFinish: true }, thread: { groupId: null } })),
+      findFirst: vi.fn(async () => ({
+        bot: {
+          id: run.botId,
+          name: "Boris",
+          color: "blue",
+          avatarSet: "default",
+          notifyOnFinish: true,
+        },
+        thread: { groupId: null },
+      })),
       updateMany: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
         Object.assign(run, data);
         return { count: 1 };
       }),
     },
-    chatGroup: { findMany: vi.fn(async () => []) },
+    chatGroup: {
+      findMany: vi.fn(async () => []),
+      findUnique: vi.fn(async () => ({
+        name: "Planning",
+        members: [{ bot: { id: run.botId, name: "Boris", description: "" } }],
+      })),
+    },
     bot: {
       findUniqueOrThrow: vi.fn(async () => ({
         id: run.botId,
@@ -167,7 +207,9 @@ async function runWithModel(
         memoryScope: null,
         computer: { id: "computer-1", scope: "dedicated" },
       })),
-      findMany: vi.fn(async () => []),
+      findMany: vi.fn(async (args?: { where?: { id?: { in?: string[] } } }) =>
+        (hooks?.group?.bots ?? []).filter((bot) => args?.where?.id?.in?.includes(bot.id)),
+      ),
     },
     attempt: {
       create: vi.fn(async () => ({ id: "attempt-1" })),
@@ -177,7 +219,7 @@ async function runWithModel(
     thread: {
       findUniqueOrThrow: vi.fn(async () => ({
         id: run.threadId,
-        groupId: null,
+        groupId: hooks?.group ? "group-1" : null,
         historyCompactionSummary: null,
         historyCompactedUpToSeq: null,
         nextMessageSeq: 3,
@@ -185,7 +227,9 @@ async function runWithModel(
     },
     message: {
       findMany: vi.fn(async (args: { where?: { threadId?: string } }) =>
-        args.where?.threadId ? historyMessages() : [],
+        args.where?.threadId
+          ? (hooks?.group?.messages ?? historyMessages(hooks?.pictureMessage))
+          : [],
       ),
       findUnique: vi.fn(async () => null),
       // A claimed steering reply looks up the message it quotes; this one quotes nothing.
@@ -214,7 +258,9 @@ async function runWithModel(
         // The run reads its main model first and its fallbacks just before the model call.
         if (backupReadFails && prisma.userModelRoleChoice.findMany.mock.calls.length > 1)
           throw new Error("Backup list unavailable");
-        return switchModel ? [{ ...switchModel, position: 1, thinkingLevel: null }] : [];
+        return switchModel
+          ? [{ ...switchModel, position: 1, thinkingLevel: null as string | null }]
+          : [];
       }),
     },
 
@@ -239,6 +285,64 @@ async function runWithModel(
       ]),
     },
   };
+  if (hooks?.computer) {
+    const computerModelId = hooks.computer.defaultModelId;
+    prisma.userModelRoleChoice.findMany.mockImplementation(async ({ where }) =>
+      where.role === "main"
+        ? [
+            {
+              provider: "openrouter",
+              modelId,
+              credentialId: "main-conn",
+              position: 0,
+              thinkingLevel: "high",
+            },
+          ]
+        : where.role === "computer" && computerModelId
+          ? [
+              {
+                provider: "openrouter",
+                modelId: computerModelId,
+                credentialId: "main-conn",
+                position: 0,
+                thinkingLevel: null,
+              },
+            ]
+          : [],
+    );
+    const credential = {
+      id: "main-conn",
+      userId: run.userId,
+      provider: "openrouter",
+      secretId: "test-secret",
+      defaultModel: modelId,
+      userPreferences: [],
+    };
+    prisma.userModelPreference.findFirst.mockResolvedValue({
+      userId: run.userId,
+      credentialId: credential.id,
+      modelId,
+      thinkingLevel: "high",
+      isDefault: true,
+      credential,
+    });
+    prisma.userModelCredential.findFirst.mockImplementation(async (...args: unknown[]) => {
+      const input = args[0] as { where: { id?: string } };
+      return (!input.where.id || input.where.id === "main-conn" ? credential : null) as never;
+    });
+    prisma.secret.findFirst.mockResolvedValue({
+      id: "test-secret",
+      ciphertext: "encrypted",
+    } as never);
+    prisma.externalEffect.findMany.mockImplementation(async (...args: unknown[]) => {
+      const input = args[0] as { where: { kind?: string } };
+      return (
+        input.where.kind === "runtime_checkpoint" && hooks.computer?.checkpoint
+          ? [{ result: hooks.computer.checkpoint }]
+          : []
+      ) as never;
+    });
+  }
   const finalizeRun = vi.fn(async () =>
     finalizeSuccessfully ? { continuationRunId: null } : null,
   );
@@ -252,7 +356,7 @@ async function runWithModel(
     deploymentModelKey: "fake-deployment-key",
     runtime: { describe: () => ({ capabilities: { scripted } }), run: runtimeRun },
     sandbox: {
-      describe: () => ({ capabilities: { graphical: false } }),
+      describe: () => ({ capabilities: { graphical: Boolean(hooks?.computer) } }),
       releaseScreen,
       writeFile,
       listFiles: vi.fn(async () => []),
@@ -282,6 +386,7 @@ async function runWithModel(
     jobs: { enqueue: vi.fn(async () => undefined) },
     notifications: hooks?.notificationGate ? { send: notificationSend } : undefined,
     secrets: [],
+    secretStore: { load: async () => "fake-key" },
   } as unknown as Parameters<typeof createRunExecutor>[0]);
 
   const execution = executor.continueRun(run.id, "worker-1");
@@ -304,6 +409,103 @@ async function runWithModel(
     notificationSend,
   };
 }
+
+describe("computer settings reach the shared API/worker executor", () => {
+  it("hands screen work to the chosen model without changing main effort", async () => {
+    const { prisma, request } = await runWithModel(TEXT_ONLY_MODEL, undefined, false, false, true, {
+      computer: { defaultModelId: VISION_MODEL },
+    });
+    expect(request.model).toMatchObject({
+      id: TEXT_ONLY_MODEL,
+      connectionId: "main-conn",
+      thinkingLevel: "high",
+    });
+    expect(request.computerModel).toMatchObject({ id: VISION_MODEL, connectionId: "main-conn" });
+    expect(request.tools?.some((tool) => tool.name === "computer_observe")).toBe(true);
+    expect(request.currentTurnImages).toBeUndefined();
+    prisma.run.updateMany.mockClear();
+    await expect(
+      request.onModelChange?.(request.computerModel!.provider, request.computerModel!.id, true),
+    ).resolves.toBeUndefined();
+    // Retries and pins rerun the run's model, so computer mode never becomes it.
+    expect(prisma.run.updateMany).not.toHaveBeenCalled();
+    // The same model reached as a backup outside computer mode does become the run's model.
+    await request.onModelChange?.(request.computerModel!.provider, request.computerModel!.id);
+    expect(prisma.run.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { modelProvider: "openrouter", modelId: VISION_MODEL } }),
+    );
+    prisma.run.updateMany.mockClear();
+    await expect(
+      request.onModelChange?.(request.model.provider, request.model.id),
+    ).resolves.toBeUndefined();
+    expect(prisma.run.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: { modelProvider: request.model.provider, modelId: TEXT_ONLY_MODEL },
+      }),
+    );
+    await expect(request.onModelChange?.("unselected", "model")).rejects.toThrow(/not selected/);
+  });
+  it("resumes a turn paused before a computer-use model was set without one", async () => {
+    const checkpoint = JSON.stringify({
+      version: 1,
+      provider: "openrouter",
+      model: TEXT_ONLY_MODEL,
+      systemPrompt: "fixture",
+      messages: [],
+      pendingToolCallId: "call",
+    });
+    const { request } = await runWithModel(TEXT_ONLY_MODEL, undefined, false, false, true, {
+      computer: { defaultModelId: VISION_MODEL, checkpoint },
+    });
+    expect(request.computerModel).toBeUndefined();
+  });
+  it("does not switch when the computer-use model is the main model", async () => {
+    const { request } = await runWithModel(VISION_MODEL, undefined, false, false, true, {
+      computer: { defaultModelId: VISION_MODEL },
+    });
+    expect(request.computerModel).toBeUndefined();
+    expect(request.tools?.some((tool) => tool.name === "computer_observe")).toBe(true);
+  });
+  it("resolves resumed pins after settings are cleared and refuses an unpinned account", async () => {
+    const pin = {
+      provider: "openrouter",
+      id: VISION_MODEL,
+      connectionId: "main-conn",
+      auth: "api-key",
+      thinkingLevel: "medium",
+    };
+    const checkpoint = JSON.stringify({
+      version: 1,
+      provider: "openrouter",
+      model: VISION_MODEL,
+      systemPrompt: "fixture",
+      messages: [],
+      pendingToolCallId: "call",
+      computerMode: {
+        version: 1,
+        mode: "computer",
+        main: { ...pin, thinkingLevel: "high" },
+        computer: pin,
+      },
+    });
+    const { request } = await runWithModel(VISION_MODEL, undefined, false, false, true, {
+      computer: { checkpoint },
+    });
+    expect(request.computerModel).toMatchObject({
+      provider: pin.provider,
+      id: pin.id,
+      connectionId: pin.connectionId,
+    });
+    expect(request.turnCheckpoint).toBe(checkpoint);
+    await expect(request.onModelChange?.(pin.provider, pin.id)).resolves.toBeUndefined();
+    expect(
+      await request.resolveFallbackModel?.("openrouter", VISION_MODEL, "main-conn"),
+    ).toMatchObject({ connectionId: "main-conn", thinkingLevel: "high" });
+    await expect(
+      request.resolveFallbackModel?.("openrouter", VISION_MODEL, "other"),
+    ).rejects.toThrow();
+  });
+});
 
 describe("recent turn images follow model vision", () => {
   it("does not send history images to a text-only model", async () => {
@@ -380,6 +582,21 @@ describe("recent turn images follow model vision", () => {
     });
     expect(request.history.find((entry) => entry.id === "current")?.images).toBeUndefined();
     expect(get).toHaveBeenCalledWith("shot.png", expect.anything());
+  });
+
+  it("does not take a chat message waiting for its own run as a sourceless app run's turn", async () => {
+    // An app run with no source message, like the one queued after an MCP server connects.
+    const held = await runWithModel(VISION_MODEL, undefined, false, false, true, {
+      pictureMessage: { waiting: true },
+    });
+    expect(held.request.currentTurnImages).toBeUndefined();
+
+    const bound = await runWithModel(VISION_MODEL, undefined, false, false, true, {
+      pictureMessage: { waiting: false },
+    });
+    expect(bound.request.currentTurnImages).toEqual([
+      { name: "reply.png", mimeType: "image/png", data: new Uint8Array([1, 2, 3, 4]) },
+    ]);
   });
 
   it("continues with no backups when the indexed lookup fails", async () => {
@@ -568,5 +785,147 @@ describe("screen lifecycle after run completion", () => {
       if (completed) await completed.execution;
       vi.useRealTimers();
     }
+  });
+});
+
+describe("group history speakers", () => {
+  const row = (
+    seq: number,
+    role: string,
+    text: string,
+    botId?: string,
+    extra: Record<string, unknown> = {},
+  ) => ({
+    id: `m${seq}`,
+    threadId: "thread-1",
+    seq,
+    role,
+    botId,
+    runId: "run-0",
+    blocks: [{ kind: "text" as const, text }] as MessageBlock[],
+    replyToMessageId: null,
+    replyQuote: null,
+    replyTo: null,
+    steeringMessages: [],
+    ...extra,
+  });
+  // Newest first, as the history query returns them. The run's own bot is "bot-1".
+  const stored = [
+    row(5, "user", "@Boris who named it?"),
+    row(4, "bot", "Bluebird."),
+    row(3, "bot", "Half an ans", "bot-2", { clientNonce: "partial-reply:run-9" }),
+    row(2, "bot", "Mystery.", "bot-gone"),
+    row(1, "bot", "Bluebird.", "bot-3"),
+    row(0, "user", "Name our project."),
+  ];
+  const bots = [
+    { id: "bot-2", name: "Anya" },
+    // Archived bots are still found: the lookup does not filter on archivedAt.
+    { id: "bot-3", name: "Renamed Anya" },
+  ];
+
+  it("labels the user and the other bots, and leaves this bot's own replies plain", async () => {
+    const { request, prisma } = await runWithModel(VISION_MODEL, undefined, false, false, true, {
+      group: { messages: stored, bots },
+    });
+    expect(
+      request.history.map(({ role, speaker, content }) => ({ role, speaker, content })),
+    ).toEqual([
+      { role: "user", speaker: "User", content: "Name our project." },
+      { role: "assistant", speaker: "Renamed Anya", content: "Bluebird." },
+      { role: "assistant", speaker: "another bot", content: "Mystery." },
+      {
+        role: "assistant",
+        speaker: "Anya",
+        content: expect.stringMatching(/^Half an ans\n\n.+/s),
+      },
+      { role: "assistant", speaker: undefined, content: "Bluebird." },
+      { role: "user", speaker: "User", content: "@Boris who named it?" },
+    ]);
+    // One lookup for every other bot; the receiving bot's own id is not asked for.
+    const lookups = prisma.bot.findMany.mock.calls.filter(
+      ([args]) => (args as { where?: { id?: { in?: unknown } } } | undefined)?.where?.id?.in,
+    );
+    expect(lookups).toHaveLength(1);
+    expect((lookups[0]![0] as { where: { id: { in: string[] } } }).where.id.in.sort()).toEqual([
+      "bot-2",
+      "bot-3",
+      "bot-gone",
+    ]);
+    expect(request.promptSpeaker).toBe("User");
+    expect(request.instructions).toContain('messages from other members start with "[Name]:"');
+  });
+
+  it("adds no speakers or prompt label in a direct chat", async () => {
+    const { request, prisma } = await runWithModel(VISION_MODEL);
+    expect(request.history.some((entry) => "speaker" in entry)).toBe(false);
+    expect(request.promptSpeaker).toBeUndefined();
+    expect(
+      prisma.bot.findMany.mock.calls.some(
+        ([args]) => (args as { where?: { id?: { in?: unknown } } } | undefined)?.where?.id?.in,
+      ),
+    ).toBe(false);
+  });
+
+  const file = {
+    kind: "file",
+    artifactId: "art-2",
+    name: "reply.png",
+    mimeType: "image/png",
+    size: 4,
+  } as const;
+  it.each([
+    {
+      via: "message",
+      trigger: "bot_message",
+      role: "user",
+      block: {
+        kind: "bot_message_received",
+        fromBotId: "bot-2",
+        fromBotName: "Anya",
+        text: "Deploy this",
+        hop: 1,
+      },
+    },
+    {
+      via: "handoff",
+      trigger: "follow_up",
+      role: "bot",
+      block: { kind: "handoff", fromBotId: "bot-2", toBotId: "bot-1", text: "Deploy this", hop: 1 },
+    },
+  ] as const)("puts files another bot sent by $via onto this bot's computer", async (sent) => {
+    const delivered = row(6, sent.role, "", sent.role === "bot" ? "bot-2" : undefined, {
+      id: "delivered",
+      blocks: [sent.block, file] as MessageBlock[],
+    });
+    const { request, writeFile } = await runWithModel(
+      TEXT_ONLY_MODEL,
+      undefined,
+      false,
+      false,
+      true,
+      {
+        group: { messages: [delivered, ...stored], bots },
+        trigger: sent.trigger,
+        sourceMessageId: "delivered",
+        useComputer: true,
+      },
+    );
+    expect(request.prompt).toContain(
+      "Attachments will be copied to these paths when a tool needs the computer.",
+    );
+    expect(request.prompt).toContain('"attachments/art-2.png"');
+    expect(writeFile.mock.calls.map(([, file]) => file)).toContainEqual({
+      path: "attachments/art-2.png",
+      content: new Uint8Array([1, 2, 3, 4]),
+    });
+  });
+
+  it("labels the prompt only for runs the user started", async () => {
+    const { request } = await runWithModel(VISION_MODEL, undefined, false, false, true, {
+      group: { messages: stored, bots },
+      trigger: "bot_message",
+    });
+    expect(request.promptSpeaker).toBeUndefined();
   });
 });

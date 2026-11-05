@@ -18,12 +18,16 @@ function service(getPrice: BillingProvider["getPrice"], role = "owner") {
     member: {
       findUnique: vi.fn().mockResolvedValue({ role }),
       count: vi.fn().mockResolvedValue(3),
+      findFirst: vi.fn().mockResolvedValue(null),
+      findMany: vi.fn().mockResolvedValue([{ userId: "owner-1", role: "owner" }]),
     },
     billingAccount: { findUnique: vi.fn().mockResolvedValue(null) },
+    user: { findUnique: vi.fn().mockResolvedValue({ billingTrialUsedAt: null }) },
   } as unknown as PrismaClient;
   const provider = {
     describe: () => ({ capabilities: { trials: true, portal: true } }),
     getPrice: vi.fn(getPrice),
+    endTrial: vi.fn(),
   } as unknown as BillingProvider;
   return {
     provider,
@@ -46,10 +50,12 @@ describe("billing status", () => {
     await expect(billing.status(actor)).resolves.toMatchObject({ price: null, access: false });
   });
 
-  it("refuses checkout and portal for non-owners", async () => {
-    const { billing } = service(async () => price, "member");
+  it("refuses checkout, portal, and ending the trial for non-owners", async () => {
+    const { billing, provider } = service(async () => price, "member");
     await expect(billing.checkout(actor)).rejects.toMatchObject({ code: "FORBIDDEN" });
     await expect(billing.portal(actor)).rejects.toMatchObject({ code: "FORBIDDEN" });
+    await expect(billing.endTrial(actor)).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(provider.endTrial).not.toHaveBeenCalled();
   });
 });
 
@@ -58,10 +64,17 @@ describe("model credit checkout", () => {
     let openTransactions = 0;
     const account = { organizationId: "org-1", customerId: "cus-1" };
     const prisma = {
-      space: { findUnique: vi.fn().mockResolvedValue({ organizationId: "org-1" }) },
-      member: { findUnique: vi.fn().mockResolvedValue({ role: "owner" }) },
+      space: {
+        findUnique: vi.fn().mockResolvedValue({ organizationId: "org-1" }),
+        findFirst: vi.fn().mockResolvedValue(null),
+      },
+      member: {
+        findUnique: vi.fn().mockResolvedValue({ role: "owner" }),
+        findMany: vi.fn().mockResolvedValue([]),
+      },
       billingAccount: {
         findUnique: vi.fn().mockResolvedValue(account),
+        findFirst: vi.fn().mockResolvedValue({ organizationId: "org-1" }),
         updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       },
       modelCreditAccount: {

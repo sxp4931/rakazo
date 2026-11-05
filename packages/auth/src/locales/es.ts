@@ -36,8 +36,8 @@ export const ES_MESSAGES: Record<string, string> = {
   "Have any questions? Reply to this email.": "¿Tienes alguna pregunta? Responde a este correo.",
   Unsubscribe: "Cancelar suscripción",
   "Invite a friend": "Invita a un amigo",
-  "Invite a friend to Rakazo and earn a free month when they start a qualifying subscription with a new card.":
-    "Invita a un amigo a Rakazo y gana un mes gratis cuando inicie una suscripción que califique con una tarjeta nueva.",
+  "Invite a friend to Rakazo: they get {weeks} weeks free, and you earn a free month when they start a qualifying subscription with a new card.":
+    "Invita a un amigo a Rakazo: recibe {weeks} semanas gratis y tú ganas un mes gratis cuando empiece una suscripción válida con una tarjeta nueva.",
   "Open Rakazo": "Abre Rakazo",
   "and choose Invite friends for your link.": "y elige Invitar amigos para obtener tu enlace.",
   "Have any questions? Just reply to this email.":
@@ -45,6 +45,17 @@ export const ES_MESSAGES: Record<string, string> = {
   "If you're enjoying Rakazo,": "Si te está gustando Rakazo,",
   "give us a star on GitHub": "danos una estrella en GitHub",
   "We received your Rakazo plugin": "Recibimos tu plugin de Rakazo",
+  "Confirm your Rakazo page claim": "Confirma tu solicitud de página en Rakazo",
+  "Confirm claim": "Confirmar solicitud",
+  "We review every claim once it's confirmed and will email you when it's done.":
+    "Revisamos cada solicitud una vez confirmada y te escribiremos cuando terminemos.",
+  "This link expires in one day. If you did not claim a page, ignore this email.":
+    "Este enlace vence en un día. Si no reclamaste ninguna página, ignora este correo.",
+  "Your Rakazo page claim: {name}": "Tu solicitud de página en Rakazo: {name}",
+  "Your changes to the {name} page are approved.":
+    "Tus cambios en la página de {name} están aprobados.",
+  "We couldn't approve your changes to the {name} page.":
+    "No pudimos aprobar tus cambios en la página de {name}.",
   "Thanks for submitting a plugin to the Rakazo marketplace.":
     "Gracias por enviar un plugin al marketplace de Rakazo.",
   "We review every submission and will email you when it's done.":
@@ -57,4 +68,10 @@ export const ES_MESSAGES: Record<string, string> = {
     "{name} ya aparece en el marketplace de plugins de Rakazo.",
   "We couldn't list {name} in the Rakazo plugin marketplace.":
     "No pudimos publicar {name} en el marketplace de plugins de Rakazo.",
+  "Your saved computer files will be deleted":
+    "Se eliminarán los archivos guardados de tu ordenador",
+  "Your saved computer files will be deleted on {date} unless you resubscribe.":
+    "Los archivos guardados de tu ordenador se eliminarán el {date} a menos que vuelvas a suscribirte.",
+  "Your saved computer files will be deleted on {date} unless you choose a plan.":
+    "Los archivos guardados de tu ordenador se eliminarán el {date} a menos que elijas un plan.",
 };

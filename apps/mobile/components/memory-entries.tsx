@@ -17,7 +17,7 @@ export function MemoryEntries({
   onRefresh,
 }: {
   initial: MemoryDocument | null;
-  botId: string;
+  botId?: string;
   onClose: () => void;
   onUpdate: (doc: MemoryDocument) => void;
   onRefresh: () => Promise<void>;
@@ -29,7 +29,7 @@ export function MemoryEntries({
   const [undoRevision, setUndoRevision] = useState<number | null>(null);
   const [prompt, setPrompt] = useState<RpcOutput<"memory/prompt"> | null>(null);
   useEffect(() => {
-    if (initial) return;
+    if (initial || !botId) return;
     let current = true;
     setBusy(true);
     void rpc("memory/prompt", { botId })
@@ -106,18 +106,20 @@ export function MemoryEntries({
           {doc?.path ?? t("Memory")}
         </Text>
         <NativeActionButton label={t("Close")} onPress={onClose} prominence="plain" />
-        <NativeActionButton
-          label={t("View prompt memory")}
-          disabled={busy}
-          onPress={() => {
-            setBusy(true);
-            void rpc("memory/prompt", { botId })
-              .then(setPrompt)
-              .catch((error) => Alert.alert(t("Could not load"), errorText(error, t("Try again."))))
-              .finally(() => setBusy(false));
-          }}
-          prominence="plain"
-        />
+        {botId ? (
+          <NativeActionButton
+            label={t("View prompt memory")}
+            disabled={busy}
+            onPress={() => {
+              setBusy(true);
+              void rpc("memory/prompt", { botId })
+                .then(setPrompt)
+                .catch((error) => Alert.alert(t("Could not load"), errorText(error, t("Try again."))))
+                .finally(() => setBusy(false));
+            }}
+            prominence="plain"
+          />
+        ) : null}
         {prompt ? (
           <>
             <Text style={{ color: tokens.mutedForeground }}>

@@ -308,6 +308,10 @@ export function routinesRoutes(ctx: RouterContext) {
             where: {
               id: existing.id,
               bot: { archivedAt: null },
+              // Optimistic fence: every write must match the snapshot it was
+              // computed from, so concurrent edits never silently overwrite
+              // each other's prompt/name/notify/any other field.
+              updatedAt: existing.updatedAt,
               ...(touchesModel
                 ? {
                     modelProvider: existing.modelProvider,
@@ -342,8 +346,7 @@ export function routinesRoutes(ctx: RouterContext) {
           .catch(async (error: unknown) => {
             if (isRecordNotFound(error)) {
               if (
-                (touchesModel || writesSchedule || writesActive) &&
-                (await deps.prisma.routine.findFirst({
+                await deps.prisma.routine.findFirst({
                   where: {
                     id: existing.id,
                     spaceId: context.actor.spaceId,
@@ -351,7 +354,7 @@ export function routinesRoutes(ctx: RouterContext) {
                     bot: { archivedAt: null },
                   },
                   select: { id: true },
-                }))
+                })
               ) {
                 throw new ORPCError("CONFLICT", { message: "Routine changed; retry." });
               }

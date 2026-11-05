@@ -1,5 +1,6 @@
 import type {
   BillingByokCheckoutRequest,
+  BillingByokPlan,
   BillingCheckoutRequest,
   BillingCreditCheckoutRequest,
   BillingCreditPurchase,
@@ -109,6 +110,46 @@ export class BillingEmulator implements BillingProvider {
     return { url: `https://billing.emulator.invalid/byok/${input.customerId}` };
   }
 
+  async endTrial(customerId: string) {
+    const chosen = pickBillingSubscription(this.forCustomer(customerId));
+    if (chosen?.status !== "trialing" || chosen.cancelAtPeriodEnd) return;
+    chosen.status = "active";
+    chosen.trialEndsAt = new Date(this.now());
+    chosen.currentPeriodStartsAt = new Date(this.now());
+    chosen.currentPeriodEndsAt = new Date(
+      this.now() + (chosen.byokInterval === "year" ? 365 : 30) * 86400000,
+    );
+  }
+
+  async changeByokPlan(
+    customerId: string,
+    subscriptionId: string,
+    { from, to }: { from: BillingByokPlan; to: BillingByokPlan },
+  ) {
+    const subscriptions = this.forCustomer(customerId);
+    const plan = subscriptions.find((s) => s.subscriptionId === subscriptionId);
+    if (
+      !plan ||
+      plan.priceId !== BYOK_PRICE_ID ||
+      (plan.status !== "active" && plan.status !== "trialing") ||
+      plan.cancelAtPeriodEnd ||
+      plan.byokTier !== from.tier ||
+      plan.byokInterval !== from.interval ||
+      plan.byokPriceCents !== from.amountCents ||
+      subscriptions.some((s) => s.creditAmountCents && holdsBillingSubscription(s.status))
+    )
+      return false;
+    plan.byokTier = to.tier;
+    plan.byokPriceCents = to.amountCents;
+    plan.byokInterval = to.interval;
+    if (plan.status === "trialing" || to.interval === from.interval) return true;
+    plan.currentPeriodStartsAt = new Date(this.now());
+    plan.currentPeriodEndsAt = new Date(
+      this.now() + (to.interval === "year" ? 365 : 30) * 86400000,
+    );
+    return true;
+  }
+
   async endByokPlans(customerId: string) {
     for (const subscription of this.forCustomer(customerId))
       if (subscription.priceId === BYOK_PRICE_ID) subscription.cancelAtPeriodEnd = true;
@@ -140,11 +181,15 @@ export class BillingEmulator implements BillingProvider {
       priceId: BYOK_PRICE_ID,
       byokPlan: true,
       byokPriceCents: checkout.amountCents,
+      byokInterval: checkout.interval ?? "month",
+      byokTier: checkout.tier ?? "standard",
       cardFingerprint,
       status: trialEndsAt ? "trialing" : "active",
       seats: 1,
       trialEndsAt,
-      currentPeriodEndsAt: trialEndsAt ?? new Date(this.now() + 30 * 86400000),
+      currentPeriodStartsAt: new Date(this.now()),
+      currentPeriodEndsAt:
+        trialEndsAt ?? new Date(this.now() + (checkout.interval === "year" ? 365 : 30) * 86400000),
       cancelAtPeriodEnd: false,
       endedAt: null,
     });
@@ -202,6 +247,7 @@ export class BillingEmulator implements BillingProvider {
         seats: 1,
         creditAmountCents: checkout.amountCents,
         trialEndsAt: null,
+        currentPeriodStartsAt: new Date(this.now()),
         currentPeriodEndsAt: new Date(this.now() + 30 * 86400000),
         cancelAtPeriodEnd: false,
         endedAt: null,
@@ -258,6 +304,7 @@ export class BillingEmulator implements BillingProvider {
       status: status ?? (trialEnd ? "trialing" : "active"),
       seats: checkout.seats,
       trialEndsAt: trialEnd === null ? null : new Date(trialEnd * 1000),
+      currentPeriodStartsAt: new Date(nowSeconds * 1000),
       currentPeriodEndsAt: new Date((trialEnd ?? nowSeconds + 30 * 86_400) * 1000),
       cancelAtPeriodEnd: false,
       endedAt: null,
@@ -289,9 +336,11 @@ export class BillingEmulator implements BillingProvider {
     return { body, headers };
   }
 
-  /** An open checkout goes too, so it cannot start a subscription afterwards. */
+  /** Open checkouts go too, so none can start a subscription or purchase afterwards. */
   private cancelAll(customerId: string) {
     this.checkouts.delete(customerId);
+    this.byokCheckouts.delete(customerId);
+    this.creditCheckouts.delete(customerId);
     for (const subscription of this.forCustomer(customerId)) {
       if (subscription.status === "canceled") continue;
       subscription.status = "canceled";
@@ -311,6 +360,7 @@ export class BillingEmulator implements BillingProvider {
           subscription.endedAt = subscription.currentPeriodEndsAt;
           break;
         }
+        subscription.currentPeriodStartsAt = subscription.currentPeriodEndsAt;
         subscription.currentPeriodEndsAt = new Date(
           subscription.currentPeriodEndsAt.getTime() + 30 * 86400000,
         );

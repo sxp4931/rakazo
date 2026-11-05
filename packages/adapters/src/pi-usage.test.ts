@@ -734,6 +734,68 @@ describe("Pi usage accounting", () => {
       cacheWriteTokens: null,
     });
   });
+  it("keeps measured subscription allowance separate from cash cost", async () => {
+    const reported = new Set<keyof AgentUsage>();
+    const fetcher = usageReportingFetch(
+      async () =>
+        new Response(
+          `data: ${JSON.stringify({
+            id: "fixture",
+            usage: {
+              prompt_tokens: 1200,
+              completion_tokens: 300,
+              total_tokens: 1500,
+              cost: 0,
+              opencode: { billing_source: "go", allowance: 0.00412, list_cost: 0.00412 },
+            },
+          })}\n\n`,
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+      reported,
+    );
+    await (await fetcher("https://model.example.test/v1")).text();
+
+    expect(
+      normalizePiUsage({ input: 1200, output: 300, totalTokens: 1500 }, model, reported),
+    ).toMatchObject({
+      costUsd: 0,
+      costSource: "provider-reported",
+      allowanceUsd: 0.00412,
+      inputTokens: 1200,
+      outputTokens: 300,
+      totalTokens: 1500,
+    });
+  });
+  it("preserves a reported zero allowance as a measured receipt", async () => {
+    const reported = new Set<keyof AgentUsage>();
+    const fetcher = usageReportingFetch(
+      async () =>
+        new Response('data: {"usage":{"cost":0,"opencode":{"allowance":0}}}\n\n', {
+          headers: { "content-type": "text/event-stream" },
+        }),
+      reported,
+    );
+    await (await fetcher("https://model.example.test/v1")).text();
+    expect(normalizePiUsage(undefined, model, reported)).toMatchObject({
+      costUsd: 0,
+      allowanceUsd: 0,
+    });
+  });
+  it.each(["-0.00412", '"0.00412"', "1e400"])(
+    "ignores invalid allowance values: %s",
+    async (allowance) => {
+      const reported = new Set<keyof AgentUsage>();
+      const fetcher = usageReportingFetch(
+        async () =>
+          new Response(`data: {"usage":{"opencode":{"allowance":${allowance}}}}\n\n`, {
+            headers: { "content-type": "text/event-stream" },
+          }),
+        reported,
+      );
+      await (await fetcher("https://model.example.test/v1")).text();
+      expect(normalizePiUsage(undefined, model, reported).allowanceUsd).toBeNull();
+    },
+  );
   it("keeps compatible zero pricing unknown", () => {
     expect(
       normalizePiUsage(

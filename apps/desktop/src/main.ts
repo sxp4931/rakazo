@@ -46,6 +46,7 @@ import {
 } from "./host-screen.js";
 import {
   createLocaleHandler,
+  desktopDirection,
   desktopLocale,
   desktopMessages,
   errorDetail,
@@ -53,7 +54,8 @@ import {
   t,
   withDetail,
 } from "./i18n.js";
-import { saveLocalComputerHost } from "./local-settings.js";
+import { verifyDownloadedLinuxUpdate } from "./linux-update-signature.js";
+import { createLocalComputerChoice, saveLocalComputerHost } from "./local-settings.js";
 import {
   LocalStackController,
   readStackToken,
@@ -604,7 +606,7 @@ function oauthPopupWindowOptions(partition: string | null) {
     frame: true,
     titleBarStyle: "default" as const,
     autoHideMenuBar: true,
-    backgroundColor: "#161616",
+    backgroundColor: "#0A0A0A",
     webPreferences: oauthPopupSessionPreferences(partition),
   };
 }
@@ -726,6 +728,27 @@ async function installUpdate() {
   return state;
 }
 
+async function saveHostChoice(computerHost: "docker" | "this-mac") {
+  const origin = new URL(localStack.webUrl()).origin;
+  const token = await readStackToken(stackDir(app.getPath("userData")));
+  if (!token || !(await localStack.matchesDesiredStack()))
+    throw new Error(t("Local server is unavailable"));
+  await saveLocalComputerHost({ origin, token }, computerHost, (input, init) =>
+    net.fetch(input instanceof URL ? input.href : input, {
+      ...init,
+      bypassCustomProtocolHandlers: true,
+    }),
+  );
+}
+
+const localComputerChoice = createLocalComputerChoice({
+  save: saveHostChoice,
+  revoke: () => hostComputer?.revoke(),
+  settled: () => installApplicationMenu(),
+});
+const persistHostChoice = localComputerChoice.persist;
+const revokeLocalComputerAccess = localComputerChoice.revoke;
+
 function installApplicationMenu() {
   const computerAccess: Electron.MenuItemConstructorOptions = {
     label: t("Computer Access…"),
@@ -735,12 +758,7 @@ function installApplicationMenu() {
   const revokeComputerAccess: Electron.MenuItemConstructorOptions = {
     label: t("Revoke Local Computer Access"),
     visible: remoteServerOrigin() === null && hostComputer?.isEnabled() === true,
-    click: () => {
-      void hostComputer
-        ?.revoke()
-        .finally(() => installApplicationMenu())
-        .catch(() => undefined);
-    },
+    click: () => void revokeLocalComputerAccess().catch(() => undefined),
   };
   // Cmd+, is the macOS Settings chord, and no page keydown can see it: the OS takes
   // it first, so the menu item is the only place it can be registered.
@@ -788,6 +806,13 @@ function installApplicationMenu() {
     },
   });
   const newItem = command(t("New…"), "CmdOrCtrl+N", "new");
+  const newGroupItem = command(t("New Group Chat"), "CmdOrCtrl+Shift+N", "new-group");
+  const connectAppsItem = command(t("Connect Apps…"), "CmdOrCtrl+Shift+M", "integrations");
+  const helpMenu: Electron.MenuItemConstructorOptions = {
+    label: t("Help"),
+    role: "help",
+    submenu: [command(t("Keyboard Shortcuts"), "CmdOrCtrl+/", "shortcuts")],
+  };
   // Electron's own Edit menu, plus Search. Electron names role items in English, so each one
   // gets its label to translate it.
   const macEdit: Electron.MenuItemConstructorOptions[] = [
@@ -815,7 +840,10 @@ function installApplicationMenu() {
       { role: "delete", label: t("Delete") },
       { role: "selectAll", label: t("Select All") },
       { type: "separator" },
-      command(t("Search…"), "CmdOrCtrl+F", "search"),
+      // A server page older than this menu handles Cmd/Ctrl+F itself (as bot search) but ignores
+      // a click on this item, which it has no command for.
+      command(t("Find…"), "CmdOrCtrl+F", "find"),
+      command(t("Search Bots…"), "CmdOrCtrl+Shift+F", "search"),
       ...(isMac ? macEdit : []),
     ],
   };
@@ -835,6 +863,7 @@ function installApplicationMenu() {
     label: t("View"),
     submenu: [
       command(t("Toggle Sidebar"), "CmdOrCtrl+B", "toggle-sidebar"),
+      command(t("Chat Details"), "CmdOrCtrl+Shift+,", "chat-panel"),
       { type: "separator" },
       { role: "resetZoom", label: t("Actual Size") },
       { role: "zoomIn", label: t("Zoom In") },
@@ -873,7 +902,10 @@ function installApplicationMenu() {
               { role: "quit", label: t("Quit {name}", { name: app.name }) },
             ],
           },
-          { label: t("File"), submenu: [newItem] },
+          {
+            label: t("File"),
+            submenu: [newItem, newGroupItem, { type: "separator" }, connectAppsItem],
+          },
           editMenu,
           viewMenu,
           goMenu,
@@ -888,12 +920,16 @@ function installApplicationMenu() {
               { role: "front", label: t("Bring All to Front") },
             ],
           },
+          helpMenu,
         ]
       : [
           {
             label: t("File"),
             submenu: [
               newItem,
+              newGroupItem,
+              { type: "separator" },
+              connectAppsItem,
               { type: "separator" },
               openSettings,
               computerAccess,
@@ -918,6 +954,7 @@ function installApplicationMenu() {
               { role: "close", label: t("Close") },
             ],
           },
+          helpMenu,
         ];
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
@@ -1324,6 +1361,9 @@ app.whenReady().then(async () => {
     () => {
       quitting = false;
     },
+    process.platform === "linux"
+      ? (update) => verifyDownloadedLinuxUpdate(update, (url, signal) => net.fetch(url, { signal }))
+      : undefined,
   );
   try {
     hostComputer = await prepareHostComputer(userDataDir);
@@ -1484,18 +1524,6 @@ app.whenReady().then(async () => {
     currentSetup?.mode === "new" &&
     appWindowTargets.get(mainWindow!) === localStack.webUrl() &&
     safeOrigin(event.senderFrame.url) === safeOrigin(localStack.webUrl());
-  const persistHostChoice = async (computerHost: "docker" | "this-mac") => {
-    const origin = new URL(localStack.webUrl()).origin;
-    const token = await readStackToken(stackDir(app.getPath("userData")));
-    if (!token || !(await localStack.matchesDesiredStack()))
-      throw new Error(t("Local server is unavailable"));
-    await saveLocalComputerHost({ origin, token }, computerHost, (input, init) =>
-      net.fetch(input instanceof URL ? input.href : input, {
-        ...init,
-        bypassCustomProtocolHandlers: true,
-      }),
-    );
-  };
   ipcMain.handle("desktop.computer.requestAccess", async (event) => {
     if (!isManagedComputerRequest(event) || !hostComputer)
       throw new Error(t("Local computer access requires an app-managed local instance."));
@@ -1529,14 +1557,7 @@ app.whenReady().then(async () => {
     }
   });
   ipcMain.handle("desktop.computer.revokeAccess", async (event) => {
-    if (isManagedComputerRequest(event)) {
-      try {
-        await persistHostChoice("docker");
-      } finally {
-        await hostComputer?.revoke();
-        installApplicationMenu();
-      }
-    }
+    if (isManagedComputerRequest(event)) await revokeLocalComputerAccess();
   });
   /** The remote server's own page in the app window, never a frame or another window. */
   const remoteDeviceOrigin = (event: Electron.IpcMainInvokeEvent) => {
@@ -1590,6 +1611,9 @@ app.whenReady().then(async () => {
   ipcMain.handle("desktop.platform", () => process.platform);
   ipcMain.handle("desktop.passkeys.rpIds", () => passkeyRpIds);
   ipcMain.handle("desktop.monitoring.enabled", () => reportsErrors);
+  ipcMain.handle("desktop.server.change", (event) => {
+    if (fromMainWindow(event)) showSetupWindow();
+  });
   ipcMain.handle("desktop.window.close", (event) => {
     windowFrom(event)?.close();
   });
@@ -1627,7 +1651,7 @@ app.whenReady().then(async () => {
   // Synchronous so the setup page has its language before it first paints.
   ipcMain.on("desktop.setup.locale", (event) => {
     event.returnValue = fromSetupWindow(event)
-      ? { lang: desktopLocale(), messages: desktopMessages() }
+      ? { lang: desktopLocale(), dir: desktopDirection(), messages: desktopMessages() }
       : null;
   });
   ipcMain.handle("desktop.setup.state", (event) => {
@@ -1821,6 +1845,10 @@ app.on("window-all-closed", () => {
   // during startup; its teardown must not quit the app.
   if (liveProbeWindows > 0) return;
   if (process.platform !== "darwin") app.quit();
+});
+
+app.on("quit", (_event, exitCode) => {
+  if (exitCode === 0) desktopUpdater?.installOnQuit();
 });
 
 app.on("before-quit", () => {

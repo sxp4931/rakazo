@@ -85,6 +85,7 @@ export function normalizePiUsage(
       (costKnown && typeof usage?.cost?.total === "number" && Number.isFinite(usage.cost.total)
         ? usage.cost.total
         : null),
+    allowanceUsd: reportedValues.get(reported)?.get("allowanceUsd") ?? null,
     costSource: rejected
       ? "provider-rejection"
       : providerCost !== undefined
@@ -109,6 +110,7 @@ type RawUsage = Record<string, unknown> & {
   output_tokens_details?: Record<string, unknown>;
   cache_creation?: Record<string, unknown>;
   cost_details?: Record<string, unknown>;
+  opencode?: Record<string, unknown>;
 };
 
 type RawUsageEvent = {
@@ -195,6 +197,13 @@ async function observeUsageEvent(
       upstream >= 0
     )
       reportedCosts.set(reported, usage.cost + upstream);
+    const allowance = usage.opencode?.allowance;
+    if (typeof allowance === "number" && Number.isFinite(allowance) && allowance >= 0) {
+      reported.add("allowanceUsd");
+      const values = reportedValues.get(reported) ?? new Map();
+      values.set("allowanceUsd", allowance);
+      reportedValues.set(reported, values);
+    }
     mark(rawRead ?? usage.cache_read_input_tokens, "cacheReadTokens");
     mark(rawWrite ?? usage.cache_creation_input_tokens, "cacheWriteTokens");
     mark(usage.cache_creation?.ephemeral_1h_input_tokens, "cacheWrite1hTokens");
@@ -570,6 +579,11 @@ export function maximumModelCallCost(
       [tier.input, tier.output, tier.cacheRead, tier.cacheWrite].every(
         (rate) => Number.isFinite(rate) && rate >= 0,
       ),
+    ) ||
+    // An unlisted model gets zero placeholder rates; with no positive rate anywhere
+    // the price is unknown, not free, so reservation must refuse the call.
+    !tiers.some((tier) =>
+      [tier.input, tier.output, tier.cacheRead, tier.cacheWrite].some((rate) => rate > 0),
     )
   )
     return undefined;

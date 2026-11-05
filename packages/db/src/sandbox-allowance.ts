@@ -1,19 +1,39 @@
+import type { ByokTier, ComputerSize } from "@rakazo/contracts";
+import {
+  BYOK_TIERS,
+  ByokTierSchema,
+  CREDITS_SANDBOX_ALLOWANCE_PERCENT,
+  TRIAL_SANDBOX_ALLOWANCE_CENTS,
+} from "@rakazo/contracts";
 import type { PrismaClient } from "./client.js";
 import { runAsSystem } from "./row-security.js";
 
-/** What an own-key organization may spend on computers each month. */
-export const BYOK_SANDBOX_ALLOWANCE_CENTS = 500;
-/** The share of a monthly credit plan an organization may also spend on computers. */
-export const CREDITS_SANDBOX_ALLOWANCE_PERCENT = 20;
+const LIVE_SUBSCRIPTION_STATUSES = new Set(["trialing", "active", "past_due"]);
 
 /**
- * The organization's monthly computer allowance in cents, or null when it has no limit: a
- * deployment without model-credit billing never limits computers.
+ * The own-key tier an organization's computers get: its live subscription's tier, else Standard.
+ * Credit organizations get none.
  */
-export async function sandboxAllowanceCents(
+function byokTierOf(
+  mode: string | null | undefined,
+  billing: { status: string | null; byokTier: string | null } | null | undefined,
+): ByokTier | null {
+  if (mode !== "byok") return null;
+  const live = Boolean(billing?.status && LIVE_SUBSCRIPTION_STATUSES.has(billing.status));
+  return (live && ByokTierSchema.safeParse(billing?.byokTier).data) || "standard";
+}
+
+/**
+ * The organization's computer allowance in cents and the moment its period began, or null when
+ * it has no limit: a deployment without model-credit billing never limits computers. The period
+ * is the subscription's billing period, or the calendar month in UTC without one. A cancelled
+ * trial gets nothing more.
+ */
+export async function sandboxAllowancePlan(
   prisma: PrismaClient,
   organizationId: string,
-): Promise<number | null> {
+  now = new Date(),
+): Promise<{ limitCents: number; since: Date } | null> {
   const [settings, organization] = await Promise.all([
     prisma.deploymentSettings.findUnique({
       where: { id: "default" },
@@ -23,20 +43,82 @@ export async function sandboxAllowanceCents(
       where: { id: organizationId },
       select: {
         modelCredits: { select: { mode: true } },
-        billing: { select: { creditAmountCents: true } },
+        billing: {
+          select: {
+            creditAmountCents: true,
+            status: true,
+            cancelAtPeriodEnd: true,
+            currentPeriodStartsAt: true,
+            byokInterval: true,
+            byokTier: true,
+          },
+        },
       },
     }),
   ]);
   if (!settings?.modelCreditsEnabled) return null;
-  if (organization?.modelCredits?.mode === "byok") return BYOK_SANDBOX_ALLOWANCE_CENTS;
-  return Math.floor(
-    ((organization?.billing?.creditAmountCents ?? 0) * CREDITS_SANDBOX_ALLOWANCE_PERCENT) / 100,
-  );
+  const billing = organization?.billing;
+  const live = Boolean(billing?.status && LIVE_SUBSCRIPTION_STATUSES.has(billing.status));
+  const periodStart = live ? billing?.currentPeriodStartsAt : null;
+  const since =
+    periodStart && periodStart <= now
+      ? // A yearly plan's allowance still renews monthly, on the day its period began.
+        billing?.byokInterval === "year"
+        ? latestMonthlyAnniversary(periodStart, now)
+        : periodStart
+      : new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  const tier = byokTierOf(organization?.modelCredits?.mode, billing);
+  const limitCents =
+    billing?.status === "trialing"
+      ? billing.cancelAtPeriodEnd
+        ? 0
+        : TRIAL_SANDBOX_ALLOWANCE_CENTS
+      : tier
+        ? BYOK_TIERS[tier].computerAllowanceCents
+        : Math.floor(((billing?.creditAmountCents ?? 0) * CREDITS_SANDBOX_ALLOWANCE_PERCENT) / 100);
+  return { limitCents, since };
 }
 
-/** The allowance resets at the start of each calendar month, in UTC. */
-export function sandboxAllowancePeriodStart(now = new Date()): Date {
-  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+/**
+ * The machine size a Space's computers start at: its organization's own-key tier's size, and
+ * standard on credits. A computer moves to this size when it next starts or resumes, so a plan
+ * change reaches running computers on their next resume.
+ */
+export async function planComputerSize(
+  prisma: Pick<PrismaClient, "space">,
+  spaceId: string,
+): Promise<ComputerSize> {
+  const space = await prisma.space.findUnique({
+    where: { id: spaceId },
+    select: {
+      organization: {
+        select: {
+          modelCredits: { select: { mode: true } },
+          billing: { select: { status: true, byokTier: true } },
+        },
+      },
+    },
+  });
+  const tier = byokTierOf(space?.organization.modelCredits?.mode, space?.organization.billing);
+  return tier ? BYOK_TIERS[tier].computerSize : "standard";
+}
+
+/** The latest monthly anniversary of `start` at or before `now`, on a shorter month's last day. */
+function latestMonthlyAnniversary(start: Date, now: Date): Date {
+  const monthsLater = (months: number) => {
+    const shifted = new Date(start);
+    shifted.setUTCDate(1);
+    shifted.setUTCMonth(start.getUTCMonth() + months);
+    const lastDay = new Date(
+      Date.UTC(shifted.getUTCFullYear(), shifted.getUTCMonth() + 1, 0),
+    ).getUTCDate();
+    shifted.setUTCDate(Math.min(start.getUTCDate(), lastDay));
+    return shifted;
+  };
+  const months =
+    (now.getUTCFullYear() - start.getUTCFullYear()) * 12 + now.getUTCMonth() - start.getUTCMonth();
+  const anniversary = monthsLater(months);
+  return anniversary <= now ? anniversary : monthsLater(months - 1);
 }
 
 /**

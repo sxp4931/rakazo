@@ -84,7 +84,10 @@ test.afterEach(async () => {
 });
 
 function launch(extraEnv: Record<string, string> = {}) {
-  const env = { ...process.env, RAKAZO_PERFORMANCE_USER_DATA: userData };
+  const env: Record<string, string | undefined> = {
+    ...process.env,
+    RAKAZO_PERFORMANCE_USER_DATA: userData,
+  };
   // A stale RAKAZO_WEB_URL from the developer's shell would bypass setup entirely.
   delete env.RAKAZO_WEB_URL;
   const executablePath = process.env.RAKAZO_E2E_EXECUTABLE;
@@ -92,7 +95,7 @@ function launch(extraEnv: Record<string, string> = {}) {
     ...(executablePath ? { executablePath: path.resolve(executablePath) } : {}),
     args: executablePath ? [] : ["."],
     cwd: path.resolve(import.meta.dirname, ".."),
-    env: { ...env, ...extraEnv },
+    env: { ...env, ...extraEnv } as Record<string, string>,
   });
 }
 
@@ -173,6 +176,19 @@ test("setup opens in the language the app last used", async () => {
   await expect(setup.getByRole("button", { name: "Continuar" })).toBeEnabled();
   await setup.screenshot({
     path: path.join(import.meta.dirname, "screenshots", "10-setup-spanish.png"),
+  });
+});
+
+test("setup lays out right to left in Hebrew", async () => {
+  await writeFile(path.join(userData, "ui-locale.txt"), "he\n");
+  app = await launch();
+  const setup = await app.firstWindow();
+
+  await expect(setup.locator("html")).toHaveAttribute("dir", "rtl");
+  await expect(setup.getByRole("heading", { name: "ברוכים הבאים ל-Rakazo" })).toBeVisible();
+  await expect(setup.getByRole("button", { name: "המשך" })).toBeEnabled();
+  await setup.screenshot({
+    path: path.join(import.meta.dirname, "screenshots", "11-setup-hebrew.png"),
   });
 });
 
@@ -713,12 +729,12 @@ test("the app window stays on its server when a link redirects to another site",
   const openSignIn = (page: Page) =>
     page.evaluate(
       (url) =>
-        (window as typeof window & { rakazoDesktop: RakazoDesktop }).rakazoDesktop.oauth
-          .open(url)
-          .then(
-            () => "opened",
-            (error: Error) => error.message,
-          ),
+        (window as typeof window & { rakazoDesktop: RakazoDesktop }).rakazoDesktop.oauth.open!(
+          url,
+        ).then(
+          () => "opened",
+          (error: Error) => error.message,
+        ),
       signInUrl,
     );
 

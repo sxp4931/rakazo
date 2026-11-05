@@ -8,14 +8,47 @@ import type { AgentRunRequest } from "@rakazo/adapter-kit";
 import { ModelConnectInputSchema } from "@rakazo/contracts";
 import { loadRootEnv } from "@rakazo/core/node/load-root-env";
 import type { StartedPostgreSqlContainer } from "@testcontainers/postgresql";
-import { EVAL_CASES, HISTORY_EVAL_CASES } from "../evals/cases.js";
+import { BOT_FILES_EVAL_CASES, BOT_FILES_FIXTURE_VERSION } from "../evals/bot-files.js";
+import type { EvalCase } from "../evals/cases.js";
+import { EVAL_CASES, HISTORY_EVAL_CASES, wakesRoutines } from "../evals/cases.js";
+import {
+  DELIBERATION_EVAL_CASES,
+  DELIBERATION_FIXTURE_VERSION,
+  DELIBERATION_JUDGE_CALIBRATION,
+  DELIBERATION_JUDGE_VERSION,
+} from "../evals/deliberation.js";
+import {
+  GROUP_EVAL_CASES,
+  GROUP_FIXTURE_VERSION,
+  GROUP_JUDGE_CALIBRATION,
+  GROUP_JUDGE_VERSION,
+} from "../evals/group.js";
+import { GROUP_ROUTING_EVAL_CASES, GROUP_ROUTING_FIXTURE_VERSION } from "../evals/group-routing.js";
 import { HISTORY_FIXTURE_VERSION } from "../evals/history-fixtures.js";
 import type { DiagnosticToolObservation, HistoryDiagnostic } from "../evals/history-observer.js";
 import { observeSyntheticHistory } from "../evals/history-observer.js";
-import type { EvalJudge } from "../evals/judge.js";
+import {
+  INITIATIVE_EVAL_CASES,
+  INITIATIVE_FIXTURE_VERSION,
+  INITIATIVE_JUDGE_CALIBRATION,
+  INITIATIVE_JUDGE_VERSION,
+} from "../evals/initiative.js";
+import type { EvalJudge, JudgeInput } from "../evals/judge.js";
 import { createEvalJudge } from "../evals/judge.js";
 import type { CacheDecisionMeasurement, EvalPricing, MeasuredCall } from "../evals/measurement.js";
 import { measureCalls, SpendBudget, validatePricing } from "../evals/measurement.js";
+import {
+  MEMORY_EVAL_CASES,
+  MEMORY_FIXTURE_VERSION,
+  MEMORY_JUDGE_CALIBRATION,
+  MEMORY_JUDGE_VERSION,
+} from "../evals/memory.js";
+import {
+  RECALL_EVAL_CASES,
+  RECALL_FIXTURE_VERSION,
+  RECALL_JUDGE_CALIBRATION,
+  RECALL_JUDGE_VERSION,
+} from "../evals/recall.js";
 import { emptyTrial, redact, summarize, validateControls } from "../evals/report.js";
 import {
   SILENCE_EVAL_CASES,
@@ -69,15 +102,59 @@ async function main() {
       workingDiffHash: workingDiffHash(),
       readConnection,
     });
-  const suites = {
+  const suites: Record<
+    string,
+    {
+      cases: EvalCase[];
+      fixtureVersion: string;
+      judge?: { version: string; calibration: Array<{ input: JudgeInput; pass: boolean }> };
+    }
+  > = {
     product: { cases: EVAL_CASES, fixtureVersion: "product-v1" },
     history: { cases: HISTORY_EVAL_CASES, fixtureVersion: HISTORY_FIXTURE_VERSION },
-    silence: { cases: SILENCE_EVAL_CASES, fixtureVersion: SILENCE_FIXTURE_VERSION },
+    silence: {
+      cases: SILENCE_EVAL_CASES,
+      fixtureVersion: SILENCE_FIXTURE_VERSION,
+      judge: { version: SILENCE_JUDGE_VERSION, calibration: SILENCE_JUDGE_CALIBRATION },
+    },
+    initiative: {
+      cases: INITIATIVE_EVAL_CASES,
+      fixtureVersion: INITIATIVE_FIXTURE_VERSION,
+      judge: { version: INITIATIVE_JUDGE_VERSION, calibration: INITIATIVE_JUDGE_CALIBRATION },
+    },
+    memory: {
+      cases: MEMORY_EVAL_CASES,
+      fixtureVersion: MEMORY_FIXTURE_VERSION,
+      judge: { version: MEMORY_JUDGE_VERSION, calibration: MEMORY_JUDGE_CALIBRATION },
+    },
+    recall: {
+      cases: RECALL_EVAL_CASES,
+      fixtureVersion: RECALL_FIXTURE_VERSION,
+      judge: { version: RECALL_JUDGE_VERSION, calibration: RECALL_JUDGE_CALIBRATION },
+    },
+    deliberation: {
+      cases: DELIBERATION_EVAL_CASES,
+      fixtureVersion: DELIBERATION_FIXTURE_VERSION,
+      judge: { version: DELIBERATION_JUDGE_VERSION, calibration: DELIBERATION_JUDGE_CALIBRATION },
+    },
+    group: {
+      cases: GROUP_EVAL_CASES,
+      fixtureVersion: GROUP_FIXTURE_VERSION,
+      judge: { version: GROUP_JUDGE_VERSION, calibration: GROUP_JUDGE_CALIBRATION },
+    },
+    "group-routing": {
+      cases: GROUP_ROUTING_EVAL_CASES,
+      fixtureVersion: GROUP_ROUTING_FIXTURE_VERSION,
+    },
     "tool-choice": { cases: TOOL_CHOICE_CASES, fixtureVersion: TOOL_CHOICE_FIXTURE_VERSION },
+    "bot-files": { cases: BOT_FILES_EVAL_CASES, fixtureVersion: BOT_FILES_FIXTURE_VERSION },
   };
   if (!Object.hasOwn(suites, values.suite!))
-    throw new Error("Unknown suite; use product, history, silence, tool-choice, or approval");
-  const suite = suites[values.suite as keyof typeof suites];
+    throw new Error(
+      "Unknown suite; use product, history, group, group-routing, silence, initiative, deliberation, memory, recall, tool-choice, bot-files, or approval",
+    );
+  const suite = suites[values.suite!]!;
+  const suiteJudge = suite.judge;
   const extraCases = values["cases-file"] ? loadToolChoiceCases(values["cases-file"]) : [];
   const cases = [...suite.cases, ...extraCases];
   const fixtureVersion = extraCases.length
@@ -172,7 +249,7 @@ async function main() {
     limitations: [
       "Does not evaluate browser perception, native recording perception, or real external services.",
       "Silence cases observe routine chat, transient progress, and provider notification requests; native push delivery and UI pixels are outside the fixture.",
-      "Silence reply meaning uses a calibrated LLM judge; other suites retain their existing task-specific graders.",
+      "Silence replies and memory contents are graded by meaning with a calibrated LLM judge; other suites retain their existing task-specific graders.",
       "Cost uses provider-reported charges where available and explicit pricing estimates otherwise. Spend reservations are a guard, not a billing guarantee.",
       "Tool trace contains names and statuses only; raw requests and responses are omitted. The tool-calls artifact keeps model-supplied arguments, with only configured secrets redacted.",
     ],
@@ -261,6 +338,7 @@ async function main() {
   };
   let judge: EvalJudge | undefined;
   if (selected.some((c) => c.judge) && !values["cache-probe"]) {
+    if (!suiteJudge) return notRun("This suite has no judge rubric; no inference was scheduled");
     if (!values["judge-connection"] || !values["judge-pricing"])
       return notRun(
         "Semantic cases require --judge-connection and --judge-pricing; no inference was scheduled",
@@ -286,7 +364,7 @@ async function main() {
     report.judge = {
       model: judgeConnection.modelId!,
       provider: judgeConnection.provider,
-      rubricVersion: SILENCE_JUDGE_VERSION,
+      rubricVersion: suiteJudge.version,
       pricing: judgePricing,
       calibration: [],
       modelCalls: 0,
@@ -337,7 +415,7 @@ async function main() {
       }
     };
     try {
-      for (const anchor of SILENCE_JUDGE_CALIBRATION) {
+      for (const anchor of suiteJudge.calibration) {
         const verdict = await judge(anchor.input, AbortSignal.timeout(60_000));
         report.judge.calibration.push({
           expected: anchor.pass,
@@ -538,21 +616,27 @@ async function main() {
                 });
               },
               modelCallObserver: {
+                // Other models the product calls, such as the Auto Review checker, run too, but
+                // only ever at their own pricing: the eval model's rates would undercharge them
+                // whenever their provider reports no cost.
                 beforeCall: ({
                   inputTokensEstimate,
                   maxOutputTokens,
                   provider,
                   modelId,
                   cacheWriteRetention,
+                  maxCostUsd,
                 }) => {
-                  if (provider !== connection.provider || modelId !== connection.modelId)
-                    throw new Error("Eval model has no configured pricing");
                   if (!acceptingCalls) throw new Error("Eval trial stopped scheduling inference");
-                  return liveBudget.reserve(
-                    inputTokensEstimate,
-                    maxOutputTokens,
-                    cacheWriteRetention,
-                  );
+                  if (provider === connection.provider && modelId === connection.modelId)
+                    return liveBudget.reserve(
+                      inputTokensEstimate,
+                      maxOutputTokens,
+                      cacheWriteRetention,
+                    );
+                  if (typeof maxCostUsd !== "number")
+                    throw new Error("Other model has no configured pricing");
+                  return liveBudget.reserveCostBound(maxCostUsd);
                 },
                 afterCall: (id, usage) => liveBudget.settleUsage(id, usage),
               },
@@ -583,7 +667,7 @@ async function main() {
               wakeupDriver: "memory",
               composio,
               messaging,
-              ...(scenario.routine ? witnesses : {}),
+              ...(wakesRoutines(scenario) ? witnesses : {}),
               messagingOpenSignup: false,
               defaultProvider: connection.provider,
               defaultModel: connection.modelId!,

@@ -27,6 +27,10 @@ import { SettingsScopeSchema } from "./settings-scope.js";
 export const ComputerModeSchema = z.enum(["team", "dedicated"]);
 export type ComputerMode = z.infer<typeof ComputerModeSchema>;
 
+/** How big a machine a cloud computer runs on. Providers without sizes ignore it. */
+export const ComputerSizeSchema = z.enum(["standard", "large", "xlarge"]);
+export type ComputerSize = z.infer<typeof ComputerSizeSchema>;
+
 export const MemoryScopeSchema = z.enum(["isolated", "shared"]);
 export type MemoryScopeValue = z.infer<typeof MemoryScopeSchema>;
 
@@ -70,6 +74,7 @@ export const AppLocaleSchema = z.enum([
   "he",
   "nl",
   "ja",
+  "pl",
 ]);
 export type AvatarStyle = z.infer<typeof AvatarStyleSchema>;
 
@@ -117,6 +122,7 @@ export const BotSchema = z.object({
   threadId: Id,
   preview: z.string(),
   status: z.string(),
+  threadStatus: z.string().optional(),
   runErrorId: Id.nullable().default(null),
   computerMode: ComputerModeSchema,
   updatedAt: z.string(),
@@ -129,6 +135,7 @@ export const BotSchema = z.object({
   teamChatAmbientEnabled: z.boolean(),
   teamChatRules: z.string(),
   crossSpaceCommunication: z.boolean().optional(),
+  dailyCheckIns: z.boolean().optional(),
   fleetManagement: z.boolean().default(true),
   disabledBuiltinTools: z.array(z.string()).default([]),
   webhookConfigured: z.boolean(),
@@ -146,6 +153,30 @@ export const BotSchema = z.object({
     .optional(),
 });
 export type Bot = z.infer<typeof BotSchema>;
+
+/** The caller identity and request needed by every incoming-call surface. */
+export const IncomingBotCallSchema = BotSchema.pick({
+  id: true,
+  spaceId: true,
+  name: true,
+  color: true,
+  avatarSet: true,
+}).extend({
+  incomingCall: BotSchema.shape.incomingCall.unwrap().unwrap(),
+});
+export type IncomingBotCall = z.infer<typeof IncomingBotCallSchema>;
+
+/** A run alert the server also pushes to phones, already filtered by the chat's mute settings. */
+export const ChatAlertSchema = z.object({
+  kind: z.enum(["completion", "failure", "help", "takeover"]),
+  title: z.string(),
+  body: z.string(),
+  spaceId: Id,
+  botId: Id,
+  threadId: Id,
+  groupId: Id.optional(),
+});
+export type ChatAlert = z.infer<typeof ChatAlertSchema>;
 
 export const ReorderBotsInput = z.object({
   botIds: z
@@ -259,6 +290,7 @@ export const SpaceBotSchema = BotSchema.pick({
   parentBotId: true,
   preview: true,
   status: true,
+  threadStatus: true,
   runErrorId: true,
   updatedAt: true,
 });
@@ -389,8 +421,10 @@ export const CreateBotInput = z.object({
   description: z.string().max(BOT_DESCRIPTION_MAX_LENGTH).default(""),
   instructions: z.string().max(BOT_INSTRUCTIONS_MAX_LENGTH).default(""),
   notifyOnFinish: z.boolean().default(true),
+  dailyCheckIns: z.boolean().optional(),
   fleetManagement: z.boolean().optional(),
   color: BotAvatarValueSchema.optional(),
+  /** Ignored: a new bot takes its owner's set. Older apps still send one. */
   avatarSet: BotAvatarSetSchema.optional(),
   /** Organic body family (0-9); the server picks a matching id unless one is reserved. */
   avatarFamily: z.number().int().min(0).max(9).optional(),
@@ -423,6 +457,7 @@ export const UpdateBotInput = z
     teamChatAmbientEnabled: z.boolean().optional(),
     teamChatRules: z.string().max(TEAM_CHAT_RULES_MAX_LENGTH).optional(),
     crossSpaceCommunication: z.boolean().optional(),
+    dailyCheckIns: z.boolean().optional(),
     fleetManagement: z.boolean().optional(),
     disabledBuiltinTools: DisabledBuiltinToolsSchema.optional(),
     /** Write only while these settings still hold, as an undo does. */
@@ -513,6 +548,8 @@ export const RoutineSchema = z.object({
   watchState: RoutineWatchStateSchema.nullable(),
   lastRunAt: z.string().nullable(),
   nextRunAt: z.string().nullable(),
+  /** Computed by the server; absent on older servers. Not a worker-health diagnosis. */
+  scheduleDelayed: z.boolean().optional(),
   createdAt: z.string(),
   /** False when another Space member created it; only its creator can change it. */
   editable: z.boolean().optional(),
@@ -765,6 +802,8 @@ export type MemoryPromptBudget = z.infer<typeof MemoryPromptBudgetSchema>;
 
 /** Every bot and Space keeps its MEMORY.md index; other memory documents can be deleted. */
 export const MEMORY_INDEX_PATH = "MEMORY.md";
+/** What a bot may write to its memory. People can still write more by hand. */
+export const BOT_MEMORY_MAX_BYTES = 4 * 1024;
 export function isDeletableMemoryDocument(path: string): boolean {
   return path !== MEMORY_INDEX_PATH;
 }
@@ -905,14 +944,25 @@ export const PluginMarketplaceCatalogSchema = z.object({
 export type PluginMarketplaceCatalog = z.infer<typeof PluginMarketplaceCatalogSchema>;
 
 export const PLUGIN_SUBMISSIONS_PATH = "/api/v1/plugin-submissions";
+/** Approved claims, public so the marketing site can show each owner's page at build time. */
+export const INTEGRATION_CLAIMS_PATH = "/api/v1/integration-claims";
+/** Opened from the email that proves a claimant reads mail at the app's domain. */
+export const INTEGRATION_CLAIM_CONFIRM_PATH = "/api/v1/integration-claims/confirm";
 export const SUBMIT_PLUGIN_URL = "https://rakazo.com/plugins/submit/";
+export const integrationPageUrl = (slug: string) => `https://rakazo.com/integrations/${slug}/`;
 
+/** People type a bare domain like `acme.com`, so a URL without a scheme gets `https://`. */
 const HttpsUrlSchema = z
   .string()
   .trim()
-  .max(2048)
-  .url()
-  .refine((value) => value.startsWith("https://"), "Use an https:// URL");
+  .transform((value) => (/^[a-z][a-z0-9+.-]*:\/\//i.test(value) ? value : `https://${value}`))
+  .pipe(
+    z
+      .string()
+      .max(2048)
+      .url()
+      .refine((value) => value.startsWith("https://"), "Use an https:// URL"),
+  );
 
 export const PluginSubmissionInputSchema = z.object({
   email: z.string().trim().max(254).email(),
@@ -926,12 +976,38 @@ export const PluginSubmissionInputSchema = z.object({
 });
 export type PluginSubmissionInput = z.infer<typeof PluginSubmissionInputSchema>;
 
+/** An app's owner claiming its integration page so it links to their site. */
+export const IntegrationClaimInputSchema = z.object({
+  /** The page's URL slug, as in `integrationPageUrl`. */
+  claim: z
+    .string()
+    .max(100)
+    .regex(/^[a-z0-9-]+$/, "Use the page's URL slug"),
+  email: z.string().trim().max(254).email(),
+  name: z.string().trim().min(1).max(80),
+  website: HttpsUrlSchema,
+});
+export type IntegrationClaimInput = z.infer<typeof IntegrationClaimInputSchema>;
+
+export const IntegrationClaimSchema = z.object({
+  slug: z.string(),
+  website: z.string(),
+});
+export type IntegrationClaim = z.infer<typeof IntegrationClaimSchema>;
+
 export const PluginSubmissionStatusSchema = z.enum(["pending", "approved", "rejected"]);
 export type PluginSubmissionStatus = z.infer<typeof PluginSubmissionStatusSchema>;
 
 export const PluginSubmissionSchema = PluginSubmissionInputSchema.omit({ tested: true }).extend({
   id: z.string(),
   website: z.string().nullable(),
+  logo: z.string().nullable(),
+  source: z.string().nullable(),
+  testing: z.string().nullable(),
+  /** Empty for a claim, which only links the page. */
+  description: z.string(),
+  /** The integration page URL slug a claim is for; null for plugins. */
+  claim: z.string().nullable(),
   status: PluginSubmissionStatusSchema,
   reason: z.string().nullable(),
   createdAt: z.string(),
@@ -1175,6 +1251,7 @@ export const UsageRecordSchema = z.object({
   reasoningTokens: z.number().int().nullable().optional(),
   totalTokens: z.number().int().nullable().optional(),
   costUsd: z.number().nonnegative().nullable().optional(),
+  allowanceUsd: z.number().nonnegative().nullable().optional(),
   costSource: z.string().nullable().optional(),
   pricingVersion: z.string().nullable().optional(),
   usageSource: z.string().nullable().optional(),
@@ -1186,18 +1263,31 @@ export const UsageRecordSchema = z.object({
   createdAt: z.string(),
 });
 
-/** Token and cost totals are null when any counted call lacks that figure. */
+/**
+ * Token and cost totals are null when any counted call lacks that figure. Allowance sums cover
+ * only measured calls, with allowanceCalls giving their coverage.
+ */
 const UsageTotalsSchema = z.object({
   inputTokens: z.number().nullable(),
   outputTokens: z.number().nullable(),
   totalTokens: z.number().nullable().optional(),
   costUsd: z.number().nullable().optional(),
+  allowanceUsd: z.number().nonnegative().nullable().optional(),
+  allowanceCalls: z.number().int().nonnegative().optional(),
   modelCalls: z.number().optional(),
 });
 export const UsageSummarySchema = UsageTotalsSchema.extend({
   runs: z.number(),
   models: z
-    .array(UsageTotalsSchema.required().extend({ provider: z.string(), model: z.string() }))
+    .array(
+      UsageTotalsSchema.required().extend({
+        // Keep receipt coverage optional for clients talking to older servers.
+        allowanceUsd: z.number().nonnegative().nullable().optional(),
+        allowanceCalls: z.number().int().nonnegative().optional(),
+        provider: z.string(),
+        model: z.string(),
+      }),
+    )
     .optional(),
 });
 export type UsageSummary = z.infer<typeof UsageSummarySchema>;
@@ -1236,6 +1326,8 @@ export const ComputerStatusSchema = z.object({
   busyBotName: z.string().nullable(),
   canUpdate: z.boolean(),
   terminalAvailable: z.boolean(),
+  /** Set only while the user should see that the disk is nearly full. */
+  diskFullPercent: z.number().int().min(0).max(100).optional(),
 });
 export type ComputerStatus = z.infer<typeof ComputerStatusSchema>;
 
@@ -1448,6 +1540,8 @@ export const ModelCredentialSchema = z.object({
   thinkingLevels: z.array(ThinkingLevelSchema).optional(),
   /** Openai-compatible only; always contains `modelId` when set. */
   enabledModelIds: z.array(z.string()).optional(),
+  /** The connection's enabled models that accept images, where it declares them per model. */
+  visionModelIds: z.array(z.string()).optional(),
   /** Stored secret kind. Absent when the secret could not be read. */
   authKind: z.enum(["api_key", "oauth", "openai_compatible"]).optional(),
   /**
@@ -1710,6 +1804,39 @@ export const DeploymentSettingsSchema = z.object({
   sandboxProvider: z.string(),
 });
 
+/** Public metadata only; adapter validation and constructor options stay server-side. */
+export const ComputerProviderFieldSchema = z.object({
+  key: z.string(),
+  label: z.string(),
+  kind: z.enum(["text", "secret", "url", "select"]),
+  required: z.boolean(),
+  options: z.array(z.object({ value: z.string(), label: z.string() })).optional(),
+  validation: z.enum(["public-https"]).optional(),
+  /** A saved credential must be re-entered when its destination changes. */
+  destination: z.string().optional(),
+});
+export type ComputerProviderField = z.infer<typeof ComputerProviderFieldSchema>;
+export const ComputerProviderDescriptorSchema = z.object({
+  id: z.string(),
+  displayName: z.string(),
+  fields: z.array(ComputerProviderFieldSchema),
+  capabilities: z.object({ perAccount: z.boolean() }),
+});
+export type ComputerProviderDescriptor = z.infer<typeof ComputerProviderDescriptorSchema>;
+export const ComputerProviderSettingsSchema = z.object({
+  provider: z.string(),
+  defaultProvider: z.string(),
+  providers: z.array(ComputerProviderDescriptorSchema),
+  values: z.record(z.string(), z.string()),
+  savedSecrets: z.record(z.string(), z.boolean()),
+});
+export type ComputerProviderSettings = z.infer<typeof ComputerProviderSettingsSchema>;
+export const ComputerProviderUpdateSchema = z.object({
+  provider: z.string().trim().min(1).max(64),
+  values: z.record(z.string().max(64), z.string().trim().max(4096)).default({}),
+});
+export type ComputerProviderUpdate = z.infer<typeof ComputerProviderUpdateSchema>;
+
 export const ServerUpdateSourceSchema = z.object({
   repoUrl: z.string().max(400),
   branch: z.string().max(200),
@@ -1888,6 +2015,8 @@ export const MeSchema = z.object({
   /** Whether this account can add stdio MCP servers here. Absent from older servers. */
   mcpStdioEnabled: z.boolean().default(false),
   avatarStyle: AvatarStyleSchema,
+  /** The icon set new and unpinned bots wear. Absent from servers that predate it. */
+  botAvatarSet: BotAvatarSetSchema.optional(),
   /**
    * The user's IANA timezone, or null when unset (bots then see UTC only).
    * Absent from servers that predate it.
@@ -1907,8 +2036,87 @@ export const MeSchema = z.object({
 export type Me = z.infer<typeof MeSchema>;
 
 export const MODEL_CREDIT_AMOUNTS = [1000, 2000, 3000, 5000, 10000, 20000, 50000] as const;
-/** Monthly price in cents of running bots on your own model connection; `null` makes it free. */
-export const BYOK_MONTHLY_PRICE_CENTS: number | null = 1500;
+
+/** The vCPUs and memory each computer size provides. */
+export const COMPUTER_SIZE_SPECS: Record<ComputerSize, { vcpus: number; memoryGb: number }> = {
+  standard: { vcpus: 4, memoryGb: 8 },
+  large: { vcpus: 8, memoryGb: 16 },
+  xlarge: { vcpus: 16, memoryGb: 32 },
+};
+
+/**
+ * What an hour of a billed computer counts against the allowance, $0.20, whatever its size: above
+ * a small cloud machine's raw price, so the allowance also covers storage and saves.
+ */
+export const SANDBOX_HOURLY_COST_MICROS = 200_000;
+/** What a trial may spend on computers, in cents; ending the trial early starts the full allowance. */
+export const TRIAL_SANDBOX_ALLOWANCE_CENTS = 200;
+/** The share of a monthly credit plan an organization may also spend on computers. */
+export const CREDITS_SANDBOX_ALLOWANCE_PERCENT = 20;
+
+/** Computer hours an allowance in cents buys. */
+export function sandboxAllowanceHours(allowanceCents: number): number {
+  return (allowanceCents * 10_000) / SANDBOX_HOURLY_COST_MICROS;
+}
+
+export const ByokTierSchema = z.enum(["standard", "pro", "max"]);
+export type ByokTier = z.infer<typeof ByokTierSchema>;
+
+export interface ByokTierTerms {
+  name: string;
+  /** Monthly price in cents; `null` on Standard makes the own-model plan free, and hides any other tier. */
+  monthlyPriceCents: number | null;
+  /** Yearly price in cents; `null` offers the tier monthly only. */
+  annualPriceCents: number | null;
+  /** What the organization may spend on computers each month, in cents. */
+  computerAllowanceCents: number;
+  computerSize: ComputerSize;
+}
+
+/**
+ * The own-model plan's tiers, in order. Standard is the plan new organizations start on; the
+ * others add bigger computers and more computer hours.
+ */
+export const BYOK_TIERS: Record<ByokTier, ByokTierTerms> = {
+  standard: {
+    name: "Standard",
+    monthlyPriceCents: 1500,
+    annualPriceCents: 14400,
+    computerAllowanceCents: 500,
+    computerSize: "standard",
+  },
+  pro: {
+    name: "Pro",
+    monthlyPriceCents: 4900,
+    annualPriceCents: 46800,
+    computerAllowanceCents: 2000,
+    computerSize: "large",
+  },
+  max: {
+    name: "Max",
+    monthlyPriceCents: 14900,
+    annualPriceCents: 142800,
+    computerAllowanceCents: 4000,
+    computerSize: "xlarge",
+  },
+};
+
+/** The tier's price for new subscriptions billed every `interval`; null when it is not offered. */
+export function byokTierPriceCents(tier: ByokTier, interval: ByokInterval): number | null {
+  if (BYOK_TIERS.standard.monthlyPriceCents === null) return null;
+  const terms = BYOK_TIERS[tier];
+  if (terms.monthlyPriceCents === null) return null;
+  return interval === "year" ? terms.annualPriceCents : terms.monthlyPriceCents;
+}
+/**
+ * An invited friend's first trial, in weeks; the invite copy and the trial both read it. The copy
+ * is written for a plural number of weeks, so check its wording in every language if this changes.
+ */
+export const INVITED_TRIAL_WEEKS = 2;
+/** Length of a new organization's free trial of the own-model plan, in days. */
+export const TRIAL_DAYS = 7;
+export const ByokIntervalSchema = z.enum(["month", "year"]);
+export type ByokInterval = z.infer<typeof ByokIntervalSchema>;
 export const DEFAULT_MONTHLY_CREDIT_AMOUNT = 3000;
 export const ModelCreditAmountSchema = z.union(
   MODEL_CREDIT_AMOUNTS.map((amount) => z.literal(amount)),
@@ -1941,6 +2149,18 @@ export const BillingClientSchema = z.literal("mobile").optional();
 /** The deep link the API sends a mobile checkout back to; it closes the in-app browser. */
 export const MOBILE_BILLING_CALLBACK_URL = "rakazo://billing";
 
+export const BILLING_CANCELLATION_REASONS = [
+  "too_expensive",
+  "missing_features",
+  "switched_service",
+  "unused",
+  "customer_service",
+  "too_complex",
+  "low_quality",
+  "other",
+] as const;
+export type BillingCancellationReason = (typeof BILLING_CANCELLATION_REASONS)[number];
+
 export const BillingStatusSchema = z.object({
   funding: z.enum(["byok", "credits"]).nullable().optional(),
   balanceUsd: z.number().optional(),
@@ -1948,6 +2168,25 @@ export const BillingStatusSchema = z.object({
   creditPurchasesEnabled: z.boolean().optional(),
   /** Monthly price of the own-key plan, as subscribed when the organization has it; `null` when free. */
   byokPriceCents: z.number().int().positive().nullable().optional(),
+  /** How often `byokPriceCents` bills. Absent from older servers, which bill monthly. */
+  byokInterval: ByokIntervalSchema.optional(),
+  /** Yearly price of the own-key plan's tier for new subscriptions, when offered. */
+  byokAnnualPriceCents: z.number().int().positive().nullable().optional(),
+  /** The own-key plan's tier: the subscribed one, else Standard. Absent from older servers. */
+  byokTier: ByokTierSchema.optional(),
+  /** The tiers on offer, in order; absent when the own-key plan is free. */
+  byokTiers: z
+    .array(
+      z.object({
+        tier: ByokTierSchema,
+        name: z.string(),
+        monthlyPriceCents: z.number().int().positive(),
+        annualPriceCents: z.number().int().positive().nullable(),
+        computerSize: ComputerSizeSchema,
+        computerHours: z.number().nonnegative(),
+      }),
+    )
+    .optional(),
   /** End of an unpaid own-key organization's free period. */
   byokFreeUntil: z.string().nullable().optional(),
   access: z.boolean(),
@@ -1988,6 +2227,49 @@ export const BillingStatusSchema = z.object({
 });
 export type BillingStatus = z.infer<typeof BillingStatusSchema>;
 
+/** The percent a yearly own-key price saves over twelve months at `monthlyCents`. */
+export function byokYearlySavingsPercent(monthlyCents: number, annualCents: number): number {
+  return Math.round((1 - annualCents / (monthlyCents * 12)) * 100);
+}
+
+/**
+ * What switching a paid monthly own-key plan to yearly saves, in percent, or null when the switch
+ * is not offered: not the owner, no live monthly plan, or a yearly price that saves nothing.
+ */
+export function byokYearlySwitchSavings(status: BillingStatus): number | null {
+  if (
+    !status.canManage ||
+    status.funding !== "byok" ||
+    status.byokInterval === "year" ||
+    status.byokFreeUntil ||
+    status.monthlyAmountCents ||
+    status.cancelAtPeriodEnd ||
+    (status.state !== "active" && status.state !== "trialing") ||
+    !status.byokPriceCents ||
+    !status.byokAnnualPriceCents
+  )
+    return null;
+  const savings = byokYearlySavingsPercent(status.byokPriceCents, status.byokAnnualPriceCents);
+  return savings > 0 ? savings : null;
+}
+
+/**
+ * Whether an owner can move the own-key plan to another tier: a paid-up plan with no monthly
+ * credits that is not cancelling, and another tier to move to.
+ */
+export function byokTierChangeOffered(status: BillingStatus): boolean {
+  return Boolean(
+    status.canManage &&
+      status.funding === "byok" &&
+      !status.byokFreeUntil &&
+      !status.monthlyAmountCents &&
+      !status.cancelAtPeriodEnd &&
+      (status.state === "active" || status.state === "trialing") &&
+      status.byokPriceCents &&
+      (status.byokTiers?.length ?? 0) > 1,
+  );
+}
+
 export const AppBootstrapSchema = z.object({
   me: MeSchema,
   bots: z.array(BotSchema),
@@ -1998,6 +2280,8 @@ export const AppBootstrapSchema = z.object({
   thread: ThreadSnapshotSchema.nullable(),
   routines: z.array(RoutineSchema),
   spaces: z.array(SpaceSchema),
+  /** Set when the requested bot is the caller's but lives in another of their Spaces. */
+  botSpaceId: Id.optional(),
 });
 export type AppBootstrap = z.infer<typeof AppBootstrapSchema>;
 

@@ -309,6 +309,8 @@ it("shows usage totals and a per-model breakdown", async () => {
                 outputTokens: 30,
                 totalTokens: 1030,
                 costUsd: 0.5,
+                allowanceUsd: null,
+                allowanceCalls: 0,
               },
               {
                 provider: "local",
@@ -318,6 +320,8 @@ it("shows usage totals and a per-model breakdown", async () => {
                 outputTokens: 4,
                 totalTokens: 204,
                 costUsd: null,
+                allowanceUsd: null,
+                allowanceCalls: 0,
               },
             ],
           }}
@@ -329,6 +333,7 @@ it("shows usage totals and a per-model breakdown", async () => {
       "1,234",
       "$0.50",
     ]);
+    expect(container.querySelector("dl")?.className).toBe("grid grid-cols-3 gap-3");
     expect(
       [...container.querySelectorAll("tbody tr")].map((row) =>
         [...row.querySelectorAll("td")].map((cell) => cell.textContent),
@@ -336,6 +341,74 @@ it("shows usage totals and a per-model breakdown", async () => {
     ).toEqual([
       ["model-aopenai", "2", "1,000", "30", "$0.50"],
       ["model-blocal", "1", "200", "4", "—"],
+    ]);
+  } finally {
+    await act(async () => root.unmount());
+    vi.unstubAllGlobals();
+  }
+});
+
+it("shows measured allowance separately from cost and its receipt coverage", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(
+        <UsageSettingsPanel
+          usage={{
+            runs: 2,
+            inputTokens: 1200,
+            outputTokens: 34,
+            totalTokens: 1234,
+            costUsd: 0,
+            allowanceUsd: 0.00412,
+            allowanceCalls: 1,
+            modelCalls: 3,
+            models: [
+              {
+                provider: "fixture",
+                model: "model-a",
+                modelCalls: 2,
+                inputTokens: 1000,
+                outputTokens: 30,
+                totalTokens: 1030,
+                costUsd: 0,
+                allowanceUsd: 0.00412,
+                allowanceCalls: 1,
+              },
+              {
+                provider: "fixture",
+                model: "model-b",
+                modelCalls: 1,
+                inputTokens: 200,
+                outputTokens: 4,
+                totalTokens: 204,
+                costUsd: null,
+                allowanceUsd: null,
+                allowanceCalls: 0,
+              },
+            ],
+          }}
+        />,
+      ),
+    );
+    expect([...container.querySelectorAll("dd")].map((node) => node.textContent)).toEqual([
+      "2",
+      "1,234",
+      "$0.00",
+      "$0.00412",
+    ]);
+    expect(container.textContent).toContain("Allowance used");
+    expect(container.textContent).toContain("Measured calls: 1");
+    expect(container.querySelector("dl")?.className).toBe("grid grid-cols-2 gap-3 md:grid-cols-4");
+    expect(
+      [...container.querySelectorAll("tbody tr")].map((row) =>
+        [...row.querySelectorAll("td")].map((cell) => cell.textContent),
+      ),
+    ).toEqual([
+      ["model-afixture", "2", "1,000", "30", "$0.00", "$0.00412Measured calls: 1"],
+      ["model-bfixture", "1", "200", "4", "—", "—"],
     ]);
   } finally {
     await act(async () => root.unmount());

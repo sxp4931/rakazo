@@ -55,6 +55,7 @@ describe("usage ledger", () => {
       reasoningTokens: 10,
       totalTokens: 130,
       costUsd: 0.001,
+      allowanceUsd: 0.00412,
       costSource: "fixture",
       pricingVersion: "v1",
       operationKind: "subagent" as const,
@@ -79,9 +80,33 @@ describe("usage ledger", () => {
           agentId: "agent-fixture",
           parentRunId: "run-fixture",
           cacheWriteTokens: 0,
+          costUsd: 0.001,
+          allowanceUsd: 0.00412,
         }),
       ],
       skipDuplicates: true,
+    });
+  });
+  it("stores allowance receipts independently from charged cost", async () => {
+    const createMany = vi.fn(async (_args: { data: Prisma.UsageRecordCreateManyInput[] }) => ({
+      count: 1,
+    }));
+    await recordUsage(
+      client(createMany),
+      {
+        type: "usage",
+        provider: "fixture",
+        model: "test",
+        inputTokens: 10,
+        outputTokens: 2,
+        costUsd: 0,
+        allowanceUsd: 0.00412,
+      },
+      { spaceId: "space-fixture", userId: "user-fixture" },
+    );
+    expect(createMany.mock.calls[0]?.[0].data[0]).toMatchObject({
+      costUsd: 0,
+      allowanceUsd: 0.00412,
     });
   });
   it("keeps unknown usage null and never invents a foreground run for background work", async () => {

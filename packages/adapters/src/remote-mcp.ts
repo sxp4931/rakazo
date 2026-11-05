@@ -18,6 +18,7 @@ import {
   isLocalhostOrLoopbackIp,
   isLoopbackAddress,
   isNonPublicAddress,
+  MCP_APP_READ_TIMEOUT_MS,
   normalizeHost,
 } from "@rakazo/contracts";
 import { cancelResponseBody } from "@rakazo/core";
@@ -26,6 +27,12 @@ import { composioToolBatch } from "./composio-batch.js";
 import { sensitiveQueryParameter } from "./connector-http.js";
 import { combineSignals } from "./connector-safety.js";
 import { credentialDigest } from "./credential-digest.js";
+import {
+  MCP_APP_CLIENT_CAPABILITIES,
+  mcpToolAppResourceUri,
+  mcpToolVisibleToModel,
+} from "./mcp-app.js";
+import { limitMcpResponseBody } from "./mcp-response-limit.js";
 import type { ResolvedAddress, ResolveHostname } from "./network-address.js";
 import {
   createAddressCheckedLookup,
@@ -99,17 +106,20 @@ export async function listRemoteMcpTools(options: RemoteMcpOptions): Promise<Con
       inputSchema: tool.inputSchema,
       readOnly: tool.annotations?.readOnlyHint,
       batch: composioToolBatch(tool.name),
+      appResourceUri: mcpToolAppResourceUri(tool),
     }));
   return withScopedMcpClient(options, list);
 }
 
-/** Follow `tools/list` cursors, bounded by the shared page and tool caps. */
+/** Follow `tools/list` cursors, bounded by the shared page and tool caps. Tools only a
+ * server's own app may call are left out: the model never sees them. */
 export async function listMcpTools(client: Client, options: RequestOptions): Promise<Tool[]> {
   const tools: Tool[] = [];
   let cursor: string | undefined;
   for (let page = 0; page < MAX_MCP_PAGES && tools.length < MAX_MCP_TOOLS; page += 1) {
     const result = await client.listTools(cursor ? { cursor } : undefined, options);
-    tools.push(...result.tools.slice(0, MAX_MCP_TOOLS - tools.length));
+    const visible = result.tools.filter(mcpToolVisibleToModel);
+    tools.push(...visible.slice(0, MAX_MCP_TOOLS - tools.length));
     cursor = result.nextCursor;
     if (!cursor) break;
   }
@@ -125,6 +135,17 @@ export async function callRemoteMcpTool(
 ): Promise<unknown> {
   return withScopedMcpClient(options, (client, signal) =>
     callMcpTool(client, signal, toolName, args, projectResult),
+  );
+}
+
+/** Read one resource through the same guarded transport and run-scoped session as calls. */
+export async function readRemoteMcpResource(
+  options: RemoteMcpOptions,
+  uri: string,
+): Promise<{ contents?: unknown }> {
+  return withScopedMcpClient(options, (client, signal) =>
+    // The call already answered; its app gets a shorter wait than a call.
+    client.readResource({ uri }, { signal, timeout: MCP_APP_READ_TIMEOUT_MS }),
   );
 }
 
@@ -276,9 +297,12 @@ async function withRemoteMcpClient<T>(
       redirect: "manual",
       signal,
     },
-    fetch: safeFetch,
+    fetch: async (input, init) => limitMcpResponseBody(await safeFetch(input, init), init?.headers),
   });
-  const client = new Client({ name: "rakazo", version: "0.1.0" }, { capabilities: {} });
+  const client = new Client(
+    { name: "rakazo", version: "0.1.0" },
+    { capabilities: MCP_APP_CLIENT_CAPABILITIES },
+  );
   try {
     await client.connect(transport, { signal, timeout: MCP_TIMEOUT_MS });
     return await run(client, signal);
@@ -460,8 +484,9 @@ export class RemoteMcpSessionCache {
         redirect: "manual",
       },
       fetch: async (input, init) => {
+        let response: Response;
         try {
-          return await safeFetch(input, init);
+          response = await safeFetch(input, init);
         } catch (error) {
           if (error instanceof ConnectorRedirectError) throw error;
           throw new RemoteMcpTransportError(
@@ -469,9 +494,13 @@ export class RemoteMcpSessionCache {
             { cause: error },
           );
         }
+        return limitMcpResponseBody(response, init?.headers);
       },
     });
-    const client = new Client({ name: "rakazo", version: "0.1.0" }, { capabilities: {} });
+    const client = new Client(
+      { name: "rakazo", version: "0.1.0" },
+      { capabilities: MCP_APP_CLIENT_CAPABILITIES },
+    );
     const session: ScopedMcpSession = {
       key,
       client,

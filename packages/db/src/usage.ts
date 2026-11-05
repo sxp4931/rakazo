@@ -31,6 +31,7 @@ export async function recordUsage(
     reasoningTokens: event.reasoningTokens ?? null,
     totalTokens: event.totalTokens ?? null,
     costUsd: event.costUsd ?? null,
+    allowanceUsd: event.allowanceUsd ?? null,
     costSource: event.costSource ?? null,
     pricingVersion: event.pricingVersion ?? null,
     pricingSnapshot: event.pricingSnapshot

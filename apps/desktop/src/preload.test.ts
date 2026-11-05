@@ -56,6 +56,7 @@ describe("desktop preload bridge", () => {
       "oauth",
       "passkeys",
       "platform",
+      "server",
       "settings",
       "update",
       "window",
@@ -89,6 +90,7 @@ describe("desktop preload bridge", () => {
     await bridge.update.check();
     await bridge.update.download();
     await bridge.update.install();
+    await bridge.server!.change();
     expect(invoke.mock.calls.map(([channel]) => channel)).toEqual([
       "desktop.badge.set",
       "desktop.device.state",
@@ -106,6 +108,7 @@ describe("desktop preload bridge", () => {
       "desktop.update.check",
       "desktop.update.download",
       "desktop.update.install",
+      "desktop.server.change",
     ]);
   });
 
@@ -251,7 +254,7 @@ describe("setup preload bridge", () => {
   });
 
   it("hands the page its language before the page runs, English when main refuses", () => {
-    const locale = { lang: "es", messages: { Continue: "Continuar" } };
+    const locale = { lang: "es", dir: "ltr", messages: { Continue: "Continuar" } };
     const sendSync = vi.fn(() => locale);
     const [, bridge] = runPreload("setup-preload.cjs", { sendSync }).exposeInMainWorld.mock
       .calls[0] as [string, RakazoSetup];
@@ -262,6 +265,6 @@ describe("setup preload bridge", () => {
       string,
       RakazoSetup,
     ];
-    expect(refused.locale).toEqual({ lang: "en", messages: {} });
+    expect(refused.locale).toEqual({ lang: "en", dir: "ltr", messages: {} });
   });
 });

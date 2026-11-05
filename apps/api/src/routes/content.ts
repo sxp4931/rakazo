@@ -4,7 +4,7 @@ import { resolveBotWorkspacePath } from "@rakazo/adapters";
 import type { ExportManifest } from "@rakazo/contracts";
 import { attachmentMaxBytes, resolveBotAvatarSet } from "@rakazo/contracts";
 import { AttachmentValidationError } from "@rakazo/core";
-import { IsolationError, parseComputerMode } from "@rakazo/db";
+import { IsolationError, LISTED_ARTIFACT, parseComputerMode } from "@rakazo/db";
 import {
   ArtifactListCursorError,
   createOwnedArtifact,
@@ -35,6 +35,7 @@ export function contentRoutes(ctx: RouterContext) {
             groupId: null,
             spaceId: context.actor.spaceId,
             userId: context.actor.userId,
+            ...LISTED_ARTIFACT,
           },
         });
         return rows.map((row) => ({
@@ -132,6 +133,7 @@ export function contentRoutes(ctx: RouterContext) {
           reasoningTokens: row.reasoningTokens,
           totalTokens: row.totalTokens,
           costUsd: row.costUsd,
+          allowanceUsd: row.allowanceUsd,
           costSource: row.costSource,
           pricingVersion: row.pricingVersion,
           usageSource: row.usageSource,
@@ -150,6 +152,7 @@ export function contentRoutes(ctx: RouterContext) {
           outputTokens: true,
           totalTokens: true,
           costUsd: true,
+          allowanceUsd: true,
         } as const;
         const counts = { _all: true, ...sums } as const;
         const [result, modelGroups, runGroups] = await Promise.all([
@@ -164,7 +167,8 @@ export function contentRoutes(ctx: RouterContext) {
         ]);
         const runs = new Set(runGroups.map((row) => row.parentRunId ?? row.runId).filter(Boolean))
           .size;
-        // A total that skips rows without a count would understate spend, so it reads as unknown.
+        // Tokens and cost require complete coverage. Allowance is a measured subtotal, counted
+        // separately.
         const completeSums = (group: {
           _sum: Record<keyof typeof sums, number | null>;
           _count: Record<keyof typeof counts, number>;
@@ -176,6 +180,8 @@ export function contentRoutes(ctx: RouterContext) {
             outputTokens: complete("outputTokens"),
             totalTokens: complete("totalTokens"),
             costUsd: complete("costUsd"),
+            allowanceUsd: group._count.allowanceUsd > 0 ? (group._sum.allowanceUsd ?? 0) : null,
+            allowanceCalls: group._count.allowanceUsd,
             modelCalls: group._count._all,
           };
         };

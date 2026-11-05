@@ -1,6 +1,11 @@
 import { BillingNoMonthlyCreditsError } from "@rakazo/adapter-kit";
 import { describe, expect, it, vi } from "vitest";
-import { StripeBillingProvider } from "./stripe-billing.js";
+import { byokTierOf, StripeBillingProvider } from "./stripe-billing.js";
+
+const toYearly = {
+  from: { tier: "standard", interval: "month", amountCents: 1500 },
+  to: { tier: "standard", interval: "year", amountCents: 14400 },
+} as const;
 
 function fixture(routes: Record<string, unknown> = {}) {
   const requests: Array<{ path: string; params: URLSearchParams }> = [];
@@ -94,6 +99,204 @@ describe("Stripe prepaid model credits", () => {
     });
     expect(requests.at(-1)!.params.get("subscription_data[trial_period_days]")).toBe("7");
   });
+  it("bills a yearly own-key plan on its own yearly price", async () => {
+    const { provider, requests } = fixture();
+    await provider.createByokCheckout({
+      customerId: "cus_fixture",
+      amountCents: 14400,
+      interval: "year",
+      successUrl: "https://example.test/return",
+      cancelUrl: "https://example.test/app",
+    });
+    const created = requests.find((r) => r.path === "/v1/prices" && r.params.has("unit_amount"));
+    expect(created?.params.get("recurring[interval]")).toBe("year");
+    expect(created?.params.get("lookup_key")).toBe("rakazo_byok_yearly_14400");
+  });
+  it("names the tier in the price's lookup key, keeping Standard's keys", async () => {
+    const { provider, requests } = fixture();
+    await provider.createByokCheckout({
+      customerId: "cus_fixture",
+      amountCents: 4900,
+      tier: "pro",
+      successUrl: "https://example.test/return",
+      cancelUrl: "https://example.test/app",
+    });
+    const created = requests.find((r) => r.path === "/v1/prices" && r.params.has("unit_amount"));
+    expect(created?.params.get("lookup_key")).toBe("rakazo_byok_pro_monthly_4900");
+    expect(created?.params.get("recurring[interval]")).toBe("month");
+    expect(byokTierOf("rakazo_byok_pro_monthly_4900")).toBe("pro");
+    expect(byokTierOf("rakazo_byok_max_yearly_142800")).toBe("max");
+    expect(byokTierOf("rakazo_byok_monthly_1500")).toBe("standard");
+    expect(byokTierOf("rakazo_byok_yearly_14400")).toBe("standard");
+    expect(byokTierOf(null)).toBe("standard");
+  });
+  it("leaves a plan alone when it is not the live monthly plan, or credits have started", async () => {
+    const plan = (
+      id: string,
+      status: string,
+      metadata: Record<string, string>,
+      interval = "month",
+      unitAmount = 1500,
+    ) => ({
+      id,
+      status,
+      metadata,
+      created: 1,
+      items: {
+        data: [
+          {
+            id: `si_${id}`,
+            quantity: 1,
+            price: { id: `price_${id}`, unit_amount: unitAmount, recurring: { interval } },
+          },
+        ],
+      },
+    });
+    const { provider, requests } = fixture({
+      "GET /v1/subscriptions": {
+        data: [
+          plan("sub_active", "active", { rakazo_plan: "byok" }),
+          plan("sub_unpaid", "canceled", { rakazo_plan: "byok" }),
+          plan("sub_yearly", "active", { rakazo_plan: "byok" }, "year"),
+          plan("sub_overdue", "past_due", { rakazo_plan: "byok" }),
+          plan("sub_cheap", "active", { rakazo_plan: "byok" }, "month", 1000),
+          (() => {
+            const quarterly = plan("sub_quarterly", "active", { rakazo_plan: "byok" });
+            quarterly.items.data[0]!.price.recurring = {
+              interval: "month",
+              interval_count: 3,
+            } as never;
+            return quarterly;
+          })(),
+          (() => {
+            const seats = plan("sub_seats", "active", { rakazo_plan: "byok" });
+            seats.items.data[0]!.quantity = 2;
+            return seats;
+          })(),
+          {
+            ...plan("sub_cancelling", "active", { rakazo_plan: "byok" }),
+            cancel_at_period_end: true,
+          },
+        ],
+        has_more: false,
+      },
+    });
+    await expect(provider.changeByokPlan("cus_fixture", "sub_unpaid", toYearly)).resolves.toBe(
+      false,
+    );
+    for (const id of [
+      "sub_yearly",
+      "sub_overdue",
+      "sub_cancelling",
+      "sub_cheap",
+      "sub_quarterly",
+      "sub_seats",
+    ])
+      await expect(provider.changeByokPlan("cus_fixture", id, toYearly)).resolves.toBe(false);
+    const withCredits = fixture({
+      "GET /v1/subscriptions": {
+        data: [
+          plan("sub_active", "active", { rakazo_plan: "byok" }),
+          plan("sub_credits", "active", { rakazo_credit_cents: "3000" }),
+        ],
+        has_more: false,
+      },
+    });
+    await expect(
+      withCredits.provider.changeByokPlan("cus_fixture", "sub_active", toYearly),
+    ).resolves.toBe(false);
+    for (const { path } of [...requests, ...withCredits.requests])
+      expect(path).not.toMatch(/^\/v1\/subscriptions\/sub_/);
+  });
+  it("moves a monthly own-key plan to the yearly price, charging the difference now", async () => {
+    const { provider, requests } = fixture({
+      "GET /v1/subscriptions": {
+        data: [
+          {
+            id: "sub_byok",
+            status: "active",
+            metadata: { rakazo_plan: "byok" },
+            created: 1,
+            items: {
+              data: [
+                {
+                  id: "si_byok",
+                  quantity: 1,
+                  price: { id: "price_month", unit_amount: 1500, recurring: { interval: "month" } },
+                },
+              ],
+            },
+          },
+        ],
+        has_more: false,
+      },
+      "POST /v1/subscriptions/sub_byok": { id: "sub_byok" },
+    });
+    await expect(provider.changeByokPlan("cus_fixture", "sub_byok", toYearly)).resolves.toBe(true);
+    const update = requests.find((r) => r.path === "/v1/subscriptions/sub_byok")!.params;
+    expect(update.get("items[0][id]")).toBe("si_byok");
+    expect(update.get("items[0][price]")).toBe("price_credits");
+    expect(update.get("proration_behavior")).toBe("always_invoice");
+    expect(update.get("payment_behavior")).toBe("error_if_incomplete");
+    expect(
+      requests
+        .find((r) => r.path === "/v1/prices" && r.params.has("unit_amount"))
+        ?.params.get("recurring[interval]"),
+    ).toBe("year");
+  });
+  it("moves an own-key plan to another tier at its interval, and reports the tier", async () => {
+    const subscription = (lookupKey: string, unitAmount: number) => ({
+      id: "sub_byok",
+      status: "active",
+      metadata: { rakazo_plan: "byok" },
+      created: 1,
+      items: {
+        data: [
+          {
+            id: "si_byok",
+            quantity: 1,
+            price: {
+              id: "price_pro",
+              unit_amount: unitAmount,
+              lookup_key: lookupKey,
+              recurring: { interval: "month" },
+            },
+          },
+        ],
+      },
+    });
+    const { provider, requests } = fixture({
+      "GET /v1/subscriptions": {
+        data: [subscription("rakazo_byok_pro_monthly_4900", 4900)],
+        has_more: false,
+      },
+      "POST /v1/subscriptions/sub_byok": { id: "sub_byok" },
+    });
+    expect(await provider.getCustomerSubscription("cus_fixture")).toMatchObject({
+      byokTier: "pro",
+      byokPriceCents: 4900,
+    });
+    const change = {
+      from: { tier: "pro", interval: "month", amountCents: 4900 },
+      to: { tier: "max", interval: "month", amountCents: 14900 },
+    } as const;
+    // The caller saw a different plan than the provider has.
+    await expect(
+      provider.changeByokPlan("cus_fixture", "sub_byok", {
+        ...change,
+        from: { ...change.from, tier: "standard" },
+      }),
+    ).resolves.toBe(false);
+    expect(requests.some((r) => r.path === "/v1/subscriptions/sub_byok")).toBe(false);
+    await expect(provider.changeByokPlan("cus_fixture", "sub_byok", change)).resolves.toBe(true);
+    const update = requests.find((r) => r.path === "/v1/subscriptions/sub_byok")!.params;
+    expect(update.get("items[0][id]")).toBe("si_byok");
+    expect(update.get("proration_behavior")).toBe("always_invoice");
+    expect(update.get("payment_behavior")).toBe("error_if_incomplete");
+    const created = requests.find((r) => r.path === "/v1/prices" && r.params.has("unit_amount"));
+    expect(created?.params.get("lookup_key")).toBe("rakazo_byok_max_monthly_14900");
+    expect(created?.params.get("recurring[interval]")).toBe("month");
+  });
   it("reports the price an own-key subscription was bought at", async () => {
     const { provider } = fixture({
       "/v1/subscriptions": {
@@ -104,7 +307,13 @@ describe("Stripe prepaid model credits", () => {
             metadata: { rakazo_plan: "byok" },
             created: 1,
             items: {
-              data: [{ id: "si_byok", quantity: 1, price: { id: "price_old", unit_amount: 1000 } }],
+              data: [
+                {
+                  id: "si_byok",
+                  quantity: 1,
+                  price: { id: "price_old", unit_amount: 12000, recurring: { interval: "year" } },
+                },
+              ],
             },
           },
         ],
@@ -113,7 +322,8 @@ describe("Stripe prepaid model credits", () => {
     });
     await expect(provider.getCustomerSubscription("cus_fixture")).resolves.toMatchObject({
       byokPlan: true,
-      byokPriceCents: 1000,
+      byokPriceCents: 12000,
+      byokInterval: "year",
     });
   });
   it("rejects invalid purchase amounts without contacting Stripe", async () => {

@@ -4,8 +4,13 @@ export const HISTORY_FIXTURE_VERSION = "history-v1-seed-73";
 export type HistoryMessage = {
   seq: number;
   role: "user" | "bot";
+  /** A group member bot that wrote this bot message; absent means the bot under test did. */
+  author?: string;
+  /** Empty when the message carries only a file. */
   text: string;
   subagentResult?: string;
+  /** A synthetic file the user attached, uploaded through the product before seeding. */
+  file?: { name: string; mimeType: string; content: string };
   createdAt: Date;
 };
 export type HistoryScenario =

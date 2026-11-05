@@ -5,6 +5,7 @@ import path from "node:path";
 import type { IpcMainInvokeEvent, WebContents } from "electron";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  CATALOGS,
   createLocaleHandler,
   desktopLocale,
   desktopMessages,
@@ -15,6 +16,7 @@ import {
   withDetail,
 } from "./i18n.js";
 import { ES_MESSAGES } from "./locales/es.js";
+import { PL_MESSAGES } from "./locales/pl.js";
 import { readUiLocale, writeUiLocale } from "./setup-store.js";
 
 const srcDir = import.meta.dirname;
@@ -66,9 +68,13 @@ describe("desktop language", () => {
     ["en", "es-CL", "en"],
     [null, "es-419", "es"],
     [null, "es_ES", "es"],
+    ["pl", "en-US", "pl"],
+    [null, "pl-PL", "pl"],
+    [null, "pl_PL", "pl"],
+    ["en", "pl-PL", "en"],
     // The app offers languages the desktop has no catalog for yet; those read English.
-    ["de", "es-CL", "en"],
-    [null, "fr-FR", "en"],
+    ["it", "es-CL", "en"],
+    [null, "it-IT", "en"],
     [null, undefined, "en"],
   ] as const)("resolves reported %s on a %s system to %s", (reported, system, expected) => {
     expect(resolveDesktopLocale(reported, system)).toBe(expected);
@@ -85,6 +91,15 @@ describe("desktop language", () => {
     expect(startDesktopLocale("es; rm -rf /", "en-US")).toBe("en");
     expect(t("Check for Updates…")).toBe("Check for Updates…");
     expect(desktopMessages()).toEqual({});
+  });
+
+  it("uses the Polish catalog at startup and interpolates native messages", () => {
+    expect(startDesktopLocale("pl-PL", "en-US")).toBe("pl");
+    expect(desktopMessages()).toBe(PL_MESSAGES);
+    expect(t("Check for Updates…")).toBe("Sprawdź aktualizacje…");
+    expect(t("Rakazo {version} is ready to install.", { version: "1.2.0" })).toBe(
+      "Rakazo 1.2.0 jest gotowe do zainstalowania.",
+    );
   });
 
   it("saves a language the app window reports and rebuilds the menus when it changes", async () => {
@@ -108,9 +123,9 @@ describe("desktop language", () => {
     await handle(event, "es-MX");
     expect(save).toHaveBeenCalledTimes(2);
 
-    await handle(event, "de");
+    await handle(event, "it");
     expect(desktopLocale()).toBe("en");
-    expect(save).toHaveBeenLastCalledWith("de");
+    expect(save).toHaveBeenLastCalledWith("it");
     expect(onChange).toHaveBeenCalledTimes(2);
   });
 
@@ -207,48 +222,56 @@ describe("desktop language", () => {
     expect(save).toHaveBeenLastCalledWith("en");
   });
 
-  it("opens the next launch in the language the app window last reported", async () => {
-    const userData = await mkdtemp(path.join(tmpdir(), "rakazo-locale-"));
-    try {
-      await expect(readUiLocale(userData)).resolves.toBeNull();
-      const { event, target } = appFrame();
-      const handle = createLocaleHandler(
-        () => target,
-        (locale) => writeUiLocale(userData, locale),
-        () => undefined,
+  it.each(["es-AR", "pl-PL"])(
+    "opens the next launch in the reported language %s",
+    async (locale) => {
+      const userData = await mkdtemp(path.join(tmpdir(), "rakazo-locale-"));
+      try {
+        await expect(readUiLocale(userData)).resolves.toBeNull();
+        const { event, target } = appFrame();
+        const handle = createLocaleHandler(
+          () => target,
+          (locale) => writeUiLocale(userData, locale),
+          () => undefined,
+        );
+        startDesktopLocale(await readUiLocale(userData), "en-US");
+        await handle(event, locale);
+
+        startDesktopLocale(null, "en-US");
+        expect(startDesktopLocale(await readUiLocale(userData), "en-US")).toBe(
+          locale.split("-")[0],
+        );
+      } finally {
+        await rm(userData, { recursive: true, force: true });
+      }
+    },
+  );
+});
+
+describe.each(Object.entries(CATALOGS))(
+  "%s catalog",
+  (_locale, catalog: Readonly<Record<string, string>>) => {
+    it("keeps every placeholder and leaves no entry empty", () => {
+      const empty = Object.entries(catalog).filter(([, value]) => !value.trim());
+      const mismatched = Object.entries(catalog).filter(
+        ([id, value]) => JSON.stringify(placeholders(id)) !== JSON.stringify(placeholders(value)),
       );
-      startDesktopLocale(await readUiLocale(userData), "en-US");
-      await handle(event, "es-AR");
+      expect(empty).toEqual([]);
+      expect(mismatched).toEqual([]);
+    });
 
-      startDesktopLocale(null, "en-US");
-      expect(startDesktopLocale(await readUiLocale(userData), "en-US")).toBe("es");
-    } finally {
-      await rm(userData, { recursive: true, force: true });
-    }
-  });
-});
-
-describe("Spanish catalog", () => {
-  it("keeps every placeholder and leaves no entry empty", () => {
-    const empty = Object.entries(ES_MESSAGES).filter(([, value]) => !value.trim());
-    const mismatched = Object.entries(ES_MESSAGES).filter(
-      ([id, value]) => JSON.stringify(placeholders(id)) !== JSON.stringify(placeholders(value)),
-    );
-    expect(empty).toEqual([]);
-    expect(mismatched).toEqual([]);
-  });
-
-  it("translates every desktop t() id and setup page string, and nothing else", () => {
-    const ids = new Set(setupPageStrings());
-    for (const file of readdirSync(srcDir)) {
-      if (!/\.(ts|js|cjs)$/.test(file) || file.endsWith(".test.ts")) continue;
-      for (const id of translationIds(readFileSync(path.join(srcDir, file), "utf8"))) ids.add(id);
-    }
-    const missing = [...ids].filter((id) => !ES_MESSAGES[id]?.trim()).sort();
-    const unused = Object.keys(ES_MESSAGES)
-      .filter((id) => !ids.has(id))
-      .sort();
-    expect(missing).toEqual([]);
-    expect(unused).toEqual([]);
-  });
-});
+    it("translates every desktop t() id and setup page string, and nothing else", () => {
+      const ids = new Set(setupPageStrings());
+      for (const file of readdirSync(srcDir)) {
+        if (!/\.(ts|js|cjs)$/.test(file) || file.endsWith(".test.ts")) continue;
+        for (const id of translationIds(readFileSync(path.join(srcDir, file), "utf8"))) ids.add(id);
+      }
+      const missing = [...ids].filter((id) => !catalog[id]?.trim()).sort();
+      const unused = Object.keys(catalog)
+        .filter((id) => !ids.has(id))
+        .sort();
+      expect(missing).toEqual([]);
+      expect(unused).toEqual([]);
+    });
+  },
+);

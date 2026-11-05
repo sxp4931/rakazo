@@ -206,6 +206,40 @@ it("polls while the apply request is still pending", async () => {
   }
 });
 
+it("shows the update summary while conflicts keep installation blocked", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  sourceState.mockResolvedValue({ running: false, lastRun: null });
+  sourceCheck.mockResolvedValue({
+    ...preview,
+    status: "conflict",
+    reason: "The official changes conflict with this checkout.",
+    conflictingPaths: ["apps/api/src/service.ts"],
+  });
+
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<SourceUpdates />));
+    await act(async () => findButton(container, "Check for updates").click());
+
+    expect(container.textContent).toContain(preview.summary);
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+      "The official changes conflict with this checkout.",
+    );
+    expect(
+      [...container.querySelectorAll("button")].some(
+        (button) => button.textContent === "Apply reviewed update",
+      ),
+    ).toBe(false);
+    expect(sourceApply).not.toHaveBeenCalled();
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    vi.unstubAllGlobals();
+  }
+});
+
 it("labels the commit fallback when an AI summary is unavailable", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   const idle: SourceUpdateState = { running: false, lastRun: null };

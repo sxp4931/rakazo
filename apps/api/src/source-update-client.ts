@@ -61,7 +61,10 @@ export function createSourceUpdatesGateway(deps: {
       } catch {
         return unavailablePreview("The source updater is unavailable.");
       }
-      const summary = candidate.status === "available" ? await summarize(actor, candidate) : null;
+      const summary =
+        candidate.status === "available" || candidate.status === "conflict"
+          ? await summarize(actor, candidate)
+          : null;
       return {
         status: candidate.status,
         reason: candidate.reason,

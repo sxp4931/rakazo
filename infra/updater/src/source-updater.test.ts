@@ -15,6 +15,23 @@ afterEach(async () => {
 });
 
 describe("official source updates", () => {
+  it("keeps the preview available when the upstream diff exceeds the subprocess limit", async () => {
+    const fixture = await makeFixture();
+    await writeFile(path.join(fixture.upstream, "large.txt"), Buffer.alloc(5 * 1024 * 1024, 97));
+    await git(fixture.upstream, ["add", "large.txt"]);
+    await git(fixture.upstream, ["commit", "-m", "large official change"]);
+    await git(fixture.upstream, ["push", "origin", "main"]);
+    const targetCommit = (await git(fixture.upstream, ["rev-parse", "HEAD"])).trim();
+
+    const updater = createSourceUpdater(fixture.config());
+    const preview = await updater.check(targetCommit);
+
+    expect(preview.status, preview.reason ?? "").toBe("available");
+    expect(preview.targetCommit).toBe(targetCommit);
+    expect(preview.changedFiles).toContain("large.txt");
+    expect(preview.diff).toHaveLength(60_000);
+  });
+
   it("merges upstream into local commits and verifies a recovery bundle without changing origin", async () => {
     const fixture = await makeFixture();
     const installs: string[][] = [];
@@ -322,6 +339,7 @@ async function makeFixture(options: { conflict?: boolean; upstreamPath?: string 
   return {
     repo,
     official,
+    upstream,
     backupDir,
     statePath,
     localHead,

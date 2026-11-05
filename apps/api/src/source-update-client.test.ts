@@ -12,7 +12,7 @@ const actor: Actor = {
 };
 
 describe("source update summary", () => {
-  it("uses the configured runtime and records its usage", async () => {
+  it.each(["available", "conflict"])("summarizes %s changes and records usage", async (status) => {
     const recorded = vi.fn();
     const prisma = {
       $transaction: (callback: (tx: unknown) => unknown) =>
@@ -41,7 +41,7 @@ describe("source update summary", () => {
       abort: vi.fn(async () => {}),
     } as unknown as AgentRuntime;
     const fetch = vi.fn(
-      async (_input: RequestInfo | URL) => new Response(JSON.stringify(candidate())),
+      async (_input: RequestInfo | URL) => new Response(JSON.stringify({ ...candidate(), status })),
     );
     const gateway = createSourceUpdatesGateway({
       token: "dedicated-token",
@@ -54,6 +54,7 @@ describe("source update summary", () => {
     });
 
     const preview = await gateway.check(actor);
+    expect(preview.status).toBe(status);
     expect(preview.summary).toBe("The update adds safer source recovery.");
     expect(preview.summaryAvailable).toBe(true);
     expect(received?.tools).toEqual([]);

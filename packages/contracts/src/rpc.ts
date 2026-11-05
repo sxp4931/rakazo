@@ -124,6 +124,9 @@ import {
   ServerUpdateStatusSchema,
   SignupSurveySchema,
   SkillPlaybookSchema,
+  SourceUpdatePreviewSchema,
+  SourceUpdateRunSchema,
+  SourceUpdateStateSchema,
   SpaceAvailabilitySchema,
   SpaceMemoryConfigSchema,
   SpaceNavigationSchema,
@@ -352,6 +355,19 @@ export const appContract = {
     status: oc.output(ServerUpdateStatusSchema),
     check: oc.input(ServerUpdateRequestSchema).output(ServerUpdateCheckSchema),
     apply: oc.input(ServerUpdateRequestSchema).output(ServerUpdateRunSchema),
+  },
+  /** Owner-only safe merge from the official source repository on self-hosted checkouts. */
+  sourceUpdates: {
+    state: oc.output(SourceUpdateStateSchema),
+    check: oc.output(SourceUpdatePreviewSchema),
+    apply: oc
+      .input(
+        z.object({
+          currentCommit: z.string().regex(/^[0-9a-f]{40}$/i),
+          targetCommit: z.string().regex(/^[0-9a-f]{40}$/i),
+        }),
+      )
+      .output(SourceUpdateRunSchema),
   },
   models: {
     forRole: oc

@@ -22,9 +22,19 @@ msgstr " (לא נקראה)"
 msgid "{0, plural, one {# bot has its own model:} other {# bots have their own model:}}"
 msgstr ""
 
+#. placeholder {0}: preview.commitCount
+#: src/components/SourceUpdates.tsx
+msgid "{0, plural, one {# commit} other {# commits}}"
+msgstr ""
+
 #. placeholder {0}: servers.length
 #: src/pages/PluginsOverlay.tsx
 msgid "{0, plural, one {# connector} other {# connectors}}"
+msgstr ""
+
+#. placeholder {0}: preview.fileCount
+#: src/components/SourceUpdates.tsx
+msgid "{0, plural, one {# file changed} other {# files changed}}"
 msgstr ""
 
 #. placeholder {0}: skill.files.length
@@ -438,6 +448,10 @@ msgstr ""
 msgid "A sign-in tab opened at <0>{0}</0>. Enter this code there — this window keeps waiting:"
 msgstr "נפתחה לשונית התחברות בכתובת <0>{0}</0>. יש להזין שם את הקוד הזה — החלון הזה ממשיך להמתין:"
 
+#: src/components/SourceUpdates.tsx
+msgid "A source update is in progress."
+msgstr ""
+
 #: src/pages/model-settings/use-model-settings.ts
 msgid "A subscription credential is stored securely."
 msgstr "פרטי גישה של המנוי נשמרים בצורה מאובטחת."
@@ -648,6 +662,11 @@ msgstr "מתקדם..."
 msgid "Agent from another app"
 msgstr ""
 
+#. placeholder {0}: preview.commitCount
+#: src/components/SourceUpdates.tsx
+msgid "AI summary unavailable. Review {0, plural, one {# official commit} other {# official commits}}."
+msgstr ""
+
 #: src/pages/PluginsOverlay.tsx
 msgid "All"
 msgstr ""
@@ -824,6 +843,18 @@ msgstr ""
 #: src/components/AskCard.tsx
 msgid "Apply"
 msgstr "החלה"
+
+#: src/components/SourceUpdates.tsx
+msgid "Apply reviewed update"
+msgstr ""
+
+#: src/components/SourceUpdates.tsx
+msgid "Applying the reviewed update…"
+msgstr ""
+
+#: src/components/SourceUpdates.tsx
+msgid "Applying…"
+msgstr ""
 
 #: src/components/teach/SkillDraftCard.tsx
 msgid "Approval boundaries"
@@ -1207,6 +1238,10 @@ msgstr "החלפת מודל"
 msgid "Change password"
 msgstr "שינוי סיסמה"
 
+#: src/components/SourceUpdates.tsx
+msgid "Changed files"
+msgstr ""
+
 #: src/pages/AccountSettingsOverlay.tsx
 msgid "Changing…"
 msgstr "משנה…"
@@ -1253,7 +1288,7 @@ msgstr ""
 msgid "Check failed: {0}"
 msgstr ""
 
-#: src/components/DesktopUpdates.tsx
+#: src/components/DesktopUpdates.tsx src/components/SourceUpdates.tsx
 msgid "Check for updates"
 msgstr "בדיקת עדכונים"
 
@@ -1285,9 +1320,12 @@ msgstr "בודק את הגדרות המחשב…"
 msgid "Checking connection…"
 msgstr "בודק חיבור…"
 
-#: src/components/ComputersUnavailableHint.tsx
-#: src/components/DesktopUpdates.tsx
-#: src/pages/HostComputerPrompt.tsx
+#: src/components/SourceUpdates.tsx
+msgid "Checking whether the update started…"
+msgstr ""
+
+#: src/components/ComputersUnavailableHint.tsx src/components/DesktopUpdates.tsx
+#: src/components/SourceUpdates.tsx src/pages/HostComputerPrompt.tsx
 msgid "Checking…"
 msgstr "בודק…"
 
@@ -1563,6 +1601,10 @@ msgstr ""
 msgid "Confirm the URL is reachable from this browser session, then test again."
 msgstr "יש לוודא שאפשר להגיע לכתובת ה-URL מסשן הדפדפן הזה, ואז לבדוק שוב."
 
+#: src/components/SourceUpdates.tsx
+msgid "Conflicts"
+msgstr ""
+
 #: src/components/integrations/IntegrationSetup.tsx
 #: src/components/integrations/plugin-marketplace.tsx
 #: src/pages/memory-providers/HonchoSettingsForm.tsx
@@ -1786,6 +1828,10 @@ msgstr "לא ניתן לשנות את הסיסמה"
 msgid "Could not change where this is available"
 msgstr ""
 
+#: src/components/SourceUpdates.tsx
+msgid "Could not check for updates. Try again."
+msgstr ""
+
 #: src/lib/model-connection-preflight.ts
 msgid "Could not check stored credentials."
 msgstr "לא ניתן לבדוק את פרטי הגישה השמורים."
@@ -1809,6 +1855,10 @@ msgstr "לא ניתן להשלים את OAuth"
 #: src/components/DesktopUpdates.tsx
 msgid "Could not complete the update. Try again."
 msgstr "לא ניתן להשלים את העדכון. אפשר לנסות שוב."
+
+#: src/components/SourceUpdates.tsx
+msgid "Could not confirm whether the update started. Check again before retrying."
+msgstr ""
 
 #: src/components/integrations/IntegrationSetup.tsx
 #: src/pages/PluginsOverlay.tsx
@@ -2018,6 +2068,10 @@ msgstr "לא ניתן לטעון את הצ׳אט הזה."
 #: src/components/ArtifactFileCard.tsx
 msgid "Could not load this file."
 msgstr "לא ניתן לטעון את הקובץ הזה."
+
+#: src/components/SourceUpdates.tsx
+msgid "Could not load update status."
+msgstr ""
 
 #: src/pages/VoiceSettingsOverlay.tsx
 msgid "Could not load voice settings"
@@ -2366,6 +2420,10 @@ msgstr "Cron"
 #: src/pages/RoutineSchedule.tsx
 msgid "Cron expression"
 msgstr "ביטוי Cron"
+
+#: src/components/SourceUpdates.tsx
+msgid "Current"
+msgstr ""
 
 #: src/components/AccountAccess.tsx
 #: src/pages/AccountSettingsOverlay.tsx
@@ -2753,10 +2811,6 @@ msgstr "מסתיים ב-{day}"
 #: src/pages/ExternalConversationSettings.tsx
 msgid "Engage when... Ignore..."
 msgstr "להגיב כאשר... להתעלם מ..."
-
-#: src/components/GitHubStarPrompt.tsx
-msgid "Enjoying Rakazo?"
-msgstr ""
 
 #: src/lib/user-error.ts
 msgid "Enter a password"
@@ -3544,6 +3598,10 @@ msgstr "גישה מקומית מאפשרת לבוטים להריץ פקודות 
 msgid "Local computer access requires the latest desktop app."
 msgstr ""
 
+#: src/components/SourceUpdates.tsx
+msgid "Local source changes must be resolved before updating."
+msgstr ""
+
 #: src/components/ModelCredits.tsx
 #: src/components/SidebarFooter.tsx
 #: src/pages/Paywall.tsx
@@ -4060,6 +4118,10 @@ msgstr ""
 msgid "No bots match"
 msgstr "אין בוטים תואמים"
 
+#: src/components/SourceUpdates.tsx
+msgid "No commits"
+msgstr ""
+
 #: src/components/AskCard.tsx
 msgid "No longer active"
 msgstr "כבר לא פעיל"
@@ -4171,7 +4233,6 @@ msgstr "לא בקטלוג של Rakazo"
 msgid "Not in the plugin catalog"
 msgstr "לא נמצא בקטלוג התוספים"
 
-#: src/components/GitHubStarPrompt.tsx
 #: src/pages/shell/message-cards.tsx
 msgid "Not now"
 msgstr "לא עכשיו"
@@ -4224,6 +4285,14 @@ msgstr "חיבור OAuth נכשל"
 #: src/pages/PluginsOverlay.tsx
 msgid "OAuth expired"
 msgstr "תוקף OAuth פג"
+
+#: src/components/SourceUpdates.tsx
+msgid "Official source"
+msgstr ""
+
+#: src/components/SourceUpdates.tsx
+msgid "Official source updates are unavailable."
+msgstr ""
 
 #: src/components/ComputerDeviceSettings.tsx
 msgid "Offline"
@@ -4610,6 +4679,10 @@ msgstr "Rakazo"
 #: src/components/ModelCredits.tsx
 #: src/pages/Onboarding.tsx
 msgid "Rakazo credits"
+msgstr ""
+
+#: src/components/SourceUpdates.tsx
+msgid "Rakazo is up to date."
 msgstr ""
 
 #: src/pages/memory-providers/HonchoSettingsForm.tsx
@@ -5021,6 +5094,10 @@ msgstr ""
 #: src/pages/SlackInstallCallback.tsx
 msgid "Return to Rakazo"
 msgstr "חזרה ל-Rakazo"
+
+#: src/components/SourceUpdates.tsx
+msgid "Review changes"
+msgstr ""
 
 #: src/lib/model-connection-preflight.ts
 msgid "Review provider settings and test again."
@@ -5612,10 +5689,6 @@ msgstr ""
 msgid "SSO is temporarily unavailable. Try again."
 msgstr "SSO אינו זמין כרגע. אפשר לנסות שוב."
 
-#: src/components/GitHubStarPrompt.tsx
-msgid "Star on GitHub"
-msgstr ""
-
 #: src/pages/shell/computer-overlay.tsx
 msgid "Start"
 msgstr ""
@@ -5754,6 +5827,10 @@ msgstr "טבלה"
 msgid "Take control"
 msgstr "השתלטות"
 
+#: src/components/SourceUpdates.tsx
+msgid "Target"
+msgstr ""
+
 #: src/components/teach/TeachComputerOverlay.tsx
 msgid "Teach a task"
 msgstr "לימוד משימה"
@@ -5849,6 +5926,14 @@ msgstr "קישור המסך פג."
 #: src/pages/MemorySettingsOverlay.tsx
 msgid "The selected memory provider is not available in this build."
 msgstr "ספק הזיכרון שנבחר אינו זמין בגרסה הזו."
+
+#: src/components/SourceUpdates.tsx
+msgid "The update failed."
+msgstr ""
+
+#: src/components/SourceUpdates.tsx
+msgid "The update is in progress."
+msgstr ""
 
 #: src/pages/model-settings/space-bots-model.tsx
 msgid "Their own model is cleared. You can pick one again in each bot."
@@ -6009,6 +6094,10 @@ msgstr ""
 #: src/pages/model-settings/connection-controls.tsx
 msgid "This subscription sign-in is not available in Rakazo yet. Use a deployment credential or choose another provider."
 msgstr "התחברות עם המנוי הזה עדיין לא זמינה ב-Rakazo. אפשר להשתמש בפרטי גישה של ההתקנה או לבחור ספק אחר."
+
+#: src/components/SourceUpdates.tsx
+msgid "This update has conflicts and cannot be applied."
+msgstr ""
 
 #: src/pages/Artifacts.tsx
 msgid "This week"
@@ -6184,6 +6273,10 @@ msgstr "מעודכן"
 msgid "Update"
 msgstr "עדכון"
 
+#: src/components/SourceUpdates.tsx
+msgid "Update complete."
+msgstr ""
+
 #: src/components/ComputerMaintenanceActions.tsx
 msgid "Update computer"
 msgstr "עדכון המחשב"
@@ -6220,6 +6313,10 @@ msgstr "עדכונים"
 #: src/components/ComputerUpdateProgress.tsx
 msgid "Updating {0}’s Computer"
 msgstr "מעדכן את המחשב של {0}"
+
+#: src/components/SourceUpdates.tsx
+msgid "Updating official source…"
+msgstr ""
 
 #: src/components/ComputerUpdateProgress.tsx
 msgid "Updating Team Computer"

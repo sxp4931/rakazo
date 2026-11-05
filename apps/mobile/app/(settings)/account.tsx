@@ -703,6 +703,12 @@ export default function Account() {
         ) : null}
 
         <SettingsGroup>
+          {me?.canManageSourceUpdates ? (
+            <SettingsRow
+              title={t("Source updates")}
+              detail={t("Review and apply updates in web settings.")}
+            />
+          ) : null}
           {me?.billingEnabled ? (
             <SettingsRow
               title={t("Billing")}

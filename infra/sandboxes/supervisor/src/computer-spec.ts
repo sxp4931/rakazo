@@ -101,7 +101,7 @@ export function resolveSpaceComputerLimit(
  * runaway page must not starve the host or sibling bots. Set any of these to
  * "0", "none" or "unlimited" to opt out.
  */
-const DEFAULT_COMPUTER_MEMORY = "2g";
+const DEFAULT_COMPUTER_MEMORY = "4g";
 const DEFAULT_COMPUTER_CPUS = "2";
 const DEFAULT_COMPUTER_PIDS_LIMIT = "2048";
 /** The daemon refuses HostConfig.Memory below this at container creation. */

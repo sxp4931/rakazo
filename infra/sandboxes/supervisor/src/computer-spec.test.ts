@@ -1950,7 +1950,7 @@ describe("computer resource limits", () => {
 
   it("caps memory and cpu by default and keeps #343's pids ceiling", () => {
     const { HostConfig } = containerCreateOptions(createInput);
-    expect(HostConfig.Memory).toBe(2 * 1024 ** 3);
+    expect(HostConfig.Memory).toBe(4 * 1024 ** 3);
     expect(HostConfig.MemorySwap).toBe(HostConfig.Memory);
     expect(HostConfig.NanoCpus).toBe(2 * 1e9);
     expect(HostConfig.PidsLimit).toBe(2048);
@@ -1962,7 +1962,7 @@ describe("computer resource limits", () => {
     process.env.RAKAZO_COMPUTER_CPUS = "  ";
     process.env.RAKAZO_COMPUTER_PIDS_LIMIT = "";
     const { HostConfig } = containerCreateOptions(createInput);
-    expect(HostConfig.Memory).toBe(2 * 1024 ** 3);
+    expect(HostConfig.Memory).toBe(4 * 1024 ** 3);
     expect(HostConfig.NanoCpus).toBe(2e9);
     expect(HostConfig.PidsLimit).toBe(2048);
   });

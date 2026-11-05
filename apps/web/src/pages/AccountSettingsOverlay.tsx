@@ -37,6 +37,7 @@ import { ComputersUnavailableHint } from "../components/ComputersUnavailableHint
 import { DesktopUpdateSection } from "../components/DesktopUpdates";
 import { PasskeySettings } from "../components/PasskeySettings";
 import { SettingsGroup, SettingsRow } from "../components/SettingsRows";
+import { SourceUpdates } from "../components/SourceUpdates";
 import { TrustedLinkSitesSettings } from "../components/TrustedLinkSitesSettings";
 import { authClient } from "../lib/auth";
 import type { BotsSidebarDensity } from "../lib/bots-sidebar-density-pref";
@@ -579,10 +580,15 @@ export function ComputerSettingsPanel({
   );
 }
 
-export function UpdatesSettingsPanel() {
+export function UpdatesSettingsPanel({
+  canManageSourceUpdates = false,
+}: {
+  canManageSourceUpdates?: boolean;
+}) {
   return (
-    <div className="space-y-5">
+    <div className="flex flex-col gap-5">
       <DesktopUpdateSection />
+      {canManageSourceUpdates ? <SourceUpdates /> : null}
     </div>
   );
 }

@@ -54,6 +54,20 @@ describe("loadEnv", () => {
       expect(loadEnv({ ...base, TICKET_BOARD_ENABLED: value }).ticketBoardEnabled).toBe(false);
     expect(loadEnv({ ...base, TICKET_BOARD_ENABLED: "true" }).ticketBoardEnabled).toBe(true);
   });
+  it("keeps source updates opt-in and requires their dedicated token", () => {
+    expect(loadEnv(base).sourceUpdatesEnabled).toBe(false);
+    expect(loadEnv(base).sourceUpdaterToken).toBeUndefined();
+    expect(() => loadEnv({ ...base, RAKAZO_SOURCE_UPDATES_ENABLED: "true" })).toThrow(
+      "RAKAZO_UPDATER_TOKEN",
+    );
+    const env = loadEnv({
+      ...base,
+      RAKAZO_SOURCE_UPDATES_ENABLED: "true",
+      RAKAZO_UPDATER_TOKEN: "dedicated-test-updater-token",
+    });
+    expect(env.sourceUpdatesEnabled).toBe(true);
+    expect(env.sourceUpdaterToken).toBe("dedicated-test-updater-token");
+  });
   it("loads operator menu links and refuses to start on a bad value", () => {
     expect(loadEnv(base).navLinks).toEqual([]);
     expect(

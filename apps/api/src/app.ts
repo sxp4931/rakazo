@@ -181,6 +181,7 @@ import { mountApiRequestBodyLimits } from "./request-body-limit.js";
 import { createRouter } from "./router.js";
 import { mountScreenTarget } from "./screen-proxy.js";
 import { createAuthResponseAudit } from "./security-audit.js";
+import { createSourceUpdatesGateway } from "./source-update-client.js";
 import { createSpeechSummarizer } from "./speech-summary.js";
 import { isDeferredReservationLost, TeamChatBridge } from "./team-chat-bridge.js";
 import { ModelTeamChatEngagementJudge } from "./team-chat-judge.js";
@@ -666,6 +667,15 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
     paymentWallet,
     shutdownSignal: shutdown.signal,
   });
+  const sourceUpdates =
+    env.sourceUpdatesEnabled && env.sourceUpdaterToken
+      ? createSourceUpdatesGateway({
+          token: env.sourceUpdaterToken,
+          runtime,
+          prisma,
+          resolveModel: executor.resolveModel,
+        })
+      : undefined;
 
   const jobHandlers = createBackgroundJobHandlers({
     executor,
@@ -729,6 +739,7 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
       : undefined;
 
   const router = createRouter({
+    sourceUpdates,
     speechSummary:
       env.voiceSummaryMinChars === undefined
         ? undefined
@@ -809,6 +820,7 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
       desktopHostChoiceEnabled: Boolean(env.desktopStackToken),
       mcpStdioEnabled: env.mcpStdioEnabled,
       mcpStdioAllowedCommands: env.mcpStdioAllowedCommands,
+      sourceUpdatesEnabled: env.sourceUpdatesEnabled,
     },
   });
   const rpc = new RPCHandler(router, {

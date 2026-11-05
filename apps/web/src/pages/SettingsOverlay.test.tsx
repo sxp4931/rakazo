@@ -40,14 +40,19 @@ vi.mock("./AccountSettingsOverlay", () => ({
   UpdatesSettingsPanel: () => null,
   UsageSettingsPanel: () => null,
 }));
-const { memoryConfigs, memoryConfigChange, providerConfig, updaterStatus } = vi.hoisted(() => ({
-  memoryConfigs: [] as unknown[],
-  memoryConfigChange: { current: (_config: unknown) => {} },
-  providerConfig: vi.fn(async (_spaceId: string): Promise<unknown> => null),
-  updaterStatus: vi.fn(async (): Promise<unknown> => ({ installKind: "compose" })),
-}));
+const { memoryConfigs, memoryConfigChange, providerConfig, updaterStatus, sourceUpdateState } =
+  vi.hoisted(() => ({
+    memoryConfigs: [] as unknown[],
+    memoryConfigChange: { current: (_config: unknown) => {} },
+    providerConfig: vi.fn(async (_spaceId: string): Promise<unknown> => null),
+    updaterStatus: vi.fn(async (): Promise<unknown> => ({ installKind: "compose" })),
+    sourceUpdateState: vi.fn(async (): Promise<unknown> => ({ running: false, lastRun: null })),
+  }));
 vi.mock("../lib/rpc", () => ({
-  rpc: { updater: { status: updaterStatus } },
+  rpc: {
+    updater: { status: updaterStatus },
+    sourceUpdates: { state: sourceUpdateState },
+  },
   createSpaceRpc: () => ({ memory: { providerConfig: () => providerConfig("") } }),
   selectedSpaceId: () => null,
   rpcForSpace: (spaceId: string) => ({
@@ -285,10 +290,14 @@ const updatesNav = (container: HTMLElement) =>
   container.querySelector('[data-testid="settings-nav-updates"]');
 
 it("hides server updates and never requests server authority", async () => {
-  const { container, cleanup } = await render({});
+  const { container, cleanup } = await render({ section: "updates" });
   try {
     expect(updatesNav(container)).toBeNull();
+    expect(
+      container.querySelector("[data-settings-section]")?.getAttribute("data-settings-section"),
+    ).toBe("general");
     expect(updaterStatus).not.toHaveBeenCalled();
+    expect(sourceUpdateState).not.toHaveBeenCalled();
   } finally {
     await cleanup();
   }
@@ -299,6 +308,21 @@ it("shows Updates in the desktop app", async () => {
   const { container, cleanup } = await render({});
   try {
     expect(updatesNav(container)).not.toBeNull();
+  } finally {
+    await cleanup();
+  }
+});
+
+it("shows Updates for an explicitly provisioned source update operator", async () => {
+  const { container, cleanup } = await render({
+    canManageSourceUpdates: true,
+    section: "updates",
+  });
+  try {
+    expect(updatesNav(container)).not.toBeNull();
+    expect(
+      container.querySelector("[data-settings-section]")?.getAttribute("data-settings-section"),
+    ).toBe("updates");
   } finally {
     await cleanup();
   }

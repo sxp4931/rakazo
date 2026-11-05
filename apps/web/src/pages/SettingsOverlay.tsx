@@ -52,6 +52,7 @@ export function SettingsOverlay({
   onMemoryConfigChange,
   onClose,
   onVoiceStatusMaybeChanged,
+  canManageSourceUpdates = false,
 }: {
   /** The space the Space page edits; it need not be the selected space. */
   space?: SettingsSpace | null;
@@ -80,6 +81,7 @@ export function SettingsOverlay({
   onMemoryConfigChange: (config: SpaceMemoryConfig | null) => void;
   onClose: () => void;
   onVoiceStatusMaybeChanged?: () => void | Promise<void>;
+  canManageSourceUpdates?: boolean;
 }) {
   const { t, i18n } = useLingui();
   const panelRef = useRef<HTMLDivElement>(null);
@@ -91,7 +93,7 @@ export function SettingsOverlay({
   const [keepComputerRecovery, setKeepComputerRecovery] = useState(false);
   const recoveryHoldTimer = useRef<number | undefined>(undefined);
   const showComputer = keepComputerRecovery || computersAreUnavailable(sandboxProvider);
-  const showUpdates = Boolean(desktopBridge()?.update);
+  const showUpdates = Boolean(desktopBridge()?.update) || canManageSourceUpdates;
   // A section that isn't available yet (billing before its flag loads) shows General until it is.
   const section =
     (requestedSection === "computer" && !showComputer) ||
@@ -405,7 +407,9 @@ export function SettingsOverlay({
                     />
                   ) : null}
                   {section === "billing" && billingEnabled ? <BillingSettingsPanel /> : null}
-                  {section === "updates" && showUpdates ? <UpdatesSettingsPanel /> : null}
+                  {section === "updates" && showUpdates ? (
+                    <UpdatesSettingsPanel canManageSourceUpdates={canManageSourceUpdates} />
+                  ) : null}
                   {section === "models" ? (
                     <ModelSettingsOverlay embedded scope="account" onClose={requestClose} />
                   ) : null}

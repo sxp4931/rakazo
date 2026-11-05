@@ -22,10 +22,20 @@ msgstr " (unread)"
 msgid "{0, plural, one {# bot has its own model:} other {# bots have their own model:}}"
 msgstr "{0, plural, one {# bot has its own model:} other {# bots have their own model:}}"
 
+#. placeholder {0}: preview.commitCount
+#: src/components/SourceUpdates.tsx
+msgid "{0, plural, one {# commit} other {# commits}}"
+msgstr "{0, plural, one {# commit} other {# commits}}"
+
 #. placeholder {0}: servers.length
 #: src/pages/PluginsOverlay.tsx
 msgid "{0, plural, one {# connector} other {# connectors}}"
 msgstr "{0, plural, one {# connector} other {# connectors}}"
+
+#. placeholder {0}: preview.fileCount
+#: src/components/SourceUpdates.tsx
+msgid "{0, plural, one {# file changed} other {# files changed}}"
+msgstr "{0, plural, one {# file changed} other {# files changed}}"
 
 #. placeholder {0}: skill.files.length
 #: src/components/integrations/plugin-marketplace.tsx
@@ -438,6 +448,10 @@ msgstr "A command's output"
 msgid "A sign-in tab opened at <0>{0}</0>. Enter this code there — this window keeps waiting:"
 msgstr "A sign-in tab opened at <0>{0}</0>. Enter this code there — this window keeps waiting:"
 
+#: src/components/SourceUpdates.tsx
+msgid "A source update is in progress."
+msgstr "A source update is in progress."
+
 #: src/pages/model-settings/use-model-settings.ts
 msgid "A subscription credential is stored securely."
 msgstr "A subscription credential is stored securely."
@@ -653,6 +667,11 @@ msgstr "Advanced..."
 msgid "Agent from another app"
 msgstr "Agent from another app"
 
+#. placeholder {0}: preview.commitCount
+#: src/components/SourceUpdates.tsx
+msgid "AI summary unavailable. Review {0, plural, one {# official commit} other {# official commits}}."
+msgstr "AI summary unavailable. Review {0, plural, one {# official commit} other {# official commits}}."
+
 #: src/pages/RoutineHealth.tsx
 msgid "Alert accepted; delivery not confirmed"
 msgstr "Alert accepted; delivery not confirmed"
@@ -837,6 +856,18 @@ msgstr "Appearance: {label}"
 #: src/components/AskCard.tsx
 msgid "Apply"
 msgstr "Apply"
+
+#: src/components/SourceUpdates.tsx
+msgid "Apply reviewed update"
+msgstr "Apply reviewed update"
+
+#: src/components/SourceUpdates.tsx
+msgid "Applying the reviewed update…"
+msgstr "Applying the reviewed update…"
+
+#: src/components/SourceUpdates.tsx
+msgid "Applying…"
+msgstr "Applying…"
 
 #: src/components/teach/SkillDraftCard.tsx
 msgid "Approval boundaries"
@@ -1228,6 +1259,10 @@ msgstr "Change model"
 msgid "Change password"
 msgstr "Change password"
 
+#: src/components/SourceUpdates.tsx
+msgid "Changed files"
+msgstr "Changed files"
+
 #: src/pages/AccountSettingsOverlay.tsx
 msgid "Changing…"
 msgstr "Changing…"
@@ -1275,6 +1310,7 @@ msgid "Check failed: {0}"
 msgstr "Check failed: {0}"
 
 #: src/components/DesktopUpdates.tsx
+#: src/components/SourceUpdates.tsx
 msgid "Check for updates"
 msgstr "Check for updates"
 
@@ -1306,8 +1342,13 @@ msgstr "Checking computer setup…"
 msgid "Checking connection…"
 msgstr "Checking connection…"
 
+#: src/components/SourceUpdates.tsx
+msgid "Checking whether the update started…"
+msgstr "Checking whether the update started…"
+
 #: src/components/ComputersUnavailableHint.tsx
 #: src/components/DesktopUpdates.tsx
+#: src/components/SourceUpdates.tsx
 #: src/pages/HostComputerPrompt.tsx
 msgid "Checking…"
 msgstr "Checking…"
@@ -1584,6 +1625,10 @@ msgstr "Confirm removal"
 msgid "Confirm the URL is reachable from this browser session, then test again."
 msgstr "Confirm the URL is reachable from this browser session, then test again."
 
+#: src/components/SourceUpdates.tsx
+msgid "Conflicts"
+msgstr "Conflicts"
+
 #: src/components/integrations/IntegrationSetup.tsx
 #: src/components/integrations/plugin-marketplace.tsx
 #: src/pages/memory-providers/HonchoSettingsForm.tsx
@@ -1807,6 +1852,10 @@ msgstr "Could not change password"
 msgid "Could not change where this is available"
 msgstr "Could not change where this is available"
 
+#: src/components/SourceUpdates.tsx
+msgid "Could not check for updates. Try again."
+msgstr "Could not check for updates. Try again."
+
 #: src/lib/model-connection-preflight.ts
 msgid "Could not check stored credentials."
 msgstr "Could not check stored credentials."
@@ -1830,6 +1879,10 @@ msgstr "Could not complete OAuth"
 #: src/components/DesktopUpdates.tsx
 msgid "Could not complete the update. Try again."
 msgstr "Could not complete the update. Try again."
+
+#: src/components/SourceUpdates.tsx
+msgid "Could not confirm whether the update started. Check again before retrying."
+msgstr "Could not confirm whether the update started. Check again before retrying."
 
 #: src/components/integrations/IntegrationSetup.tsx
 #: src/pages/PluginsOverlay.tsx
@@ -2043,6 +2096,10 @@ msgstr "Could not load this chat."
 #: src/components/ArtifactFileCard.tsx
 msgid "Could not load this file."
 msgstr "Could not load this file."
+
+#: src/components/SourceUpdates.tsx
+msgid "Could not load update status."
+msgstr "Could not load update status."
 
 #: src/pages/VoiceSettingsOverlay.tsx
 msgid "Could not load voice settings"
@@ -2392,6 +2449,10 @@ msgstr "Cron"
 #: src/pages/RoutineSchedule.tsx
 msgid "Cron expression"
 msgstr "Cron expression"
+
+#: src/components/SourceUpdates.tsx
+msgid "Current"
+msgstr "Current"
 
 #: src/components/AccountAccess.tsx
 #: src/pages/AccountSettingsOverlay.tsx
@@ -2792,10 +2853,6 @@ msgstr "Ends {day}"
 #: src/pages/ExternalConversationSettings.tsx
 msgid "Engage when... Ignore..."
 msgstr "Engage when... Ignore..."
-
-#: src/components/GitHubStarPrompt.tsx
-msgid "Enjoying Rakazo?"
-msgstr "Enjoying Rakazo?"
 
 #: src/lib/user-error.ts
 msgid "Enter a password"
@@ -3595,6 +3652,10 @@ msgstr "Local access lets bots run commands without asking. Avoid it on shared o
 msgid "Local computer access requires the latest desktop app."
 msgstr "Local computer access requires the latest desktop app."
 
+#: src/components/SourceUpdates.tsx
+msgid "Local source changes must be resolved before updating."
+msgstr "Local source changes must be resolved before updating."
+
 #: src/components/AccountMenu.tsx
 #: src/components/SidebarFooter.tsx
 msgid "Log out"
@@ -4114,6 +4175,10 @@ msgstr "No bots"
 msgid "No bots match"
 msgstr "No bots match"
 
+#: src/components/SourceUpdates.tsx
+msgid "No commits"
+msgstr "No commits"
+
 #: src/components/AskCard.tsx
 msgid "No longer active"
 msgstr "No longer active"
@@ -4233,7 +4298,6 @@ msgstr "Not in Rakazo's catalog"
 msgid "Not in the plugin catalog"
 msgstr "Not in the plugin catalog"
 
-#: src/components/GitHubStarPrompt.tsx
 #: src/pages/shell/message-cards.tsx
 msgid "Not now"
 msgstr "Not now"
@@ -4286,6 +4350,14 @@ msgstr "OAuth connection failed"
 #: src/pages/PluginsOverlay.tsx
 msgid "OAuth expired"
 msgstr "OAuth expired"
+
+#: src/components/SourceUpdates.tsx
+msgid "Official source"
+msgstr "Official source"
+
+#: src/components/SourceUpdates.tsx
+msgid "Official source updates are unavailable."
+msgstr "Official source updates are unavailable."
 
 #: src/components/ComputerDeviceSettings.tsx
 msgid "Offline"
@@ -4673,6 +4745,10 @@ msgstr "Rakazo"
 #: src/pages/Onboarding.tsx
 msgid "Rakazo credits"
 msgstr "Rakazo credits"
+
+#: src/components/SourceUpdates.tsx
+msgid "Rakazo is up to date."
+msgstr "Rakazo is up to date."
 
 #: src/pages/memory-providers/HonchoSettingsForm.tsx
 msgid "rakazo-shared and IDs starting with bot- are reserved for Rakazo."
@@ -5091,6 +5167,10 @@ msgstr "Return to call with {0}"
 #: src/pages/SlackInstallCallback.tsx
 msgid "Return to Rakazo"
 msgstr "Return to Rakazo"
+
+#: src/components/SourceUpdates.tsx
+msgid "Review changes"
+msgstr "Review changes"
 
 #: src/lib/model-connection-preflight.ts
 msgid "Review provider settings and test again."
@@ -5686,10 +5766,6 @@ msgstr "SSO"
 msgid "SSO is temporarily unavailable. Try again."
 msgstr "SSO is temporarily unavailable. Try again."
 
-#: src/components/GitHubStarPrompt.tsx
-msgid "Star on GitHub"
-msgstr "Star on GitHub"
-
 #: src/pages/shell/computer-overlay.tsx
 msgid "Start"
 msgstr "Start"
@@ -5828,6 +5904,10 @@ msgstr "Table"
 msgid "Take control"
 msgstr "Take control"
 
+#: src/components/SourceUpdates.tsx
+msgid "Target"
+msgstr "Target"
+
 #: src/components/teach/TeachComputerOverlay.tsx
 msgid "Teach a task"
 msgstr "Teach a task"
@@ -5923,6 +6003,14 @@ msgstr "The screen link expired."
 #: src/pages/MemorySettingsOverlay.tsx
 msgid "The selected memory provider is not available in this build."
 msgstr "The selected memory provider is not available in this build."
+
+#: src/components/SourceUpdates.tsx
+msgid "The update failed."
+msgstr "The update failed."
+
+#: src/components/SourceUpdates.tsx
+msgid "The update is in progress."
+msgstr "The update is in progress."
 
 #: src/pages/model-settings/space-bots-model.tsx
 msgid "Their own model is cleared. You can pick one again in each bot."
@@ -6083,6 +6171,10 @@ msgstr "This server's tool result does not fit the model. Turn off Keep tool res
 #: src/pages/model-settings/connection-controls.tsx
 msgid "This subscription sign-in is not available in Rakazo yet. Use a deployment credential or choose another provider."
 msgstr "This subscription sign-in is not available in Rakazo yet. Use a deployment credential or choose another provider."
+
+#: src/components/SourceUpdates.tsx
+msgid "This update has conflicts and cannot be applied."
+msgstr "This update has conflicts and cannot be applied."
 
 #: src/pages/Artifacts.tsx
 msgid "This week"
@@ -6259,6 +6351,10 @@ msgstr "Up to date"
 msgid "Update"
 msgstr "Update"
 
+#: src/components/SourceUpdates.tsx
+msgid "Update complete."
+msgstr "Update complete."
+
 #: src/components/ComputerMaintenanceActions.tsx
 msgid "Update computer"
 msgstr "Update computer"
@@ -6295,6 +6391,10 @@ msgstr "Updates"
 #: src/components/ComputerUpdateProgress.tsx
 msgid "Updating {0}’s Computer"
 msgstr "Updating {0}’s Computer"
+
+#: src/components/SourceUpdates.tsx
+msgid "Updating official source…"
+msgstr "Updating official source…"
 
 #: src/components/ComputerUpdateProgress.tsx
 msgid "Updating Team Computer"

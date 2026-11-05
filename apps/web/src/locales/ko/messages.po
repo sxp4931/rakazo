@@ -22,9 +22,19 @@ msgstr " (읽지 않음)"
 msgid "{0, plural, one {# bot has its own model:} other {# bots have their own model:}}"
 msgstr ""
 
+#. placeholder {0}: preview.commitCount
+#: src/components/SourceUpdates.tsx
+msgid "{0, plural, one {# commit} other {# commits}}"
+msgstr ""
+
 #. placeholder {0}: servers.length
 #: src/pages/PluginsOverlay.tsx
 msgid "{0, plural, one {# connector} other {# connectors}}"
+msgstr ""
+
+#. placeholder {0}: preview.fileCount
+#: src/components/SourceUpdates.tsx
+msgid "{0, plural, one {# file changed} other {# files changed}}"
 msgstr ""
 
 #. placeholder {0}: skill.files.length
@@ -438,6 +448,10 @@ msgstr "명령 출력"
 msgid "A sign-in tab opened at <0>{0}</0>. Enter this code there — this window keeps waiting:"
 msgstr ""
 
+#: src/components/SourceUpdates.tsx
+msgid "A source update is in progress."
+msgstr ""
+
 #: src/pages/model-settings/use-model-settings.ts
 msgid "A subscription credential is stored securely."
 msgstr "구독 인증 정보가 안전하게 저장되어 있습니다."
@@ -653,6 +667,11 @@ msgstr "고급..."
 msgid "Agent from another app"
 msgstr ""
 
+#. placeholder {0}: preview.commitCount
+#: src/components/SourceUpdates.tsx
+msgid "AI summary unavailable. Review {0, plural, one {# official commit} other {# official commits}}."
+msgstr ""
+
 #: src/pages/RoutineHealth.tsx
 msgid "Alert accepted; delivery not confirmed"
 msgstr "알림이 접수됨; 전달은 확인되지 않음"
@@ -837,6 +856,18 @@ msgstr ""
 #: src/components/AskCard.tsx
 msgid "Apply"
 msgstr "적용"
+
+#: src/components/SourceUpdates.tsx
+msgid "Apply reviewed update"
+msgstr ""
+
+#: src/components/SourceUpdates.tsx
+msgid "Applying the reviewed update…"
+msgstr ""
+
+#: src/components/SourceUpdates.tsx
+msgid "Applying…"
+msgstr ""
 
 #: src/components/teach/SkillDraftCard.tsx
 msgid "Approval boundaries"
@@ -1228,6 +1259,10 @@ msgstr "모델 변경"
 msgid "Change password"
 msgstr "비밀번호 변경"
 
+#: src/components/SourceUpdates.tsx
+msgid "Changed files"
+msgstr ""
+
 #: src/pages/AccountSettingsOverlay.tsx
 msgid "Changing…"
 msgstr "변경 중…"
@@ -1275,6 +1310,7 @@ msgid "Check failed: {0}"
 msgstr "확인 실패: {0}"
 
 #: src/components/DesktopUpdates.tsx
+#: src/components/SourceUpdates.tsx
 msgid "Check for updates"
 msgstr "업데이트 확인"
 
@@ -1306,8 +1342,13 @@ msgstr ""
 msgid "Checking connection…"
 msgstr "연결 확인 중…"
 
+#: src/components/SourceUpdates.tsx
+msgid "Checking whether the update started…"
+msgstr ""
+
 #: src/components/ComputersUnavailableHint.tsx
 #: src/components/DesktopUpdates.tsx
+#: src/components/SourceUpdates.tsx
 #: src/pages/HostComputerPrompt.tsx
 msgid "Checking…"
 msgstr "확인 중…"
@@ -1584,6 +1625,10 @@ msgstr ""
 msgid "Confirm the URL is reachable from this browser session, then test again."
 msgstr "이 브라우저 세션에서 URL에 연결할 수 있는지 확인한 뒤 다시 테스트하세요."
 
+#: src/components/SourceUpdates.tsx
+msgid "Conflicts"
+msgstr ""
+
 #: src/components/integrations/IntegrationSetup.tsx
 #: src/components/integrations/plugin-marketplace.tsx
 #: src/pages/memory-providers/HonchoSettingsForm.tsx
@@ -1807,6 +1852,10 @@ msgstr "비밀번호를 변경할 수 없습니다"
 msgid "Could not change where this is available"
 msgstr ""
 
+#: src/components/SourceUpdates.tsx
+msgid "Could not check for updates. Try again."
+msgstr ""
+
 #: src/lib/model-connection-preflight.ts
 msgid "Could not check stored credentials."
 msgstr "저장된 인증 정보를 확인하지 못했습니다."
@@ -1829,6 +1878,10 @@ msgstr "OAuth 인증을 완료하지 못했습니다."
 
 #: src/components/DesktopUpdates.tsx
 msgid "Could not complete the update. Try again."
+msgstr ""
+
+#: src/components/SourceUpdates.tsx
+msgid "Could not confirm whether the update started. Check again before retrying."
 msgstr ""
 
 #: src/components/integrations/IntegrationSetup.tsx
@@ -2043,6 +2096,10 @@ msgstr "이 채팅을 불러오지 못했습니다."
 #: src/components/ArtifactFileCard.tsx
 msgid "Could not load this file."
 msgstr "파일을 불러오지 못했습니다."
+
+#: src/components/SourceUpdates.tsx
+msgid "Could not load update status."
+msgstr ""
 
 #: src/pages/VoiceSettingsOverlay.tsx
 msgid "Could not load voice settings"
@@ -2392,6 +2449,10 @@ msgstr "Cron"
 #: src/pages/RoutineSchedule.tsx
 msgid "Cron expression"
 msgstr "Cron 표현식"
+
+#: src/components/SourceUpdates.tsx
+msgid "Current"
+msgstr ""
 
 #: src/components/AccountAccess.tsx
 #: src/pages/AccountSettingsOverlay.tsx
@@ -2791,10 +2852,6 @@ msgstr ""
 
 #: src/pages/ExternalConversationSettings.tsx
 msgid "Engage when... Ignore..."
-msgstr ""
-
-#: src/components/GitHubStarPrompt.tsx
-msgid "Enjoying Rakazo?"
 msgstr ""
 
 #: src/lib/user-error.ts
@@ -3595,6 +3652,10 @@ msgstr "로컬 접근을 허용하면 Bot이 묻지 않고 명령을 실행할 �
 msgid "Local computer access requires the latest desktop app."
 msgstr ""
 
+#: src/components/SourceUpdates.tsx
+msgid "Local source changes must be resolved before updating."
+msgstr ""
+
 #: src/components/AccountMenu.tsx
 #: src/components/SidebarFooter.tsx
 msgid "Log out"
@@ -4114,6 +4175,10 @@ msgstr ""
 msgid "No bots match"
 msgstr ""
 
+#: src/components/SourceUpdates.tsx
+msgid "No commits"
+msgstr ""
+
 #: src/components/AskCard.tsx
 msgid "No longer active"
 msgstr "이미 종료된 요청입니다"
@@ -4233,7 +4298,6 @@ msgstr "Rakazo 카탈로그에 없음"
 msgid "Not in the plugin catalog"
 msgstr "플러그인 카탈로그에 없음"
 
-#: src/components/GitHubStarPrompt.tsx
 #: src/pages/shell/message-cards.tsx
 msgid "Not now"
 msgstr "나중에"
@@ -4286,6 +4350,14 @@ msgstr "OAuth 연결 실패"
 #: src/pages/PluginsOverlay.tsx
 msgid "OAuth expired"
 msgstr "OAuth 만료됨"
+
+#: src/components/SourceUpdates.tsx
+msgid "Official source"
+msgstr ""
+
+#: src/components/SourceUpdates.tsx
+msgid "Official source updates are unavailable."
+msgstr ""
 
 #: src/components/ComputerDeviceSettings.tsx
 msgid "Offline"
@@ -4672,6 +4744,10 @@ msgstr "Rakazo"
 #: src/components/ModelCredits.tsx
 #: src/pages/Onboarding.tsx
 msgid "Rakazo credits"
+msgstr ""
+
+#: src/components/SourceUpdates.tsx
+msgid "Rakazo is up to date."
 msgstr ""
 
 #: src/pages/memory-providers/HonchoSettingsForm.tsx
@@ -5091,6 +5167,10 @@ msgstr ""
 #: src/pages/SlackInstallCallback.tsx
 msgid "Return to Rakazo"
 msgstr "Rakazo로 돌아가기"
+
+#: src/components/SourceUpdates.tsx
+msgid "Review changes"
+msgstr ""
 
 #: src/lib/model-connection-preflight.ts
 msgid "Review provider settings and test again."
@@ -5686,10 +5766,6 @@ msgstr ""
 msgid "SSO is temporarily unavailable. Try again."
 msgstr "SSO를 일시적으로 사용할 수 없습니다. 다시 시도하세요."
 
-#: src/components/GitHubStarPrompt.tsx
-msgid "Star on GitHub"
-msgstr ""
-
 #: src/pages/shell/computer-overlay.tsx
 msgid "Start"
 msgstr ""
@@ -5828,6 +5904,10 @@ msgstr "표"
 msgid "Take control"
 msgstr "제어권 가져오기"
 
+#: src/components/SourceUpdates.tsx
+msgid "Target"
+msgstr ""
+
 #: src/components/teach/TeachComputerOverlay.tsx
 msgid "Teach a task"
 msgstr "작업 가르치기"
@@ -5923,6 +6003,14 @@ msgstr "화면 링크가 만료되었습니다."
 #: src/pages/MemorySettingsOverlay.tsx
 msgid "The selected memory provider is not available in this build."
 msgstr "선택한 기억 서비스는 현재 빌드에서 사용할 수 없습니다."
+
+#: src/components/SourceUpdates.tsx
+msgid "The update failed."
+msgstr ""
+
+#: src/components/SourceUpdates.tsx
+msgid "The update is in progress."
+msgstr ""
 
 #: src/pages/model-settings/space-bots-model.tsx
 msgid "Their own model is cleared. You can pick one again in each bot."
@@ -6083,6 +6171,10 @@ msgstr ""
 #: src/pages/model-settings/connection-controls.tsx
 msgid "This subscription sign-in is not available in Rakazo yet. Use a deployment credential or choose another provider."
 msgstr "이 구독 로그인 방식은 아직 Rakazo에서 지원되지 않습니다. 서버에 설정된 인증 정보를 사용하거나 다른 서비스를 선택하세요."
+
+#: src/components/SourceUpdates.tsx
+msgid "This update has conflicts and cannot be applied."
+msgstr ""
 
 #: src/pages/Artifacts.tsx
 msgid "This week"
@@ -6259,6 +6351,10 @@ msgstr "최신 상태"
 msgid "Update"
 msgstr "업데이트"
 
+#: src/components/SourceUpdates.tsx
+msgid "Update complete."
+msgstr ""
+
 #: src/components/ComputerMaintenanceActions.tsx
 msgid "Update computer"
 msgstr "컴퓨터 업데이트"
@@ -6294,6 +6390,10 @@ msgstr "업데이트"
 #. placeholder {0}: update.name
 #: src/components/ComputerUpdateProgress.tsx
 msgid "Updating {0}’s Computer"
+msgstr ""
+
+#: src/components/SourceUpdates.tsx
+msgid "Updating official source…"
 msgstr ""
 
 #: src/components/ComputerUpdateProgress.tsx

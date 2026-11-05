@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { activeBotId, captureScreenshot, completeOnboarding, rpc, signup } from "./helpers";
 
-test("asks for a GitHub star after a few messages", async ({ page }, testInfo) => {
+test("sending messages never prompts for a GitHub star", async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1280, height: 720 });
   await signup(page, `star-prompt-${Date.now()}@rakazo.test`, "password12", "Sample");
   await completeOnboarding(page);
@@ -13,15 +13,11 @@ test("asks for a GitHub star after a few messages", async ({ page }, testInfo) =
   await composer.press("Enter");
 
   const prompt = page.getByRole("complementary", { name: "Star on GitHub" });
-  await expect(prompt).toBeVisible();
-  await expect(prompt.getByRole("link", { name: "Star on GitHub" })).toHaveAttribute(
-    "href",
-    "https://github.com/elie222/rakazo",
-  );
-  await captureScreenshot(page, testInfo, "github-star-prompt");
-
-  await prompt.getByRole("button", { name: "Not now" }).click();
+  await expect(
+    page.getByTestId("transcript").getByText("What should I work on today?"),
+  ).toBeVisible();
   await expect(prompt).toBeHidden();
+  await captureScreenshot(page, testInfo, "chat-without-star-prompt");
   await page.reload();
   await composer.fill("And tomorrow?");
   await composer.press("Enter");

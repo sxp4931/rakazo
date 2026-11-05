@@ -1,0 +1,27 @@
+[Unit]
+Description=Rakazo fixed host actions for source updates
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/
+EnvironmentFile=/etc/rakazo/host-control.env
+ExecStart=/usr/bin/node /usr/local/lib/rakazo/host-control.mjs
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET
+ReadWritePaths=/var/backups/rakazo
+
+[Install]
+WantedBy=multi-user.target

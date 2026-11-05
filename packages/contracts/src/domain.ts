@@ -1810,6 +1810,54 @@ export const ServerUpdateRequestSchema = z.object({
 });
 export type ServerUpdateRequest = z.infer<typeof ServerUpdateRequestSchema>;
 
+/** A commit from the official upstream branch included in a reviewed source update. */
+export const SourceUpdateCommitSchema = z.object({
+  commit: z.string().regex(/^[0-9a-f]{40}$/i),
+  subject: z.string().max(300),
+});
+export type SourceUpdateCommit = z.infer<typeof SourceUpdateCommitSchema>;
+
+export const SourceUpdatePreviewSchema = z.object({
+  status: z.enum(["unavailable", "dirty", "up-to-date", "available", "conflict", "running"]),
+  reason: z.string().max(500).nullable(),
+  currentCommit: z
+    .string()
+    .regex(/^[0-9a-f]{40}$/i)
+    .nullable(),
+  targetCommit: z
+    .string()
+    .regex(/^[0-9a-f]{40}$/i)
+    .nullable(),
+  branch: z.string().max(200).nullable(),
+  changedPaths: z.array(z.string().max(500)).max(300),
+  conflictingPaths: z.array(z.string().max(500)).max(300),
+  commits: z.array(SourceUpdateCommitSchema).max(100),
+  commitCount: z.number().int().nonnegative(),
+  changedFiles: z.array(z.string().max(500)).max(300),
+  fileCount: z.number().int().nonnegative(),
+  summary: z.string().max(2_000).nullable(),
+  summaryAvailable: z.boolean(),
+});
+export type SourceUpdatePreview = z.infer<typeof SourceUpdatePreviewSchema>;
+
+export const SourceUpdateRunSchema = z.object({
+  startedAt: z.iso.datetime(),
+  finishedAt: z.iso.datetime().nullable(),
+  ok: z.boolean(),
+  currentCommit: z.string().regex(/^[0-9a-f]{40}$/i),
+  targetCommit: z.string().regex(/^[0-9a-f]{40}$/i),
+  stage: z.string().max(80),
+  error: z.string().max(500).nullable(),
+  recovery: z.string().max(500).nullable(),
+});
+export type SourceUpdateRun = z.infer<typeof SourceUpdateRunSchema>;
+
+export const SourceUpdateStateSchema = z.object({
+  running: z.boolean(),
+  lastRun: SourceUpdateRunSchema.nullable(),
+});
+export type SourceUpdateState = z.infer<typeof SourceUpdateStateSchema>;
+
 export const MeSchema = z.object({
   maxUploadSizeBytes: z.number().int().positive().optional(),
   maxAttachmentsPerMessage: z.number().int().positive().optional(),
@@ -1823,6 +1871,8 @@ export const MeSchema = z.object({
   spaceId: Id,
   /** Deprecated: app accounts never have server administrator privileges. Always false. */
   isDeploymentOwner: z.boolean(),
+  /** Explicitly provisioned operator for this source-update feature; absent on older servers. */
+  canManageSourceUpdates: z.boolean().optional(),
   /** Listed in RAKAZO_ADMIN_EMAILS with a verified email: reviews plugins, adds stdio MCP servers, grants access. */
   isAdmin: z.boolean().default(false),
   needsModel: z.boolean(),

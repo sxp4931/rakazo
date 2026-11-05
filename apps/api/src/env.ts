@@ -22,6 +22,7 @@ import {
   resolveEncryptionKey,
   resolveScreenProxySecret,
   resolveSupervisorToken,
+  resolveUpdaterToken,
   uploadSizeFromEnv,
 } from "@rakazo/core";
 import { monitoringPseudonymSecret } from "@rakazo/logging";
@@ -61,6 +62,9 @@ export interface AppEnv {
   /** Opt-in Pi JSONL session recording under DATA_DIR/pi-sessions. Default off. */
   piSessionRecording: boolean;
   ticketBoardEnabled: boolean;
+  /** Opt-in owner-only source updates for self-hosted appliances. */
+  sourceUpdatesEnabled: boolean;
+  sourceUpdaterToken: string | undefined;
   /** USER_DEVICES_ENABLED=false stops users connecting their own computers. Default on. */
   userDevicesEnabled: boolean;
   /** Operator menu links that frame a same-origin page (RAKAZO_NAV_LINKS). */
@@ -195,6 +199,7 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     "AUTH_PASSWORD_ENABLED",
     "AUTH_BREACHED_PASSWORD_CHECK_ENABLED",
     "OIDC_ALLOW_SIGNUP_BYPASS",
+    "RAKAZO_SOURCE_UPDATES_ENABLED",
   ]) {
     const value = source[key];
     if (value && !["true", "false"].includes(value))
@@ -221,6 +226,7 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
   const sandboxProvider = resolveSandboxProvider(source);
   const cloudAgentProvider = resolveCloudAgentProvider(source);
   const deploymentModel = resolveDeploymentModel(source);
+  const sourceUpdatesEnabled = source.RAKAZO_SOURCE_UPDATES_ENABLED === "true";
   return {
     passwordAuth,
     breachedPasswordCheck: source.AUTH_BREACHED_PASSWORD_CHECK_ENABLED === "true",
@@ -249,6 +255,8 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     dataDir: source.DATA_DIR ?? "./data",
     piSessionRecording: source.PI_SESSION_RECORDING === "true",
     ticketBoardEnabled: source.TICKET_BOARD_ENABLED === "true",
+    sourceUpdatesEnabled,
+    sourceUpdaterToken: sourceUpdatesEnabled ? resolveUpdaterToken(source) : undefined,
     userDevicesEnabled: source.USER_DEVICES_ENABLED !== "false",
     navLinks: parseNavLinks(source.RAKAZO_NAV_LINKS),
     adminEmails: list(source.RAKAZO_ADMIN_EMAILS).map((email) => email.toLowerCase()),

@@ -46,6 +46,8 @@ export async function meDto(deps: RouterDeps, actor: Actor): Promise<Me> {
     name: user.name,
     spaceId: actor.spaceId,
     isDeploymentOwner: false,
+    canManageSourceUpdates:
+      deps.env.sourceUpdatesEnabled === true && setup.settings?.ownerUserId === actor.userId,
     isAdmin: admin,
     needsModel: setup.needsModel,
     defaultProvider: canonicalPiProviderId(setup.model?.provider ?? deps.env.defaultProvider),

@@ -757,7 +757,7 @@ function SpaceShell() {
     wallet: Boolean(bootstrapMe?.paymentWalletProvider),
     computer: computersAreUnavailable(bootstrapMe?.sandboxProvider),
     billing: bootstrapMe?.billingEnabled === true,
-    updates: Boolean(desktopBridge()?.update),
+    updates: Boolean(desktopBridge()?.update) || bootstrapMe?.canManageSourceUpdates === true,
   });
   const paletteActions: CommandPaletteAction[] = [
     {

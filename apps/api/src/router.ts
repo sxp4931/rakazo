@@ -47,8 +47,10 @@ import { messagingRoutes } from "./routes/messaging.js";
 import { modelsRoutes } from "./routes/models.js";
 import { paymentWalletRoutes } from "./routes/payment-wallet.js";
 import { routinesRoutes } from "./routes/routines.js";
+import { sourceUpdatesRoutes } from "./routes/source-updates.js";
 import { spacesRoutes } from "./routes/spaces.js";
 import { threadsRoutes } from "./routes/threads.js";
+import type { SourceUpdatesGateway } from "./source-update-client.js";
 import type { VoiceDeps } from "./voice.js";
 
 export { nextConnectionLabel } from "./model-credentials.js";
@@ -112,6 +114,7 @@ export interface RouterDeps {
   email?: TransactionalEmailProvider;
   onEmailError?: (error: unknown) => void;
   speechSummary?: VoiceDeps["speechSummary"];
+  sourceUpdates?: SourceUpdatesGateway;
   env: {
     ticketBoardEnabled?: boolean;
     navLinks?: NavLink[];
@@ -137,6 +140,7 @@ export interface RouterDeps {
     desktopHostChoiceEnabled?: boolean;
     mcpStdioEnabled?: boolean;
     mcpStdioAllowedCommands?: string[];
+    sourceUpdatesEnabled?: boolean;
   };
 }
 
@@ -160,5 +164,6 @@ export function createRouter(deps: RouterDeps) {
     ...messagingRoutes(ctx),
     ...contentRoutes(ctx),
     ...paymentWalletRoutes(ctx),
+    ...sourceUpdatesRoutes(ctx),
   });
 }

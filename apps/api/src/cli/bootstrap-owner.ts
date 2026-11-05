@@ -71,8 +71,18 @@ async function bootstrap() {
   }
   const user = await prisma.user.findUniqueOrThrow({ where: { email } });
   await bootstrapUserSpace(prisma, user, { signupsEnabled: "false", signupAllowlist: "" });
-  await prisma.deploymentSettings.update({
-    where: { id: "default" },
-    data: { signupsEnabled: false, signupPolicyInitialized: true },
+  const sourceUpdatesEnabled = process.env.RAKAZO_SOURCE_UPDATES_ENABLED === "true";
+  const settings = await prisma.deploymentSettings.updateMany({
+    where: {
+      id: "default",
+      ...(sourceUpdatesEnabled ? { OR: [{ ownerUserId: null }, { ownerUserId: user.id }] } : {}),
+    },
+    data: {
+      signupsEnabled: false,
+      signupPolicyInitialized: true,
+      ...(sourceUpdatesEnabled ? { ownerUserId: user.id } : {}),
+    },
   });
+  if (settings.count !== 1)
+    throw new Error("A different source update owner is already provisioned");
 }

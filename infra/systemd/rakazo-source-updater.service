@@ -1,0 +1,29 @@
+[Unit]
+Description=Rakazo official source update service
+After=network-online.target rakazo-host-control.service
+Wants=network-online.target rakazo-host-control.service
+
+[Service]
+Type=simple
+User=rakazo
+Group=rakazo
+WorkingDirectory=/opt/rakazo
+EnvironmentFile=/etc/rakazo/env
+Environment=PNPM_HOME=/opt/rakazo/.pnpm
+Environment=XDG_CACHE_HOME=/opt/rakazo/.cache
+Environment=XDG_STATE_HOME=/opt/rakazo/.state
+Environment=COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+ExecStart=/usr/bin/pnpm --filter @rakazo/updater source
+Restart=always
+RestartSec=5
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/opt/rakazo /var/lib/rakazo/source-update-backups
+
+[Install]
+WantedBy=multi-user.target

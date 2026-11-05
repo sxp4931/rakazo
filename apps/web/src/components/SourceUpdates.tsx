@@ -281,9 +281,14 @@ function Preview({ preview }: { preview: SourceUpdatePreview }) {
           <Trans>Rakazo is up to date.</Trans>
         </p>
       ) : preview.status === "conflict" ? (
-        <p role="alert" className="text-destructive">
-          {preview.reason ?? t`This update has conflicts and cannot be applied.`}
-        </p>
+        <>
+          <p role="alert" className="text-destructive">
+            {preview.reason ?? t`This update has conflicts and cannot be applied.`}
+          </p>
+          <p role="status" className="text-foreground">
+            {summary}
+          </p>
+        </>
       ) : preview.status === "running" ? (
         <p role="status" className="text-muted-foreground">
           <Trans>The update is in progress.</Trans>

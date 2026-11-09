@@ -6,7 +6,10 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import RoutineDetail from "../app/routine";
 
-const state = vi.hoisted(() => ({ useBotRoutines: vi.fn() }));
+const state = vi.hoisted(() => {
+  Object.defineProperty(globalThis, "__DEV__", { configurable: true, value: false });
+  return { useBotRoutines: vi.fn() };
+});
 const element =
   (tag: string) =>
   ({ children }: { children?: ReactNode }) =>
@@ -19,7 +22,10 @@ vi.mock("./routine-store", () => ({
   setRoutineActive: vi.fn(),
 }));
 vi.mock("./native-controls", () => ({ iosAtLeast: () => false }));
-vi.mock("./api", () => ({ rpc: vi.fn() }));
+vi.mock("./api-server", () => ({ selectSpace: vi.fn(async () => true) }));
+vi.mock("./api-auth", () => ({}));
+vi.mock("./api-live", () => ({}));
+vi.mock("./api", () => ({ rpc: vi.fn(), selectedSpaceId: () => "space-1" }));
 vi.mock("./i18n", () => {
   const t = (message: string) => message;
   return { useI18n: () => ({ t, locale: "en" }), dateLocaleForUi: () => "en-US" };
@@ -31,6 +37,7 @@ vi.mock("./user-error", () => ({ errorText: (_: unknown, fallback: string) => fa
 vi.mock("./routine", () => ({
   deviceTimeZone: () => "UTC",
   routineTriggerRows: () => ["Every day at 9:00 AM"],
+  routineWebTriggers: () => [],
 }));
 vi.mock("../components/settings-group", () => ({
   SettingsGroup: ({ children, footer }: { children?: ReactNode; footer?: string }) =>
@@ -41,13 +48,21 @@ vi.mock("../components/settings-group", () => ({
     createElement("span", null, title, value),
   SettingsSwitch: () => null,
 }));
+vi.mock("../components/menu-picker", () => ({ MenuPickerMenu: () => null }));
 vi.mock("../components/growing-text-input", () => ({ GrowingTextInput: () => null }));
+vi.mock("../components/routine-email-trigger", () => ({ RoutineEmailTrigger: () => null }));
+vi.mock("../components/routine-health", () => ({ RoutineHealth: () => null }));
+vi.mock("../components/bot-email", () => ({
+  useBotEmail: () => ({ address: null, ownerDomain: "", setAddress: () => undefined }),
+  useBotEmailRows: () => [],
+}));
 vi.mock("../components/routine-schedule-editor", () => ({ RoutineScheduleEditor: () => null }));
 vi.mock("../components/glass-icon-button", () => ({ GlassIconButton: () => null }));
 vi.mock("../components/native-action-button", () => ({ NativeActionButton: () => null }));
 vi.mock("../components/routine-run-history", () => ({ RoutineRunHistory: () => null }));
 vi.mock("expo-router", () => ({
   Stack: { Screen: () => null },
+  useIsFocused: () => true,
   useLocalSearchParams: () => ({ botId: "bot-1", routineId: "routine-1", origin: "profile" }),
   useRouter: () => ({ push: vi.fn() }),
 }));

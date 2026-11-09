@@ -26,7 +26,7 @@ import {
 import { MAX_FONT_SCALE } from "@rakazo/ui-tokens";
 import type { Ref } from "react";
 import { useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
-import type { ViewStyle } from "react-native";
+import type { TextInputInstance, ViewStyle } from "react-native";
 import {
   AppState,
   Pressable,
@@ -129,7 +129,7 @@ export function ThreadComposer({
   const textScale = Math.min(fontScale, MAX_FONT_SCALE);
   const colorScheme = useResolvedAppearance();
   const { t } = useI18n();
-  const inputRef = useRef<TextInput>(null);
+  const inputRef = useRef<TextInputInstance>(null);
   const [saved] = useState(() => readComposerDraft(draftScope));
   const [draft, setDraft] = useState(saved.text);
   const draftRef = useRef(saved.text);
@@ -192,6 +192,9 @@ export function ThreadComposer({
       attachmentIds,
     }),
     reset: () => {
+      // Empty the native field as well. It measures its height from the text it last reported,
+      // so clearing only the draft would leave it as tall as the message just sent.
+      inputRef.current?.clear();
       draftRef.current = "";
       setDraft("");
       nativeSelection.current = { start: 0, end: 0 };

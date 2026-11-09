@@ -12,6 +12,7 @@ import { useFocusEffect, useLocalSearchParams, useNavigation } from "expo-router
 import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Alert, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { BotEmailAddressesGroup } from "../../components/bot-email";
 import { useIdentityConfirmation } from "../../components/confirm-identity";
 import { ListSearchInput } from "../../components/list-search-input";
 import { LoadFailure } from "../../components/load-failure";
@@ -21,6 +22,7 @@ import { NativeSymbol } from "../../components/native-symbol";
 import { SettingsGroup, SettingsRow } from "../../components/settings-group";
 import { VaultItemEditor } from "../../components/vault-item-editor";
 import { VaultItemSheet } from "../../components/vault-item-sheet";
+import { VaultTile } from "../../components/vault-tile";
 import { mobileTokens } from "../../lib/appearance";
 import { useI18n } from "../../lib/i18n";
 import { presentMessageActionSheet } from "../../lib/message-action-sheet";
@@ -357,13 +359,16 @@ export default function Vault() {
                       detail={vaultItemSubtitle(item) || undefined}
                       chevron="right"
                       leading={
-                        <View style={styles.tile}>
+                        <VaultTile
+                          origin={readable?.auth.type === "login" ? item.origin : undefined}
+                          style={styles.tile}
+                        >
                           <NativeSymbol
                             ios={symbol.ios}
                             android={symbol.android as never}
                             size={17}
                           />
-                        </View>
+                        </VaultTile>
                       }
                     />
                   )}
@@ -372,6 +377,7 @@ export default function Vault() {
             })}
           </SettingsGroup>
         ) : null}
+        {scope === "account" ? <BotEmailAddressesGroup /> : null}
       </ScrollView>
       {openedItem ? (
         <VaultItemSheet

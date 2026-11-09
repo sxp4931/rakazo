@@ -9,7 +9,7 @@ import {
 } from "./routine-delay-alerts.js";
 
 const url = process.env.DATABASE_URL;
-const database = process.env.VERIFY_DATABASE === "1" && url ? describe.sequential : describe.skip;
+const database = process.env.VERIFY_DATABASE === "1" && url ? describe : describe.skip;
 
 database("routine delay claims (PostgreSQL)", () => {
   let db: ReturnType<typeof createDb>;

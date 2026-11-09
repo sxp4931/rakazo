@@ -43,7 +43,6 @@ export function memoryRoutes(ctx: RouterContext) {
         const docs = await deps.prisma.memoryDocument.findMany({
           where: {
             spaceId: context.actor.spaceId,
-            userId: context.actor.userId,
             ...(input.botId ? { botId: input.botId } : {}),
             ...(input.scope ? { scope: input.scope } : {}),
           },
@@ -76,7 +75,6 @@ export function memoryRoutes(ctx: RouterContext) {
           where: {
             id: input.documentId,
             spaceId: context.actor.spaceId,
-            userId: context.actor.userId,
           },
         });
         if (!doc) throw new IsolationError();
@@ -217,7 +215,6 @@ export function memoryRoutes(ctx: RouterContext) {
           where: {
             id: input.documentId,
             spaceId: context.actor.spaceId,
-            userId: context.actor.userId,
           },
         });
         if (!doc) throw new IsolationError();
@@ -247,7 +244,6 @@ export function memoryRoutes(ctx: RouterContext) {
         const docs = await deps.prisma.memoryDocument.findMany({
           where: {
             spaceId: context.actor.spaceId,
-            userId: context.actor.userId,
             ...(input.botId ? { botId: input.botId } : {}),
           },
         });
@@ -299,7 +295,6 @@ export function memoryRoutes(ctx: RouterContext) {
           where: {
             id: input.itemId,
             spaceId: context.actor.spaceId,
-            userId: context.actor.userId,
           },
         });
         if (!existing) throw new IsolationError();
@@ -321,7 +316,6 @@ export function memoryRoutes(ctx: RouterContext) {
           where: {
             id: input.itemId,
             spaceId: context.actor.spaceId,
-            userId: context.actor.userId,
           },
         });
         if (!existing) throw new IsolationError();

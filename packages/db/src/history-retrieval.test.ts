@@ -1,8 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Prisma, PrismaClient } from "./client.js";
-import { historyMessageText, readHistory, searchHistory } from "./history-retrieval.js";
+import {
+  historyMessageText,
+  historyReadText,
+  readHistory,
+  searchHistory,
+} from "./history-retrieval.js";
+import { historySearchText } from "./history-text.js";
 
-const scope = { spaceId: "space", userId: "user", threadId: "thread", botId: "bot" };
+const scope = { spaceId: "space", threadId: "thread", botId: "bot" };
 const row = (seq: number, text = "Use batch exports") => ({
   id: `message-${seq}`,
   seq,
@@ -68,7 +74,7 @@ describe("local history retrieval", () => {
     expect(result.untrusted).toBe(true);
     expect(sql(mock).sql).toContain("plainto_tsquery");
     expect(sql(mock).values).toEqual(
-      expect.arrayContaining(["space", "user", "bot", "thread", "exports", 20, 3]),
+      expect.arrayContaining(["space", "bot", "thread", "exports", 20, 3]),
     );
   });
   it("keeps an unfinished broad query actionable after an exhausted narrower query", async () => {
@@ -191,7 +197,7 @@ describe("local history retrieval", () => {
     expect(mock.run.findMany).not.toHaveBeenCalled();
     expect(mock.artifact.findMany).not.toHaveBeenCalled();
     expect(sql(mock).sql).toContain('t."spaceId" =');
-    expect(sql(mock).sql).toContain('t."userId" =');
+    expect(sql(mock).sql).not.toContain('"userId" =');
     expect(sql(mock).sql).toContain('t."botId" =');
   });
   it("reuses originals without inference and invalidates snapshots when content changes", async () => {
@@ -349,6 +355,44 @@ describe("local history retrieval", () => {
         { kind: "progress", text: "trace" },
       ]),
     ).toBe("visible");
+  });
+  it("returns an earlier reply's tool steps to the bot but keeps them out of message text", () => {
+    const blocks = [
+      {
+        kind: "steps",
+        steps: [
+          { label: "Shell", count: 2, note: "Installing  Quillfeather\ninto Chromium." },
+          { label: "Computer screenshot", count: 1 },
+        ],
+      },
+      { kind: "text", text: "Done." },
+    ];
+    expect(historyReadText(blocks)).toBe(
+      "[tool calls this reply made]\n- Shell ×2: Installing Quillfeather into Chromium.\n- Computer screenshot\nDone.",
+    );
+    expect(historyMessageText(blocks)).toBe("Done.");
+    expect(historySearchText(blocks)).toContain("Quillfeather");
+    expect(historySearchText(blocks)).toContain("Computer screenshot");
+    expect(historySearchText(blocks)).not.toContain("tool calls this reply");
+  });
+  it("matches a search on a tool step note and returns the step list", async () => {
+    const { mock, prisma } = db();
+    mock.$queryRaw.mockResolvedValue([
+      {
+        ...row(3, ""),
+        indexed: true,
+        blocks: [
+          {
+            kind: "steps",
+            steps: [{ label: "Shell", count: 1, note: "Installing Quillfeather." }],
+          },
+          { kind: "text", text: "Done." },
+        ],
+      },
+    ]);
+    const result = await searchHistory(prisma, scope, { query: "quillfeather" });
+    expect(result.messages).toHaveLength(1);
+    expect(result.messages[0]!.text).toContain("reply made]\n- Shell: Installing Quillfeather.");
   });
   it("validates dates, query size and pagination before accessing the database", async () => {
     const { mock, prisma } = db();

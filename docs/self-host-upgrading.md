@@ -195,6 +195,23 @@ To populate the registry the first time, run the workflow manually (`workflow_di
 suffix) produces `latest`, and any `v*` tag produces semver tags. The updater ignores prereleases
 and refuses the official path until a stable `vX.Y.Z` exists.
 
+## Source checkout updates on systemd
+
+For an installation with `rakazo-source-updater.service` enabled, the deployment owner
+can check official changes and install an update from **Settings → Updates**.
+
+To connect a trusted fork, point the installation checkout's `origin` at that
+repository and set `RAKAZO_SOURCE_UPDATE_FORK_BRANCH` to its existing branch name
+in the source updater service environment. Give the service account Git read
+and push access to that branch, then restart the source updater service. The
+updater syncs a clean merge after the installation passes its health check.
+
+When Git finds overlapping changes, resolve them on the configured fork branch.
+The resolved commit must include both the installed commit and the official
+changes it incorporates. Check again in Settings to review and install that
+commit. If a newer official update arrived meanwhile, check again after
+installation to review the remaining changes.
+
 ## Updater sidecar
 
 Compose production deployments offer an opt-in `updater` profile on a private `control` network.

@@ -13,6 +13,7 @@ export interface SourceUpdaterServiceConfig {
   statePath: string;
   backupDir: string;
   token: string;
+  forkBranch?: string;
 }
 
 export function resolveSourceUpdaterServiceConfig(
@@ -28,6 +29,9 @@ export function resolveSourceUpdaterServiceConfig(
       env.RAKAZO_SOURCE_UPDATER_STATE ?? path.join(deployDir, ".state", "source-update-state.json"),
     backupDir: env.RAKAZO_SOURCE_UPDATER_BACKUP_DIR ?? "/var/lib/rakazo/source-update-backups",
     token: resolveUpdaterToken(env),
+    ...(env.RAKAZO_SOURCE_UPDATE_FORK_BRANCH?.trim()
+      ? { forkBranch: env.RAKAZO_SOURCE_UPDATE_FORK_BRANCH.trim() }
+      : {}),
   };
 }
 
@@ -41,6 +45,7 @@ export function createSourceUpdaterApp(
       deployDir: config.deployDir,
       statePath: config.statePath,
       backupDir: config.backupDir,
+      forkBranch: config.forkBranch,
       run: createSourceUpdaterCommandRunner(process.env),
     });
   const app = new Hono();
@@ -80,7 +85,9 @@ export function createSourceUpdaterApp(
       typeof body.currentCommit !== "string" ||
       typeof body.targetCommit !== "string" ||
       !/^[0-9a-f]{40}$/i.test(body.currentCommit) ||
-      !/^[0-9a-f]{40}$/i.test(body.targetCommit)
+      !/^[0-9a-f]{40}$/i.test(body.targetCommit) ||
+      ("forkCommit" in body &&
+        (typeof body.forkCommit !== "string" || !/^[0-9a-f]{40}$/i.test(body.forkCommit)))
     ) {
       return c.json({ error: "The reviewed source revision is invalid." }, 400);
     }

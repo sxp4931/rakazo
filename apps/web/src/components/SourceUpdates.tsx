@@ -10,6 +10,7 @@ const MAX_CONFIRMATION_POLLS = 30;
 type ReviewedUpdate = {
   currentCommit: string;
   targetCommit: string;
+  forkCommit?: string;
   previousRunStartedAt: string | null;
 };
 
@@ -41,7 +42,8 @@ export function SourceUpdates() {
         run &&
         run.startedAt !== reviewed.previousRunStartedAt &&
         run.currentCommit === reviewed.currentCommit &&
-        run.targetCommit === reviewed.targetCommit,
+        run.targetCommit === reviewed.targetCommit &&
+        run.forkCommit === reviewed.forkCommit,
     );
   }, []);
 
@@ -137,6 +139,7 @@ export function SourceUpdates() {
     reviewedUpdateRef.current = {
       currentCommit,
       targetCommit,
+      forkCommit: preview.forkCommit,
       previousRunStartedAt: runState?.lastRun?.startedAt ?? null,
     };
     confirmationPolls.current = 0;
@@ -148,6 +151,7 @@ export function SourceUpdates() {
       const run = await rpc.sourceUpdates.apply({
         currentCommit,
         targetCommit,
+        ...(preview.forkCommit ? { forkCommit: preview.forkCommit } : {}),
       });
       reviewedUpdateRef.current = null;
       setRunState({ running: run.finishedAt === null, lastRun: run });
@@ -172,10 +176,10 @@ export function SourceUpdates() {
       data-testid="source-update-settings"
       className="mt-5 rounded-xl border border-border px-4 py-4"
     >
-      <SectionHeading>
-        <Trans>Official source</Trans>
-      </SectionHeading>
-      <div className="mt-3 flex justify-end">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <SectionHeading>
+          <Trans>Source updates</Trans>
+        </SectionHeading>
         <Button
           variant="outline"
           disabled={checking || applying || runState?.running || awaitingConfirmation}
@@ -188,7 +192,7 @@ export function SourceUpdates() {
       {runState?.running ? (
         <p role="status" className="mt-3 text-sm text-muted-foreground">
           {reviewedUpdateRef.current && matchesReviewedUpdate(runState) ? (
-            <Trans>Updating official source…</Trans>
+            <Trans>Installing update…</Trans>
           ) : (
             <Trans>A source update is in progress.</Trans>
           )}
@@ -209,16 +213,12 @@ export function SourceUpdates() {
           role={runState.lastRun.ok ? "status" : "alert"}
           className="mt-3 text-sm text-muted-foreground"
         >
-          {runState.lastRun.ok ? (
-            <Trans>Update complete.</Trans>
-          ) : (
-            <>
-              <p>{runState.lastRun.error ?? t`The update failed.`}</p>
-              {runState.lastRun.recovery ? (
-                <p className="mt-1">{runState.lastRun.recovery}</p>
-              ) : null}
-            </>
-          )}
+          <p>
+            {runState.lastRun.ok
+              ? t`Update complete.`
+              : (runState.lastRun.error ?? t`The update failed.`)}
+          </p>
+          {runState.lastRun.recovery ? <p className="mt-1">{runState.lastRun.recovery}</p> : null}
         </div>
       ) : null}
 
@@ -242,7 +242,7 @@ export function SourceUpdates() {
       {preview?.status === "available" ? (
         <div className="mt-3 flex justify-end">
           <Button disabled={!canApply || applying} onClick={() => void apply()}>
-            {applying ? <Trans>Applying…</Trans> : <Trans>Apply reviewed update</Trans>}
+            <Trans>Install update</Trans>
           </Button>
         </div>
       ) : null}
@@ -252,13 +252,6 @@ export function SourceUpdates() {
 
 function Preview({ preview }: { preview: SourceUpdatePreview }) {
   const { t } = useLingui();
-  const summary =
-    preview.summaryAvailable && preview.summary
-      ? preview.summary
-      : t`AI summary unavailable. Review ${plural(preview.commitCount, {
-          one: "# official commit",
-          other: "# official commits",
-        })}.`;
   const commitCount = t`${plural(preview.commitCount, {
     one: "# commit",
     other: "# commits",
@@ -272,35 +265,43 @@ function Preview({ preview }: { preview: SourceUpdatePreview }) {
 
   return (
     <div className="mt-3 flex flex-col gap-3 text-sm">
-      {preview.status === "available" ? (
-        <p role="status" className="text-foreground">
-          {summary}
-        </p>
-      ) : preview.status === "up-to-date" ? (
+      {preview.status === "up-to-date" ? (
         <p role="status" className="text-muted-foreground">
           <Trans>Rakazo is up to date.</Trans>
         </p>
       ) : preview.status === "conflict" ? (
-        <>
-          <p role="alert" className="text-destructive">
-            {preview.reason ?? t`This update has conflicts and cannot be applied.`}
-          </p>
-          <p role="status" className="text-foreground">
-            {summary}
-          </p>
-        </>
+        <p role="alert" className="text-destructive">
+          {preview.reason ?? t`This update has conflicts and cannot be applied.`}
+        </p>
       ) : preview.status === "running" ? (
         <p role="status" className="text-muted-foreground">
           <Trans>The update is in progress.</Trans>
         </p>
-      ) : (
+      ) : preview.status !== "available" ? (
         <p role="status" className="text-muted-foreground">
           {preview.reason ??
             (preview.status === "dirty"
               ? t`Local source changes must be resolved before updating.`
               : t`Official source updates are unavailable.`)}
         </p>
-      )}
+      ) : null}
+
+      {preview.forkCommit && preview.status === "available" ? (
+        <p role="status" className="text-muted-foreground">
+          <Trans>Update ready from your branch.</Trans>
+        </p>
+      ) : null}
+      {preview.status === "available" || preview.status === "conflict" ? (
+        preview.summary ? (
+          <p className="whitespace-pre-line text-foreground">{preview.summary}</p>
+        ) : (
+          <ul className="list-disc space-y-1 pl-5 text-foreground">
+            {preview.commits.slice(0, 3).map(({ commit, subject }) => (
+              <li key={commit}>{subject}</li>
+            ))}
+          </ul>
+        )
+      ) : null}
 
       {preview.status === "available" || preview.commitCount > 0 || preview.fileCount > 0 ? (
         <details className="rounded-lg border border-border px-3 py-2">

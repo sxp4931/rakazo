@@ -459,6 +459,10 @@ export const appContract = {
         z.object({
           currentCommit: z.string().regex(/^[0-9a-f]{40}$/i),
           targetCommit: z.string().regex(/^[0-9a-f]{40}$/i),
+          forkCommit: z
+            .string()
+            .regex(/^[0-9a-f]{40}$/i)
+            .optional(),
         }),
       )
       .output(SourceUpdateRunSchema),

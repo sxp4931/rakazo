@@ -138,7 +138,7 @@ it("reviews the official preview and confirms an update after the API restarts",
     expect(container.textContent).toContain("apps/api/src/service.ts");
 
     await act(async () => {
-      findButton(container, "Apply reviewed update").click();
+      findButton(container, "Install update").click();
     });
     expect(sourceApply).toHaveBeenCalledWith({ currentCommit, targetCommit });
     expect(container.textContent).toContain("Checking whether the update started…");
@@ -162,7 +162,7 @@ it("reviews the official preview and confirms an update after the API restarts",
       await vi.advanceTimersByTimeAsync(1_500);
     });
     expect(sourceState).toHaveBeenCalledTimes(5);
-    expect(container.textContent).toContain("Updating official source…");
+    expect(container.textContent).toContain("Installing update…");
     expect(container.textContent).not.toContain("Checking whether the update started…");
   } finally {
     await act(async () => root.unmount());
@@ -190,7 +190,7 @@ it("polls while the apply request is still pending", async () => {
       findButton(container, "Check for updates").click();
     });
     await act(async () => {
-      findButton(container, "Apply reviewed update").click();
+      findButton(container, "Install update").click();
     });
     expect(container.textContent).toContain("Applying the reviewed update…");
 
@@ -229,7 +229,7 @@ it("shows the update summary while conflicts keep installation blocked", async (
     );
     expect(
       [...container.querySelectorAll("button")].some(
-        (button) => button.textContent === "Apply reviewed update",
+        (button) => button.textContent === "Install update",
       ),
     ).toBe(false);
     expect(sourceApply).not.toHaveBeenCalled();
@@ -240,7 +240,7 @@ it("shows the update summary while conflicts keep installation blocked", async (
   }
 });
 
-it("labels the commit fallback when an AI summary is unavailable", async () => {
+it("shows recent changes directly when the model cannot summarize", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   const idle: SourceUpdateState = { running: false, lastRun: null };
   sourceState.mockResolvedValue(idle);
@@ -263,11 +263,7 @@ it("labels the commit fallback when an AI summary is unavailable", async () => {
       await Promise.resolve();
     });
 
-    expect(container.textContent).toContain("AI summary unavailable. Review 1 official commit.");
-    await act(async () => {
-      container.querySelector("summary")?.click();
-    });
-    expect(container.textContent).toContain("Add an update preview");
+    expect(container.querySelector("ul > li")?.textContent).toBe("Add an update preview");
   } finally {
     await act(async () => root.unmount());
     container.remove();

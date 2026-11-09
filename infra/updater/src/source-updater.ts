@@ -24,7 +24,6 @@ import {
 import type { CommandResult } from "./index.js";
 
 const RUNTIME_SUPPORT_ROOTS = new Set([".config", ".local", ".npm", ".pnpm", ".state"]);
-const DIFF_LIMIT = 60_000;
 const COMMIT_LIMIT = 100;
 const GIT_TIMEOUT_MS = 3 * 60_000;
 const PNPM_TIMEOUT_MS = 20 * 60_000;
@@ -44,7 +43,6 @@ export type SourceUpdateCommandRunner = (
     cwd: string;
     timeoutMs: number;
     env?: Record<string, string>;
-    maxOutputCharacters?: number;
   },
 ) => Promise<CommandResult>;
 
@@ -60,9 +58,7 @@ export interface SourceUpdateCandidate {
   commitCount: number;
   changedFiles: string[];
   fileCount: number;
-  mergeCommit: string | null;
-  /** Bounded upstream-only diff sent to the configured model; never returned to clients. */
-  diff: string;
+  forkCommit?: string;
 }
 
 export interface SourceUpdaterConfig {
@@ -71,6 +67,8 @@ export interface SourceUpdaterConfig {
   backupDir?: string;
   officialRepoUrl?: string;
   branch?: string;
+  /** Opt-in branch in the checkout's origin. Its contents are trusted deployment source. */
+  forkBranch?: string;
   run?: SourceUpdateCommandRunner;
 }
 
@@ -94,8 +92,6 @@ function failure(
     commitCount: 0,
     changedFiles: [],
     fileCount: 0,
-    mergeCommit: null,
-    diff: "",
     ...values,
   };
 }
@@ -138,6 +134,7 @@ export function createSourceUpdater(config: SourceUpdaterConfig) {
   const run = config.run ?? defaultSourceUpdateCommand;
   const repoUrl = config.officialRepoUrl ?? OFFICIAL_REPO_URL;
   const branch = config.branch ?? DEFAULT_UPDATE_BRANCH;
+  const forkRef = config.forkBranch ? `refs/heads/${config.forkBranch}` : undefined;
   let running = false;
   let lastRun: SourceUpdateRun | null = null;
 
@@ -154,7 +151,8 @@ export function createSourceUpdater(config: SourceUpdaterConfig) {
       pinnedCommit?: string,
       allowRunning = false,
       validateBuild = false,
-      retainedCandidate?: { directory?: string; mergeCommit?: string },
+      retainedCandidate?: { directory?: string; mergeCommit?: string; forkUrl?: string },
+      pinnedForkCommit?: string,
     ): Promise<SourceUpdateCandidate> {
       if (lastRun?.stage === "interrupted" || lastRun?.stage === "recovery-failed") {
         return failure(
@@ -219,12 +217,8 @@ export function createSourceUpdater(config: SourceUpdaterConfig) {
       }
       await chown(tempRoot, owner.uid, owner.gid);
       const candidateDir = path.join(tempRoot, "candidate");
-      const candidateGit = (args: string[], maxOutputCharacters?: number) =>
-        run("git", args, {
-          cwd: candidateDir,
-          timeoutMs: GIT_TIMEOUT_MS,
-          ...(maxOutputCharacters === undefined ? {} : { maxOutputCharacters }),
-        });
+      const candidateGit = (args: string[]) =>
+        run("git", args, { cwd: candidateDir, timeoutMs: GIT_TIMEOUT_MS });
       let keepCandidate = false;
       try {
         const cloned = await run(
@@ -244,8 +238,6 @@ export function createSourceUpdater(config: SourceUpdaterConfig) {
           },
         );
         if (!cloned.ok) return failure("A temporary review checkout could not be created.");
-        const checkout = await candidateGit(["checkout", "--detach", currentCommit]);
-        if (!checkout.ok) return failure("A temporary review checkout could not be prepared.");
         const fetched = await candidateGit([
           "fetch",
           "--no-tags",
@@ -315,8 +307,68 @@ export function createSourceUpdater(config: SourceUpdaterConfig) {
           });
         }
 
-        const [fileResult, logResult, countResult, diffResult] = await Promise.all([
-          candidateGit(["diff", "--name-only", "--no-renames", base, targetCommit]),
+        let forkCommit: string | undefined;
+        let forkUrl: string | undefined;
+        if (forkRef) {
+          if (!(await candidateGit(["check-ref-format", forkRef])).ok) {
+            return failure("The configured update branch is invalid.");
+          }
+          forkUrl = await getForkUrl();
+          if (!forkUrl) return failure("The update branch needs a separate fork remote.");
+          const forkFetched = await candidateGit([
+            "fetch",
+            "--no-tags",
+            "--no-recurse-submodules",
+            "--",
+            forkUrl,
+            forkRef,
+          ]);
+          const forkHead = forkFetched.ok
+            ? (await candidateGit(["rev-parse", "FETCH_HEAD^{commit}"])).stdout.trim()
+            : "";
+          if (!isGitCommit(forkHead)) return failure("Could not read your update branch.");
+          const forkAlreadyInstalled = await candidateGit([
+            "merge-base",
+            "--is-ancestor",
+            forkHead,
+            currentCommit,
+          ]);
+          if (!forkAlreadyInstalled.ok) {
+            const [includesInstalled, officialInFork] = await Promise.all([
+              candidateGit(["merge-base", "--is-ancestor", currentCommit, forkHead]),
+              candidateGit(["merge-base", forkHead, remoteHead]),
+            ]);
+            const integrated = officialInFork.stdout.trim();
+            const advancesOfficial =
+              isGitCommit(integrated) &&
+              integrated !== base &&
+              (await candidateGit(["merge-base", "--is-ancestor", base, integrated])).ok;
+            if (!includesInstalled.ok || !advancesOfficial) {
+              return failure(
+                "Your update branch needs a merge that includes this installation and the official changes.",
+                { currentCommit, targetCommit, branch: currentBranch.stdout.trim() },
+              );
+            }
+            targetCommit = integrated;
+            forkCommit = forkHead;
+          }
+        }
+        if (
+          pinnedCommit !== undefined &&
+          (targetCommit !== pinnedCommit || forkCommit !== pinnedForkCommit)
+        ) {
+          return failure("Your update branch changed after review. Check again.");
+        }
+        if (
+          lastRun?.stage === "rolled-back" &&
+          lastRun.targetCommit === targetCommit &&
+          lastRun.forkCommit === forkCommit
+        ) {
+          return failure("This update was rolled back. Review the last run before trying again.");
+        }
+
+        const [fileResult, logResult, countResult, forkFiles] = await Promise.all([
+          candidateGit(["diff", "--name-only", "--no-renames", "-z", base, targetCommit]),
           candidateGit([
             "log",
             "--no-decorate",
@@ -325,24 +377,23 @@ export function createSourceUpdater(config: SourceUpdaterConfig) {
             `${base}..${targetCommit}`,
           ]),
           candidateGit(["rev-list", "--count", `${base}..${targetCommit}`]),
-          candidateGit([
-            "diff",
-            "--no-ext-diff",
-            "--no-renames",
-            "--unified=2",
-            base,
-            targetCommit,
-          ], DIFF_LIMIT),
+          forkCommit
+            ? candidateGit(["diff", "--name-only", "--no-renames", "-z", currentCommit, forkCommit])
+            : null,
         ]);
-        if (!fileResult.ok || !logResult.ok || !countResult.ok || !diffResult.ok) {
+        if (!fileResult.ok || !logResult.ok || !countResult.ok || (forkFiles && !forkFiles.ok)) {
           return failure("The official changes could not be summarized.", {
             currentCommit,
             targetCommit,
             branch: currentBranch.stdout.trim(),
           });
         }
-        const changedFiles = [...new Set(fileResult.stdout.split("\n").filter(Boolean))];
-        const untrackedConflicts = await findUntrackedConflicts(git, untracked, changedFiles);
+        const changedFiles = parseNulList(fileResult.stdout);
+        const untrackedConflicts = await findUntrackedConflicts(
+          git,
+          untracked,
+          forkFiles ? parseNulList(forkFiles.stdout) : changedFiles,
+        );
         const commits = logResult.stdout
           .split("\n")
           .filter(Boolean)
@@ -359,7 +410,7 @@ export function createSourceUpdater(config: SourceUpdaterConfig) {
           commitCount: Number(countResult.stdout.trim()) || commits.length,
           changedFiles: changedFiles.slice(0, 300),
           fileCount: changedFiles.length,
-          diff: diffResult.stdout.slice(0, DIFF_LIMIT),
+          ...(forkCommit ? { forkCommit } : {}),
         };
         if (untrackedConflicts.length > 0) {
           return failure("An upstream file would overwrite a local ignored or runtime file.", {
@@ -369,28 +420,73 @@ export function createSourceUpdater(config: SourceUpdaterConfig) {
           });
         }
 
-        const merged = await candidateGit([
-          "-c",
-          "user.name=Rakazo",
-          "-c",
-          "user.email=updates@rakazo.local",
-          "-c",
-          "core.hooksPath=/dev/null",
-          "merge",
-          "--no-ff",
-          "--no-edit",
-          targetCommit,
-        ]);
-        if (!merged.ok) {
+        const mergeTarget = forkCommit ?? targetCommit;
+        const available: SourceUpdateCandidate = {
+          status: "available",
+          reason: null,
+          changedPaths: [],
+          conflictingPaths: [],
+          ...shared,
+        };
+        if (!validateBuild) {
+          const merge = forkCommit
+            ? null
+            : await candidateGit([
+                "merge-tree",
+                "--write-tree",
+                "--name-only",
+                "-z",
+                currentCommit,
+                mergeTarget,
+              ]);
+          if (!merge || merge.ok) return available;
+          if (merge.exitCode === 1) {
+            const [, ...entries] = merge.stdout.split("\0");
+            const end = entries.indexOf("");
+            return failure(
+              "Official changes overlap your custom changes. Resolve them in your branch to continue.",
+              {
+                status: "conflict",
+                conflictingPaths: entries.slice(0, end < 0 ? 0 : end).slice(0, 300),
+                ...shared,
+              },
+            );
+          }
+          if (merge.exitCode !== 129) {
+            return failure("Could not verify that the official changes merge safely.", shared);
+          }
+          // Older Git versions need an isolated working tree for the merge check.
+        }
+
+        const checkout = await candidateGit(["checkout", "--detach", forkCommit ?? currentCommit]);
+        if (!checkout.ok) return failure("A temporary review checkout could not be prepared.");
+        const merged = forkCommit
+          ? null
+          : await candidateGit([
+              "-c",
+              "user.name=Rakazo",
+              "-c",
+              "user.email=updates@rakazo.local",
+              "-c",
+              "core.hooksPath=/dev/null",
+              "merge",
+              "--no-ff",
+              "--no-edit",
+              mergeTarget,
+            ]);
+        if (merged && !merged.ok) {
           const conflicts = await candidateGit(["diff", "--name-only", "--diff-filter=U"]);
           await candidateGit(["merge", "--abort"]);
-          return failure("The upstream changes conflict with this customized checkout.", {
-            status: "conflict",
-            conflictingPaths: conflicts.ok
-              ? conflicts.stdout.split("\n").filter(Boolean).slice(0, 300)
-              : [],
-            ...shared,
-          });
+          return failure(
+            "Official changes overlap your custom changes. Resolve them in your branch to continue.",
+            {
+              status: "conflict",
+              conflictingPaths: conflicts.ok
+                ? conflicts.stdout.split("\n").filter(Boolean).slice(0, 300)
+                : [],
+              ...shared,
+            },
+          );
         }
         const mergeHead = await candidateGit(["rev-parse", "HEAD"]);
         const mergeCommit = mergeHead.ok ? mergeHead.stdout.trim() : "";
@@ -436,16 +532,7 @@ export function createSourceUpdater(config: SourceUpdaterConfig) {
             if (!result.ok) {
               return failure(
                 `The isolated candidate ${step[0]} step failed. The live checkout was not changed.`,
-                {
-                  currentCommit,
-                  targetCommit,
-                  branch: currentBranch.stdout.trim(),
-                  commits,
-                  commitCount: Number(countResult.stdout.trim()) || commits.length,
-                  changedFiles: changedFiles.slice(0, 300),
-                  fileCount: changedFiles.length,
-                  diff: diffResult.stdout.slice(0, DIFF_LIMIT),
-                },
+                shared,
               );
             }
           }
@@ -453,32 +540,38 @@ export function createSourceUpdater(config: SourceUpdaterConfig) {
         if (retainedCandidate) {
           retainedCandidate.directory = candidateDir;
           retainedCandidate.mergeCommit = mergeCommit;
+          retainedCandidate.forkUrl = forkUrl;
           keepCandidate = true;
         }
-        return {
-          status: "available",
-          reason: null,
-          changedPaths: [],
-          conflictingPaths: [],
-          ...shared,
-          mergeCommit,
-        };
+        return available;
       } finally {
         if (!keepCandidate) await rm(tempRoot, { recursive: true, force: true });
       }
     },
 
-    async apply(input: { currentCommit: string; targetCommit: string }): Promise<SourceUpdateRun> {
+    async apply(input: {
+      currentCommit: string;
+      targetCommit: string;
+      forkCommit?: string;
+    }): Promise<SourceUpdateRun> {
       if (running) throw new Error("An update is already running.");
       if (lastRun?.stage === "interrupted" || lastRun?.stage === "recovery-failed") {
         throw new Error(
           "A previous update could not be confirmed. Recover the source before applying another update.",
         );
       }
-      if (!isGitCommit(input.currentCommit) || !isGitCommit(input.targetCommit)) {
+      if (
+        !isGitCommit(input.currentCommit) ||
+        !isGitCommit(input.targetCommit) ||
+        (input.forkCommit !== undefined && !isGitCommit(input.forkCommit))
+      ) {
         throw new Error("The reviewed source revision is invalid.");
       }
-      if (lastRun?.stage === "rolled-back" && lastRun.targetCommit === input.targetCommit) {
+      if (
+        lastRun?.stage === "rolled-back" &&
+        lastRun.targetCommit === input.targetCommit &&
+        lastRun.forkCommit === input.forkCommit
+      ) {
         throw new Error(
           "This reviewed update was rolled back and cannot be reapplied automatically.",
         );
@@ -487,7 +580,7 @@ export function createSourceUpdater(config: SourceUpdaterConfig) {
       const startedAt = new Date().toISOString();
       const current = input.currentCommit;
       const target = input.targetCommit;
-      const retainedCandidate: { directory?: string; mergeCommit?: string } = {};
+      const retainedCandidate: { directory?: string; mergeCommit?: string; forkUrl?: string } = {};
       let sourceBackupCreated = false;
       let backupCreated = false;
       const nextRun: SourceUpdateRun = {
@@ -496,6 +589,7 @@ export function createSourceUpdater(config: SourceUpdaterConfig) {
         ok: false,
         currentCommit: current,
         targetCommit: target,
+        ...(input.forkCommit ? { forkCommit: input.forkCommit } : {}),
         stage: "checking",
         error: null,
         recovery: null,
@@ -505,7 +599,7 @@ export function createSourceUpdater(config: SourceUpdaterConfig) {
 
       try {
         await persist();
-        const reviewed = await this.check(target, true, true, retainedCandidate);
+        const reviewed = await this.check(target, true, true, retainedCandidate, input.forkCommit);
         if (
           reviewed.status !== "available" ||
           reviewed.currentCommit !== current ||
@@ -684,32 +778,52 @@ export function createSourceUpdater(config: SourceUpdaterConfig) {
           cwd: config.deployDir,
           timeoutMs: 160_000,
         });
-        if (!healthy.ok) throw new Error("The API did not report healthy after the restart.");
+        if (!healthy.ok) throw new Error("The API did not become ready after the restart.");
         nextRun.ok = true;
         nextRun.finishedAt = new Date().toISOString();
         lastRun = nextRun;
         await persist(false);
-        nextRun.error = null;
-        nextRun.recovery = null;
+        if (forkRef && !input.forkCommit) {
+          const forkUrl = retainedCandidate.forkUrl;
+          const pushed = forkUrl
+            ? await git([
+                "-c",
+                "core.hooksPath=/dev/null",
+                "push",
+                "--",
+                forkUrl,
+                `${mergeCommit}:${forkRef}`,
+              ]).catch(() => null)
+            : null;
+          if (!pushed?.ok) {
+            nextRun.recovery = "Could not sync your update branch.";
+          }
+        }
       } catch (error) {
         nextRun.ok = false;
         nextRun.error =
           error instanceof Error ? error.message.slice(0, 500) : "The source update failed.";
         if (mergeCommit !== null) {
-          const reverted = await git([
-            "-c",
-            "user.name=Rakazo",
-            "-c",
-            "user.email=updates@rakazo.local",
-            "-c",
-            "core.hooksPath=/dev/null",
-            "revert",
-            "--no-edit",
-            "-m",
-            "1",
-            mergeCommit,
-          ]);
-          if (reverted.ok) {
+          const liveHead = await git(["rev-parse", "HEAD"]);
+          let reverted: CommandResult | undefined;
+          if (liveHead.ok && liveHead.stdout.trim() === mergeCommit) {
+            reverted = forkRef
+              ? await git(["reset", "--keep", current])
+              : await git([
+                  "-c",
+                  "user.name=Rakazo",
+                  "-c",
+                  "user.email=updates@rakazo.local",
+                  "-c",
+                  "core.hooksPath=/dev/null",
+                  "revert",
+                  "--no-edit",
+                  "-m",
+                  "1",
+                  mergeCommit,
+                ]);
+          }
+          if (reverted?.ok) {
             nextRun.stage = "rolled-back";
             await persist();
             const recoveryBuild = await run(
@@ -755,7 +869,9 @@ export function createSourceUpdater(config: SourceUpdaterConfig) {
               ? await run("health", [], { cwd: config.deployDir, timeoutMs: 160_000 })
               : { ok: false };
             nextRun.recovery = recoveryHealthy.ok
-              ? "The source merge was reverted and the previous services restarted. Database migrations are not reversed."
+              ? forkRef
+                ? "The previous source was restored and services restarted. Applied database migrations remain in place."
+                : "The source merge was reverted and the previous services restarted. Database migrations are not reversed."
               : "The source bundle and database backup are available for manual recovery; services may need a restart. Database migrations are not reversed.";
           } else {
             nextRun.stage = "recovery-failed";
@@ -790,7 +906,7 @@ export function createSourceUpdater(config: SourceUpdaterConfig) {
           timeoutMs: 120_000,
         });
         if (!helperRestart.ok) {
-          nextRun.recovery =
+          nextRun.recovery ??=
             "The update completed; the source updater will reload after its next restart.";
           lastRun = nextRun;
           await persist(false);
@@ -803,6 +919,20 @@ export function createSourceUpdater(config: SourceUpdaterConfig) {
 
   async function git(args: string[]) {
     return run("git", args, { cwd: config.deployDir, timeoutMs: GIT_TIMEOUT_MS });
+  }
+
+  async function getForkUrl() {
+    const result = await git(["remote", "get-url", "origin"]);
+    const url = result.stdout.trim();
+    const normalize = (value: string) => {
+      const scp = /^(?:[^@/]+@)?([^:/]+):(.+)$/.exec(value);
+      const parsed = URL.parse(value.includes("://") || !scp ? value : `ssh://${scp[1]}/${scp[2]}`);
+      return (parsed ? `${parsed.hostname}${parsed.pathname}` : value)
+        .replace(/\/$/, "")
+        .replace(/\.git$/i, "")
+        .toLowerCase();
+    };
+    return result.ok && url && normalize(url) !== normalize(repoUrl) ? url : undefined;
   }
 
   async function persist(stateRunning = running) {
@@ -876,17 +1006,7 @@ export function createSourceUpdaterCommandRunner(
   return async (command, args, options) => {
     if (command === "git" || command === "pnpm") {
       const env = options.env ?? safeGitEnvironment(source);
-      return execFileResult(command, args, {
-        cwd: options.cwd,
-        timeoutMs: options.timeoutMs,
-        env,
-        ...(command === "git" && options.maxOutputCharacters !== undefined
-          ? {
-              maxBuffer: options.maxOutputCharacters * 4,
-              outputLimitCharacters: options.maxOutputCharacters,
-            }
-          : {}),
-      });
+      return execFileResult(command, args, { cwd: options.cwd, timeoutMs: options.timeoutMs, env });
     }
     const actions = {
       backup: "backup",
@@ -954,7 +1074,7 @@ async function waitForApiHealth(timeoutMs: number): Promise<CommandResult> {
   await new Promise((resolve) => setTimeout(resolve, 750));
   while (Date.now() < deadline) {
     try {
-      const response = await fetch("http://127.0.0.1:3100/health", {
+      const response = await fetch("http://127.0.0.1:3100/ready", {
         signal: AbortSignal.timeout(5_000),
       });
       if (response.ok) {
@@ -965,7 +1085,7 @@ async function waitForApiHealth(timeoutMs: number): Promise<CommandResult> {
     }
     await new Promise((resolve) => setTimeout(resolve, 2_000));
   }
-  return { ok: false, exitCode: null, stdout: "", output: "The API health check timed out." };
+  return { ok: false, exitCode: null, stdout: "", output: "The API readiness check timed out." };
 }
 
 function execFileResult(
@@ -975,8 +1095,6 @@ function execFileResult(
     cwd: string;
     timeoutMs: number;
     env?: Record<string, string>;
-    maxBuffer?: number;
-    outputLimitCharacters?: number;
   },
 ): Promise<CommandResult> {
   return new Promise((resolve) => {
@@ -986,31 +1104,17 @@ function execFileResult(
       {
         cwd: options.cwd,
         timeout: options.timeoutMs,
-        maxBuffer: options.maxBuffer ?? 4 * 1024 * 1024,
+        maxBuffer: 4 * 1024 * 1024,
         windowsHide: true,
         shell: false,
         env: { PATH: process.env.PATH ?? "/usr/bin:/bin", LANG: process.env.LANG, ...options.env },
       },
       (error, stdout, stderr) => {
-        const rawStdout = String(stdout);
-        const bufferLimited =
-          options.outputLimitCharacters !== undefined &&
-          error?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" &&
-          Buffer.byteLength(rawStdout) >= (options.maxBuffer ?? 4 * 1024 * 1024);
-        const outputStdout =
-          options.outputLimitCharacters === undefined
-            ? rawStdout
-            : rawStdout.slice(0, options.outputLimitCharacters);
+        const outputStdout = String(stdout);
         const output = `${outputStdout}${stderr}`.trimEnd();
         resolve({
-          ok: !error || bufferLimited,
-          exitCode: bufferLimited
-            ? 0
-            : error && typeof error.code === "number"
-              ? error.code
-              : error
-                ? null
-                : 0,
+          ok: !error,
+          exitCode: error && typeof error.code === "number" ? error.code : error ? null : 0,
           stdout: outputStdout,
           output: output.length > 8_000 ? output.slice(-8_000) : output,
         });

@@ -15,7 +15,7 @@ afterEach(async () => {
 });
 
 describe("official source updates", () => {
-  it("keeps the preview available when the upstream diff exceeds the subprocess limit", async () => {
+  it("previews large updates without checking out files or collecting a patch", async () => {
     const fixture = await makeFixture();
     await writeFile(path.join(fixture.upstream, "large.txt"), Buffer.alloc(5 * 1024 * 1024, 97));
     await git(fixture.upstream, ["add", "large.txt"]);
@@ -23,13 +23,23 @@ describe("official source updates", () => {
     await git(fixture.upstream, ["push", "origin", "main"]);
     const targetCommit = (await git(fixture.upstream, ["rev-parse", "HEAD"])).trim();
 
-    const updater = createSourceUpdater(fixture.config());
+    const commands: string[][] = [];
+    const runner = commandRunner();
+    const updater = createSourceUpdater(
+      fixture.config({
+        run: (command, args, options) => {
+          if (command === "git") commands.push(args);
+          return runner(command, args, options);
+        },
+      }),
+    );
     const preview = await updater.check(targetCommit);
 
     expect(preview.status, preview.reason ?? "").toBe("available");
     expect(preview.targetCommit).toBe(targetCommit);
     expect(preview.changedFiles).toContain("large.txt");
-    expect(preview.diff).toHaveLength(60_000);
+    expect(commands.some(([command]) => command === "checkout")).toBe(false);
+    expect(commands.some((args) => args.includes("--unified=2"))).toBe(false);
   });
 
   it("merges upstream into local commits and verifies a recovery bundle without changing origin", async () => {
@@ -133,6 +143,113 @@ describe("official source updates", () => {
     expect(preview.status, preview.reason ?? "").toBe("conflict");
     expect(preview.conflictingPaths).toContain("README.md");
     expect((await git(fixture.repo, ["rev-parse", "HEAD"])).trim()).toBe(fixture.localHead);
+  });
+
+  it("installs the reviewed fork resolution and preserves the fork's exact history", async () => {
+    const fixture = await makeFixture({ conflict: true });
+    const { fork, editor } = await makeFork(fixture.repo);
+    await git(editor, ["fetch", fixture.official, "main"]);
+    await expect(git(editor, ["merge", "--no-edit", "FETCH_HEAD"])).rejects.toThrow();
+    await writeFile(path.join(editor, "README.md"), "custom and official\n");
+    await git(editor, ["add", "README.md"]);
+    await git(editor, ["commit", "-m", "Keep both updates"]);
+    await git(editor, ["push", "origin", "custom"]);
+    const forkCommit = (await git(editor, ["rev-parse", "HEAD"])).trim();
+    const updater = createSourceUpdater({
+      ...fixture.config({ run: commandRunner() }),
+      forkBranch: "custom",
+    });
+
+    const preview = await updater.check();
+    expect(preview).toMatchObject({
+      status: "available",
+      targetCommit: fixture.upstreamHead,
+      forkCommit,
+    });
+
+    await writeFile(path.join(editor, "README.md"), "custom and official, reviewed\n");
+    await git(editor, ["commit", "-am", "Finish the resolution"]);
+    await git(editor, ["push", "origin", "custom"]);
+    const newerForkCommit = (await git(editor, ["rev-parse", "HEAD"])).trim();
+    const stale = await updater.apply({
+      currentCommit: fixture.localHead,
+      targetCommit: fixture.upstreamHead,
+      forkCommit,
+    });
+    expect(stale.ok).toBe(false);
+    expect(stale.error).toMatch(/changed after review/i);
+    expect((await git(fixture.repo, ["rev-parse", "HEAD"])).trim()).toBe(fixture.localHead);
+    expect(await updater.check()).toMatchObject({
+      status: "available",
+      forkCommit: newerForkCommit,
+    });
+
+    const applied = await updater.apply({
+      currentCommit: fixture.localHead,
+      targetCommit: fixture.upstreamHead,
+      forkCommit: newerForkCommit,
+    });
+    expect(applied.ok, applied.error ?? "").toBe(true);
+    expect((await git(fixture.repo, ["rev-parse", "HEAD"])).trim()).toBe(newerForkCommit);
+    expect((await git(fork, ["rev-parse", "custom"])).trim()).toBe(newerForkCommit);
+    expect(await readFile(path.join(fixture.repo, "README.md"), "utf8")).toBe(
+      "custom and official, reviewed\n",
+    );
+  });
+
+  it("syncs a clean merge to the configured fork after checking live health", async () => {
+    const fixture = await makeFixture();
+    const { fork } = await makeFork(fixture.repo);
+    const events: string[] = [];
+    const runner = commandRunner();
+    const updater = createSourceUpdater({
+      ...fixture.config({
+        run: (command, args, options) => {
+          if (command === "health" || (command === "git" && args.includes("push"))) {
+            events.push(command);
+          }
+          return runner(command, args, options);
+        },
+      }),
+      forkBranch: "custom",
+    });
+    expect((await updater.check()).status).toBe("available");
+    const applied = await updater.apply({
+      currentCommit: fixture.localHead,
+      targetCommit: fixture.upstreamHead,
+    });
+    expect(applied.ok, applied.error ?? "").toBe(true);
+    expect(applied.recovery).toBeNull();
+    expect(events).toEqual(["health", "git"]);
+    expect(await git(fork, ["rev-parse", "custom"])).toBe(
+      await git(fixture.repo, ["rev-parse", "HEAD"]),
+    );
+  });
+
+  it("restores the exact installed revision and leaves the fork alone when health checks fail", async () => {
+    const fixture = await makeFixture();
+    const { fork } = await makeFork(fixture.repo);
+    const runner = commandRunner();
+    let healthChecks = 0;
+    const updater = createSourceUpdater({
+      ...fixture.config({
+        run: (command, args, options) => {
+          if (command === "health" && ++healthChecks === 1) {
+            return Promise.resolve({ ok: false, exitCode: 1, stdout: "", output: "" });
+          }
+          return runner(command, args, options);
+        },
+      }),
+      forkBranch: "custom",
+    });
+    const applied = await updater.apply({
+      currentCommit: fixture.localHead,
+      targetCommit: fixture.upstreamHead,
+    });
+    expect(applied).toMatchObject({ ok: false, stage: "rolled-back" });
+    expect(healthChecks).toBe(2);
+    expect((await git(fixture.repo, ["rev-parse", "HEAD"])).trim()).toBe(fixture.localHead);
+    expect((await git(fork, ["rev-parse", "custom"])).trim()).toBe(fixture.localHead);
   });
 
   it("allows preserved runtime files unless upstream changes the same path", async () => {
@@ -385,6 +502,19 @@ function commandRunner(afterPnpm?: (args: string[], cwd: string) => void | Promi
     if (command === "pnpm") await afterPnpm?.(args, options.cwd);
     return { ok: true, exitCode: 0, stdout: "", output: "" };
   };
+}
+
+async function makeFork(repo: string) {
+  const root = path.dirname(repo);
+  const fork = path.join(root, "fork.git");
+  const editor = path.join(root, "editor");
+  await git(root, ["init", "--bare", fork]);
+  await git(repo, ["remote", "set-url", "origin", fork]);
+  await git(repo, ["push", "origin", "HEAD:refs/heads/custom"]);
+  await git(root, ["clone", "--branch", "custom", fork, editor]);
+  await git(editor, ["config", "user.name", "Editor"]);
+  await git(editor, ["config", "user.email", "editor@example.invalid"]);
+  return { fork, editor };
 }
 
 async function git(cwd: string, args: string[]): Promise<string> {

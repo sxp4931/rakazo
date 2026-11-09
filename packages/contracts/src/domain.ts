@@ -1956,6 +1956,10 @@ export const SourceUpdatePreviewSchema = z.object({
     .regex(/^[0-9a-f]{40}$/i)
     .nullable(),
   branch: z.string().max(200).nullable(),
+  forkCommit: z
+    .string()
+    .regex(/^[0-9a-f]{40}$/i)
+    .optional(),
   changedPaths: z.array(z.string().max(500)).max(300),
   conflictingPaths: z.array(z.string().max(500)).max(300),
   commits: z.array(SourceUpdateCommitSchema).max(100),
@@ -1973,6 +1977,10 @@ export const SourceUpdateRunSchema = z.object({
   ok: z.boolean(),
   currentCommit: z.string().regex(/^[0-9a-f]{40}$/i),
   targetCommit: z.string().regex(/^[0-9a-f]{40}$/i),
+  forkCommit: z
+    .string()
+    .regex(/^[0-9a-f]{40}$/i)
+    .optional(),
   stage: z.string().max(80),
   error: z.string().max(500).nullable(),
   recovery: z.string().max(500).nullable(),

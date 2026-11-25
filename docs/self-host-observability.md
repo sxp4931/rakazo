@@ -31,6 +31,19 @@ Computer usage is recorded at several boundaries:
   separate outcomes. Count accepted creates/resumes for start usage; recoveries are shown separately
   because their quota treatment depends on the provider.
 - `computer.suspended`: successful idle or active-limit suspension, with the active duration.
+- `sandbox.wait`: provider readiness and stop waits, with the sandbox id, state, hydration, snapshot
+  status and timestamps, stop status and timestamps, and elapsed time. Unchanged polls produce no
+  extra lines; advancing snapshot or stop attempt timestamps count as changes. An immediate
+  success produces none. Giving up on a recovery or forcing a stop records the final observed
+  state and elapsed time. Wait failures are warnings because background jobs may retry.
+  A requested recovery or update that fails because its provider is unavailable or unresponsive
+  reports a fixed failure reason with computer and bot correlation ids to the optional error
+  collector; provider error text and cause chains are excluded from that report.
+- `computer.maintenance_refused`: a recovery or update refused as busy, with its guard reason and
+  the computer state and control reservation as last read. A refused conditional claim means
+  the state may have changed, or an active run or execution lease prevented maintenance.
+- `computer.checkpoint_skipped`: replacement continuing from the last saved workspace after
+  a checkpoint failed or the old sandbox disappeared, with the action and last workspace save time.
 
 These records use fixed metadata, opaque correlation IDs, durations, and booleans. They do not add
 prompts, responses, filenames, file contents, command arguments, or credentials. Request/job trace
@@ -61,6 +74,20 @@ Track accepted starts per hour/day, rate-limit refusals, first-use tools, and th
 attempts needing no computer before tuning `SANDBOX_IDLE_MS`. Increasing the idle window reduces
 resumes between nearby uses but increases billed runtime; changing it does not remove unnecessary
 starts caused by tools. Provider rolling-window limits remain the source of truth for quota.
+
+## Scheduled routines
+
+`routine.paused_after_failures` records an automatic pause with `routine.id`,
+`space.id`, `bot.id`, `routine.failure_count`, and a fixed `run.failure_kind`.
+Alert on this event if an operator should review routines that need attention.
+
+For routines that keep running, group `agent.tool.completed` events with
+`tool.outcome=error` by `routine.id` and `tool`. Count distinct `run.id` values
+in a short window so several retries inside one run do not look like a failing
+schedule. Nonzero shell exits count as tool errors. Use `run.trigger` to compare
+interactive and scheduled runs. A completed run can still have failed tool
+calls, and repeated tool errors warrant investigation even when the run
+finishes. These logs omit tool inputs, outputs, and error text.
 
 ## Error reporting
 

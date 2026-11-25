@@ -1,31 +1,31 @@
 import { t } from "@lingui/core/macro";
-import { useQuery } from "@tanstack/react-query";
-import { useFocusEffect } from "expo-router";
-import { useCallback, useState } from "react";
+import { useIsFocused } from "expo-router";
 import { Text, View } from "react-native";
-import { rpc } from "../lib/api";
-import { dateLocaleForUi, useUiLocale } from "../lib/i18n";
-import { useMobileTokens } from "../lib/native";
-import { queryClient, rpcQuery } from "../lib/query";
+import { useSpaceChanges } from "../lib/api/roster-signals";
+import { dateLocaleForUi, useUiLocale } from "../lib/i18n/i18n";
+import { useMobileTokens } from "../lib/native/native";
+import { rpcQuery, useSave } from "../lib/query/query";
+import { useScreenQuery } from "../lib/query/screen-query";
 import { routineHealthLines } from "../lib/routine-health";
-import { NativeSwitch } from "./native-switch";
+import { NativeSwitch } from "./native/native-switch";
 
 export function RoutineHealth({ routineId }: { routineId: string }) {
   const locale = useUiLocale();
   const tokens = useMobileTokens();
-  const [saving, setSaving] = useState(false);
-  const [saveError, setSaveError] = useState(false);
-  const query = useQuery(
-    { ...rpcQuery("routines/health", { routineId }), enabled: false },
-    queryClient,
-  );
+  const focused = useIsFocused();
+  const read = rpcQuery("routines/health", { routineId });
+  const query = useScreenQuery(read);
   const { refetch } = query;
-  useFocusEffect(
-    useCallback(() => {
-      void refetch();
-      return undefined;
-    }, [refetch]),
-  );
+  useSpaceChanges("routines", refetch, focused);
+  useSpaceChanges("runs", refetch, focused);
+  const alerts = useSave({
+    save: async (input: { field: "delayed" | "failure"; enabled: boolean }, send) =>
+      send("routines/setAlerts", {
+        routineId,
+        [input.field]: input.enabled,
+      }),
+    stale: [read.queryKey],
+  });
   if (query.isError)
     return (
       <Text accessibilityRole="alert" style={{ color: tokens.destructive }}>
@@ -34,18 +34,8 @@ export function RoutineHealth({ routineId }: { routineId: string }) {
     );
   if (!query.data) return null;
   const health = query.data;
-  async function setAlert(field: "delayed" | "failure", enabled: boolean) {
-    setSaving(true);
-    setSaveError(false);
-    try {
-      await rpc("routines/setAlerts", { routineId, [field]: enabled });
-      await refetch();
-    } catch {
-      setSaveError(true);
-    } finally {
-      setSaving(false);
-    }
-  }
+  const setAlert = (field: "delayed" | "failure", enabled: boolean) =>
+    alerts.run({ field, enabled });
   return (
     <View style={{ gap: 8 }}>
       {routineHealthLines(health, dateLocaleForUi(locale)).map((line, index) => (
@@ -57,9 +47,9 @@ export function RoutineHealth({ routineId }: { routineId: string }) {
         <Text style={{ color: tokens.foreground }}>{t`Delay alerts`}</Text>
         <NativeSwitch
           accessibilityLabel={t`Delay alerts`}
-          disabled={saving}
+          disabled={alerts.pending}
           value={health.delayAlertsEnabled}
-          onValueChange={(value) => void setAlert("delayed", value)}
+          onValueChange={(value) => setAlert("delayed", value)}
         />
       </View>
       {health.delayAlertsEnabled ? (
@@ -71,9 +61,9 @@ export function RoutineHealth({ routineId }: { routineId: string }) {
         <Text style={{ color: tokens.foreground }}>{t`Failure alerts`}</Text>
         <NativeSwitch
           accessibilityLabel={t`Failure alerts`}
-          disabled={saving}
+          disabled={alerts.pending}
           value={health.failureAlertsEnabled}
-          onValueChange={(value) => void setAlert("failure", value)}
+          onValueChange={(value) => setAlert("failure", value)}
         />
       </View>
       {health.delayed && health.delayAlertResult === "failed" ? (
@@ -84,7 +74,7 @@ export function RoutineHealth({ routineId }: { routineId: string }) {
           {t`Alert accepted; delivery not confirmed`}
         </Text>
       ) : null}
-      {saveError ? (
+      {alerts.error ? (
         <Text accessibilityRole="alert" style={{ color: tokens.destructive }}>
           {t`Could not save`}
         </Text>

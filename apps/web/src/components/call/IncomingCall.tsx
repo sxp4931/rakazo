@@ -1,17 +1,22 @@
 import { useLingui } from "@lingui/react/macro";
+import { useTimeout } from "@rakazo/chat-ui/hooks";
 import type { Bot } from "@rakazo/contracts";
 import { nextIncomingCall, respondToIncomingCall } from "@rakazo/core";
+import { bestEffort } from "@rakazo/logging/best-effort";
 import { BotAvatar, Button, defaultBotAvatarValue } from "@rakazo/ui-web";
 import { Phone, PhoneOff } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { callAutoLanguage } from "../../lib/calls/call-language-preference";
 import {
+  getSnapshot,
   isLeavingSession,
   prepareCallAudio,
   startCall,
   useCallSession,
-} from "../../lib/call-session";
-import { rpc, selectedSpaceId } from "../../lib/rpc";
-import { errorText } from "../../lib/user-error";
+} from "../../lib/calls/call-session";
+import { rpc, selectedSpaceId } from "../../lib/query/rpc";
+import { errorText } from "../../lib/query/user-error";
+import { useEventListener } from "../../lib/use-event-listener";
 import { CallWindow } from "./CallWindow";
 
 /** Two short rising tones every two seconds: an incoming ring, unlike the outgoing ringback. */
@@ -90,15 +95,15 @@ export function IncomingCall({
   const call = bot?.incomingCall;
   const callId = call?.callId;
 
+  const expiresAt = call?.expiresAt;
   useEffect(() => {
-    if (!callId) return;
-    setNow(Date.now());
-    const timer = setTimeout(
-      () => setNow(Date.now()),
-      Math.max(0, Date.parse(call.expiresAt) - Date.now()),
-    );
-    return () => clearTimeout(timer);
-  }, [callId, call?.expiresAt]);
+    if (callId) setNow(Date.now());
+  }, [callId, expiresAt]);
+  const untilExpiry = useMemo(
+    () => (callId && expiresAt ? Math.max(0, Date.parse(expiresAt) - Date.now()) : null),
+    [callId, expiresAt],
+  );
+  useTimeout(() => setNow(Date.now()), untilExpiry, `${callId}:${expiresAt}`);
 
   useEffect(() => {
     if (!callId) return;
@@ -114,26 +119,23 @@ export function IncomingCall({
     };
   }, [callId]);
 
-  useEffect(() => {
-    const notify = () => {
-      if (!bot || !call || notified.current.has(call.callId)) return;
-      if (document.visibilityState === "visible" || typeof Notification === "undefined") return;
-      if (Notification.permission !== "granted") return;
-      const notice = new Notification(t`${bot.name} is calling you`, {
-        tag: `call:${call.callId}`,
-        requireInteraction: true,
-      });
-      notification.current = notice;
-      notified.current.add(call.callId);
-      notice.onclick = () => {
-        window.focus();
-        notice.close();
-      };
+  const notify = () => {
+    if (!bot || !call || notified.current.has(call.callId)) return;
+    if (document.visibilityState === "visible" || typeof Notification === "undefined") return;
+    if (Notification.permission !== "granted") return;
+    const notice = new Notification(t`${bot.name} is calling you`, {
+      tag: `call:${call.callId}`,
+      requireInteraction: true,
+    });
+    notification.current = notice;
+    notified.current.add(call.callId);
+    notice.onclick = () => {
+      window.focus();
+      notice.close();
     };
-    notify();
-    document.addEventListener("visibilitychange", notify);
-    return () => document.removeEventListener("visibilitychange", notify);
-  }, [bot, call, t]);
+  };
+  useEffect(notify, [bot, call, t]);
+  useEventListener(document, "visibilitychange", notify);
 
   if (!bot || !call) return null;
 
@@ -165,23 +167,25 @@ export function IncomingCall({
     const target = { botId: bot.id, callId: call.callId };
     const context = { spaceId: selectedSpaceId() };
     try {
+      const autoLanguage = callAutoLanguage.get();
       const answered = await respondToIncomingCall(call, () =>
         rpc.threads.answerCall(target, { context }),
       );
       // The page reloads for another session: a hang-up now would carry that session's cookie.
       if (isLeavingSession()) return;
-      if (!mounted.current) {
-        // Nobody is left to talk to: hang up the call the server now holds as answered.
-        void rpc.threads.endCall(target, { context }).catch(() => undefined);
+      if (mounted.current) setHandled((current) => new Set(current).add(call.callId));
+      if (getSnapshot() || !mounted.current || selectedSpaceId() !== context.spaceId) {
+        // Another call or view took over. Close the accepted call without replacing it.
+        void bestEffort("close superseded incoming call", rpc.threads.endCall(target, { context }));
         return;
       }
-      setHandled((current) => new Set(current).add(call.callId));
       startCall({
         botId: bot.id,
         botName: bot.name,
         botColor: bot.color,
         botAvatarSet: bot.avatarSet,
         transcribe,
+        autoLanguage,
         answered: { callId: call.callId, opening: answered.opening },
       });
       onAnswered(bot.id);

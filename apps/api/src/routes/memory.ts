@@ -1,21 +1,25 @@
 import { ORPCError } from "@orpc/server";
-import { MEMORY_REVISION_CONFLICT_ERROR } from "@rakazo/adapter-kit";
+import { MemoryRevisionConflictError } from "@rakazo/adapter-kit";
 import {
   buildAgentMemoryPrompt,
   isScratchpadStatus,
+  latestEndedDate,
   listScratchpadItems,
   mapScratchpadItem,
+  memoryProviderDescriptors,
   readAgentMemory,
 } from "@rakazo/adapters";
 import { isDeletableMemoryDocument } from "@rakazo/contracts";
+import { ClientError } from "@rakazo/core";
 import { findSpaceMemoryConfig, IsolationError } from "@rakazo/db";
-import { editMemoryEntry } from "../memory-entry.js";
 import {
   disconnectMemoryProvider,
   persistMemoryProviderConfig,
   serializeSpaceMemoryConfig,
+  updateMemoryProviderConfig,
   updateMemoryProviderDefaultScope,
-} from "../memory-provider-config.js";
+} from "../integrations/memory-provider-config.js";
+import { editMemoryEntry } from "../memory-entry.js";
 import type { RouterContext } from "./context.js";
 
 export function memoryRoutes(ctx: RouterContext) {
@@ -60,14 +64,19 @@ export function memoryRoutes(ctx: RouterContext) {
       budget: authed.memory.budget.handler(async ({ context, input }) => {
         await repos.getBot(context.actor, input.botId);
         // Read through the store a run uses, so the numbers match what the bot receives.
-        const documents = await readAgentMemory(deps.memory, input.botId, {
-          operationId: "mem",
-          traceId: "mem",
-          spaceId: context.actor.spaceId,
-          userId: context.actor.userId,
-          botId: input.botId,
-          signal: context.signal ?? new AbortController().signal,
-        });
+        const documents = await readAgentMemory(
+          deps.memory,
+          input.botId,
+          {
+            operationId: "mem",
+            traceId: "mem",
+            spaceId: context.actor.spaceId,
+            userId: context.actor.userId,
+            botId: input.botId,
+            signal: context.signal ?? new AbortController().signal,
+          },
+          latestEndedDate(new Date()),
+        );
         return buildAgentMemoryPrompt(documents).plan;
       }),
       update: authed.memory.update.handler(async ({ context, input }) => {
@@ -97,8 +106,8 @@ export function memoryRoutes(ctx: RouterContext) {
             },
           )
           .catch((error: unknown) => {
-            if (error instanceof Error && error.message === MEMORY_REVISION_CONFLICT_ERROR) {
-              throw new ORPCError("CONFLICT", { message: error.message });
+            if (error instanceof MemoryRevisionConflictError) {
+              throw new ClientError("CONFLICT", error.message);
             }
             throw error;
           });
@@ -121,7 +130,8 @@ export function memoryRoutes(ctx: RouterContext) {
           },
         });
         if (!doc) throw new IsolationError();
-        if (doc.revision !== input.expectedRevision) throw new ORPCError("CONFLICT");
+        if (doc.revision !== input.expectedRevision)
+          throw new ClientError("CONFLICT", "Memory selection changed");
         let content: string;
         try {
           content = editMemoryEntry(
@@ -132,7 +142,7 @@ export function memoryRoutes(ctx: RouterContext) {
             input.replacement,
           );
         } catch {
-          throw new ORPCError("CONFLICT", { message: "Memory selection changed" });
+          throw new ClientError("CONFLICT", "Memory selection changed");
         }
         const saved = await deps.memory
           .commit(
@@ -153,8 +163,8 @@ export function memoryRoutes(ctx: RouterContext) {
             },
           )
           .catch((error: unknown) => {
-            if (error instanceof Error && error.message === MEMORY_REVISION_CONFLICT_ERROR)
-              throw new ORPCError("CONFLICT");
+            if (error instanceof MemoryRevisionConflictError)
+              throw new ClientError("CONFLICT", error.message);
             throw error;
           });
         return {
@@ -173,7 +183,8 @@ export function memoryRoutes(ctx: RouterContext) {
           },
         });
         if (!doc) throw new IsolationError();
-        if (doc.revision !== input.expectedRevision) throw new ORPCError("CONFLICT");
+        if (doc.revision !== input.expectedRevision)
+          throw new ClientError("CONFLICT", "Memory selection changed");
         const previous = await deps.prisma.memoryRevision.findUnique({
           where: {
             documentId_revision: { documentId: doc.id, revision: input.expectedRevision - 1 },
@@ -199,8 +210,8 @@ export function memoryRoutes(ctx: RouterContext) {
             },
           )
           .catch((error: unknown) => {
-            if (error instanceof Error && error.message === MEMORY_REVISION_CONFLICT_ERROR)
-              throw new ORPCError("CONFLICT");
+            if (error instanceof MemoryRevisionConflictError)
+              throw new ClientError("CONFLICT", error.message);
             throw error;
           });
         return {
@@ -253,8 +264,12 @@ export function memoryRoutes(ctx: RouterContext) {
         const config = await findSpaceMemoryConfig(deps.prisma, context.actor.spaceId);
         return config ? serializeSpaceMemoryConfig(config) : null;
       }),
+      providers: authed.memory.providers.handler(() => memoryProviderDescriptors()),
       connectProvider: authed.memory.connectProvider.handler(async ({ context, input }) =>
         persistMemoryProviderConfig(deps, context.actor, input),
+      ),
+      updateProvider: authed.memory.updateProvider.handler(async ({ context, input }) =>
+        updateMemoryProviderConfig(deps, context.actor, input),
       ),
       setDefaultScope: authed.memory.setDefaultScope.handler(async ({ context, input }) =>
         updateMemoryProviderDefaultScope(deps, context.actor, input.defaultMemoryScope),

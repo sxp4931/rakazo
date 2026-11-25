@@ -13,18 +13,18 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@lingui/react/macro", () => ({
   useLingui: () => ({ t: (parts: TemplateStringsArray) => parts.join("") }),
 }));
-vi.mock("../lib/native", () => ({
+vi.mock("../lib/native/native", () => ({
   native: { fill: "fill" },
   useMobileTokens: () => ({ foreground: "foreground", mutedForeground: "muted", card: "card" }),
 }));
-vi.mock("../components/native-action-button", () => ({
+vi.mock("../components/native/native-action-button", () => ({
   NativeActionButton: ({ label, onPress }: { label: string; onPress: () => void }) => (
     <button type="button" onClick={onPress}>
       {label}
     </button>
   ),
 }));
-vi.mock("../components/native-symbol", () => ({ NativeSymbol: () => null }));
+vi.mock("../components/native/native-symbol", () => ({ NativeSymbol: () => null }));
 vi.mock("react-native", () => {
   const wrap = ({ children }: { children?: ReactNode }) => createElement("div", null, children);
   return {
@@ -46,7 +46,7 @@ vi.mock("react-native", () => {
   };
 });
 
-import { ProfileEditDialog } from "../components/profile-edit-dialog";
+import { ProfileEditDialog } from "../components/bots/profile-edit-dialog";
 
 it("preserves surrounding spaces when correcting a memory entry", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);

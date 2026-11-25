@@ -1,6 +1,25 @@
 import { describe, expect, it, vi } from "vitest";
 import { sendRoutineDelayAlert, shouldAlertDelayedRoutine } from "./routine-delay-alerts.js";
 
+const leases = vi.hoisted(() => new Set<string>());
+vi.mock("@rakazo/db", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@rakazo/db")>()),
+  withLease: async (
+    _prisma: unknown,
+    key: string,
+    _options: unknown,
+    work: (lease: { key: string; fence: number; signal: AbortSignal }) => Promise<unknown>,
+  ) => {
+    if (leases.has(key)) throw new Error("lease held");
+    leases.add(key);
+    try {
+      return await work({ key, fence: 1, signal: new AbortController().signal });
+    } finally {
+      leases.delete(key);
+    }
+  },
+}));
+
 describe("delayed routine alert episodes", () => {
   const now = new Date("2026-11-01T06:30:00Z");
   const row = {
@@ -8,8 +27,7 @@ describe("delayed routine alert episodes", () => {
     delayAlertsEnabled: true,
     nextRunAt: new Date("2026-11-01T06:20:00Z"),
     delayAlertSchedule: null,
-    delayAlertClaimedAt: null,
-    delayAlertSentAt: null,
+    delayAlertCooldownAt: null,
     delayAlertResult: null,
   };
   it("requires an enabled, active schedule past its grace period", () => {
@@ -21,7 +39,7 @@ describe("delayed routine alert episodes", () => {
     ).toBe(false);
   });
   it("deduplicates an episode and retries failures only after cooldown", () => {
-    const episode = { ...row, delayAlertSchedule: row.nextRunAt, delayAlertClaimedAt: now };
+    const episode = { ...row, delayAlertSchedule: row.nextRunAt, delayAlertCooldownAt: now };
     expect(shouldAlertDelayedRoutine({ ...episode, delayAlertResult: "sent" }, now)).toBe(false);
     expect(shouldAlertDelayedRoutine({ ...episode, delayAlertResult: "failed" }, now)).toBe(false);
     expect(
@@ -35,7 +53,7 @@ describe("delayed routine alert episodes", () => {
     const previous = {
       ...row,
       delayAlertSchedule: null,
-      delayAlertSentAt: now,
+      delayAlertCooldownAt: now,
       delayAlertResult: null,
     };
     expect(shouldAlertDelayedRoutine(previous, now)).toBe(false);
@@ -48,7 +66,7 @@ describe("delayed routine alert episodes", () => {
           ...row,
           delayAlertSchedule: new Date("2026-11-01T05:00:00Z"),
           delayAlertResult: "sent",
-          delayAlertSentAt: new Date("2026-11-01T05:05:00Z"),
+          delayAlertCooldownAt: new Date("2026-11-01T05:05:00Z"),
         },
         now,
       ),
@@ -56,15 +74,8 @@ describe("delayed routine alert episodes", () => {
   });
 });
 
-it("claims one delivery across concurrent detectors and records a delivery failure", async () => {
-  let claimed = false;
-  const updateMany = vi.fn(async (args: { data: { delayAlertResult: string } }) => {
-    if (args.data.delayAlertResult === "pending") {
-      if (claimed) return { count: 0 };
-      claimed = true;
-    }
-    return { count: 1 };
-  });
+it("leases one delivery across concurrent detectors and records a delivery failure", async () => {
+  const updateMany = vi.fn().mockResolvedValue({ count: 1 });
   const deliver = vi.fn(async () => {
     throw new Error("offline");
   });
@@ -77,15 +88,15 @@ it("claims one delivery across concurrent detectors and records a delivery failu
     name: "Report",
     nextRunAt: new Date("2026-11-01T06:00:00Z"),
     delayAlertSchedule: null,
-    delayAlertClaimedAt: null,
-    delayAlertSentAt: null,
+    delayAlertCooldownAt: null,
     delayAlertResult: null,
   };
   const db = { routine: { updateMany, findFirst: vi.fn().mockResolvedValue({ id: "routine-1" }) } };
-  await Promise.all([
+  const deliveries = await Promise.allSettled([
     sendRoutineDelayAlert(db as never, deliver, row, new Date("2026-11-01T06:10:00Z")),
     sendRoutineDelayAlert(db as never, deliver, row, new Date("2026-11-01T06:10:00Z")),
   ]);
+  expect(deliveries.filter((delivery) => delivery.status === "fulfilled")).toHaveLength(1);
   expect(deliver).toHaveBeenCalledTimes(1);
   expect(updateMany).toHaveBeenCalledWith(
     expect.objectContaining({ data: expect.objectContaining({ delayAlertResult: "failed" }) }),
@@ -109,8 +120,7 @@ it("does not send after a pause or schedule change wins the claim race", async (
     name: "Report",
     nextRunAt: new Date("2026-11-01T06:00:00Z"),
     delayAlertSchedule: null,
-    delayAlertClaimedAt: null,
-    delayAlertSentAt: null,
+    delayAlertCooldownAt: null,
     delayAlertResult: null,
   };
   await sendRoutineDelayAlert(db as never, deliver, row, new Date("2026-11-01T06:10:00Z"));

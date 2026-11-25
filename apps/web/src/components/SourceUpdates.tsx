@@ -3,10 +3,9 @@ import { Trans, useLingui } from "@lingui/react/macro";
 import type { SourceUpdatePreview, SourceUpdateState } from "@rakazo/contracts";
 import { Button, SectionHeading } from "@rakazo/ui-web";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { rpc } from "../lib/rpc";
+import { rpc } from "../lib/query/rpc";
+import { useEventListener } from "../lib/use-event-listener";
 
-const POLL_INTERVAL_MS = 1_500;
-const MAX_CONFIRMATION_POLLS = 30;
 type ReviewedUpdate = {
   currentCommit: string;
   targetCommit: string;
@@ -21,18 +20,11 @@ export function SourceUpdates() {
   const [checking, setChecking] = useState(false);
   const [applying, setApplying] = useState(false);
   const [awaitingConfirmation, setAwaitingConfirmation] = useState(false);
+  const [refreshingState, setRefreshingState] = useState(false);
   const [statusError, setStatusError] = useState<string | null>(null);
   const [checkError, setCheckError] = useState<string | null>(null);
   const [applyError, setApplyError] = useState<string | null>(null);
-  const runStateRef = useRef(runState);
-  const awaitingRef = useRef(awaitingConfirmation);
-  const applyingRef = useRef(applying);
   const reviewedUpdateRef = useRef<ReviewedUpdate | null>(null);
-  const confirmationPolls = useRef(0);
-
-  runStateRef.current = runState;
-  awaitingRef.current = awaitingConfirmation;
-  applyingRef.current = applying;
 
   const matchesReviewedUpdate = useCallback((state: SourceUpdateState) => {
     const reviewed = reviewedUpdateRef.current;
@@ -53,7 +45,7 @@ export function SourceUpdates() {
         const next = await rpc.sourceUpdates.state();
         setRunState(next);
         setStatusError(null);
-        if (awaitingRef.current && matchesReviewedUpdate(next)) {
+        if (matchesReviewedUpdate(next)) {
           setAwaitingConfirmation(false);
           setApplyError(null);
         }
@@ -69,40 +61,18 @@ export function SourceUpdates() {
   useEffect(() => {
     void refreshState(true);
   }, [refreshState]);
+  useEventListener(typeof window === "undefined" ? undefined : window, "focus", () => {
+    void refreshState();
+  });
 
-  useEffect(() => {
-    if (!runState?.running && !awaitingConfirmation && !applying) return;
-    let stopped = false;
-    let timer: ReturnType<typeof setTimeout>;
-    const poll = async () => {
-      const next = await refreshState();
-      if (stopped) return;
-      if (awaitingRef.current) {
-        confirmationPolls.current += 1;
-        if (!next && confirmationPolls.current >= MAX_CONFIRMATION_POLLS) {
-          setAwaitingConfirmation(false);
-          setApplyError(
-            t`Could not confirm whether the update started. Check again before retrying.`,
-          );
-        } else if (next && !matchesReviewedUpdate(next)) {
-          if (confirmationPolls.current >= MAX_CONFIRMATION_POLLS) {
-            setAwaitingConfirmation(false);
-            setApplyError(
-              t`Could not confirm whether the update started. Check again before retrying.`,
-            );
-          }
-        }
-      }
-      if (runStateRef.current?.running || awaitingRef.current || applyingRef.current) {
-        timer = setTimeout(poll, POLL_INTERVAL_MS);
-      }
-    };
-    timer = setTimeout(poll, POLL_INTERVAL_MS);
-    return () => {
-      stopped = true;
-      clearTimeout(timer);
-    };
-  }, [runState?.running, awaitingConfirmation, applying, matchesReviewedUpdate, refreshState, t]);
+  async function refreshStatus() {
+    setRefreshingState(true);
+    try {
+      await refreshState();
+    } finally {
+      setRefreshingState(false);
+    }
+  }
 
   async function check() {
     if (checking || applying || runState?.running || awaitingConfirmation) return;
@@ -142,7 +112,6 @@ export function SourceUpdates() {
       forkCommit: preview.forkCommit,
       previousRunStartedAt: runState?.lastRun?.startedAt ?? null,
     };
-    confirmationPolls.current = 0;
     setApplying(true);
     setPreview(null);
     setCheckError(null);
@@ -157,6 +126,11 @@ export function SourceUpdates() {
       setRunState({ running: run.finishedAt === null, lastRun: run });
     } catch {
       setAwaitingConfirmation(true);
+      const next = await refreshState();
+      if (next && matchesReviewedUpdate(next)) {
+        setAwaitingConfirmation(false);
+        setApplyError(null);
+      }
     } finally {
       setApplying(false);
     }
@@ -199,12 +173,19 @@ export function SourceUpdates() {
         </p>
       ) : awaitingConfirmation ? (
         <p role="status" className="mt-3 text-sm text-muted-foreground">
-          <Trans>Checking whether the update started…</Trans>
+          <Trans>Update status is unconfirmed.</Trans>
         </p>
       ) : applying && (!runState?.lastRun || !matchesReviewedUpdate(runState)) ? (
         <p role="status" className="mt-3 text-sm text-muted-foreground">
           <Trans>Applying the reviewed update…</Trans>
         </p>
+      ) : null}
+      {runState?.running || awaitingConfirmation ? (
+        <div className="mt-3 flex justify-end">
+          <Button variant="outline" disabled={refreshingState} onClick={() => void refreshStatus()}>
+            {refreshingState ? <Trans>Checking…</Trans> : <Trans>Refresh status</Trans>}
+          </Button>
+        </div>
       ) : null}
       {runState?.lastRun &&
       !runState.running &&
@@ -309,11 +290,11 @@ function Preview({ preview }: { preview: SourceUpdatePreview }) {
             <Trans>Review changes</Trans>
           </summary>
           <div className="mt-3 flex flex-col gap-3 text-muted-foreground">
-            <p>
-              {preview.commitCount > 0 ? commitCount : t`No commits`}
-              {preview.fileCount > 0 ? ` · ${fileCount}` : ""}
-              {preview.branch ? ` · ${preview.branch}` : ""}
-            </p>
+            <div>
+              <p>{preview.commitCount > 0 ? commitCount : t`No commits`}</p>
+              {preview.fileCount > 0 ? <p>{fileCount}</p> : null}
+              {preview.branch ? <p>{preview.branch}</p> : null}
+            </div>
             {preview.currentCommit && preview.targetCommit ? (
               <p className="font-mono text-xs">
                 <Trans>Current</Trans> {preview.currentCommit.slice(0, 8)} → <Trans>Target</Trans>{" "}

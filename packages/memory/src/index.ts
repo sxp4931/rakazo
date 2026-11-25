@@ -11,7 +11,7 @@ import type {
   MemoryStore,
   PortableFile,
 } from "@rakazo/adapter-kit";
-import { MEMORY_REVISION_CONFLICT_ERROR } from "@rakazo/adapter-kit";
+import { MemoryRevisionConflictError } from "@rakazo/adapter-kit";
 import type { PrismaClient } from "@rakazo/db";
 import { Prisma, withTransactionRetry } from "@rakazo/db";
 
@@ -86,13 +86,13 @@ export class MarkdownMemoryStore implements MemoryStore {
           });
           if (request.expectedRevision !== undefined) {
             const live = existing?.revision ?? 0;
-            if (live !== request.expectedRevision) throw new Error(MEMORY_REVISION_CONFLICT_ERROR);
+            if (live !== request.expectedRevision) throw new MemoryRevisionConflictError();
           }
           if (
             request.expectedDocumentId !== undefined &&
             existing?.id !== request.expectedDocumentId
           )
-            throw new Error(MEMORY_REVISION_CONFLICT_ERROR);
+            throw new MemoryRevisionConflictError();
           // Seeded documents may not have a history row until their first save.
           if (existing) {
             await tx.memoryRevision.createMany({

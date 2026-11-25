@@ -3,34 +3,43 @@ import {
   canonicalPiProviderId,
   compatibleEndpointPresets,
   OPENAI_COMPATIBLE_PROVIDER_ID,
+  providerDisplayName,
   savedCompatibleEndpointMatches,
 } from "@rakazo/contracts";
-import { popularModelProvidersFirst } from "@rakazo/core";
+import { isFirstModelConnection, popularModelProvidersFirst } from "@rakazo/core";
 import { fetchFresh } from "@rakazo/core/query";
+import { localizeModelEntry } from "@rakazo/i18n/model-provider";
+import { bestEffort } from "@rakazo/logging/best-effort";
 import { isCancelledError, useQuery } from "@tanstack/react-query";
 import type { Href } from "expo-router";
 import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ActivityIndicator, ScrollView, StyleSheet, Text } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { LoadFailure } from "../../components/load-failure";
-import { ModelProviders } from "../../components/model-providers";
-import type { ConnectableProvider, ModelConnectIntent } from "../../components/model-role-settings";
-import { ModelRoleSettings } from "../../components/model-role-settings";
-import { SpaceBotsModel } from "../../components/space-bots-model";
-// Connections belong to the account, so renaming and removing them go to the selected Space.
-import { rpc } from "../../lib/api";
-import { mobileTokens } from "../../lib/appearance";
-import type { MobileBot, MobileModel, MobileModelCredential } from "../../lib/mobile-types";
-import type { ModelConnectionRequest } from "../../lib/model-connection-request";
-import { closeModelConnection, openModelConnection } from "../../lib/model-connection-request";
-import type { ModelPickerRequest } from "../../lib/model-picker-selection";
-import { closeModelPicker, openModelPicker } from "../../lib/model-picker-selection";
-import { native, useThemedStyles } from "../../lib/native";
-import { queryClient, rpcQuery } from "../../lib/query";
-import { settingsTarget } from "../../lib/settings-target";
-import { useSideInsets } from "../../lib/side-insets";
-import { errorText } from "../../lib/user-error";
+import { MediaModelSettings } from "../../components/models/media-model-settings";
+import { ModelProviders } from "../../components/models/model-providers";
+import type {
+  ConnectableProvider,
+  ModelConnectIntent,
+} from "../../components/models/model-role-settings";
+import { ModelRoleSettings } from "../../components/models/model-role-settings";
+import { SpaceBotsModel } from "../../components/settings/space-bots-model";
+import { LoadFailure } from "../../components/ui/load-failure";
+import type { MobileBot, MobileModel, MobileModelCredential } from "../../lib/api/mobile-types";
+import { errorText } from "../../lib/api/user-error";
+import { mobileTokens } from "../../lib/appearance/appearance";
+import { useSideInsets } from "../../lib/layout/side-insets";
+import type { ModelConnectionRequest } from "../../lib/models/model-connection-request";
+import {
+  closeModelConnection,
+  openModelConnection,
+} from "../../lib/models/model-connection-request";
+import type { ModelPickerRequest } from "../../lib/models/model-picker-selection";
+import { closeModelPicker, openModelPicker } from "../../lib/models/model-picker-selection";
+import { native, useThemedStyles } from "../../lib/native/native";
+import type { SaveSend } from "../../lib/query/query";
+import { queryClient, rpcQuery, useSave } from "../../lib/query/query";
+import { ACCOUNT_SETTINGS, settingsTarget } from "../../lib/query/settings-target";
 
 const noModels: MobileModel[] = [];
 const noCredentials: MobileModelCredential[] = [];
@@ -65,7 +74,8 @@ export default function Models() {
   const bots =
     useQuery({ ...rpcQuery("bots/list", undefined, spaceId), enabled: false }, queryClient).data ??
     noBots;
-  const [error, setError] = useState<string | null>(null);
+  const mediaRead = rpcQuery("models/media", { scope: target.scope }, spaceId);
+  const media = useQuery({ ...mediaRead, enabled: false }, queryClient).data ?? null;
   const [loadError, setLoadError] = useState<string | null>(null);
   const openedRef = useRef(false);
   const pickerRequestRef = useRef<string | null>(null);
@@ -96,6 +106,13 @@ export default function Models() {
           fetchFresh(queryClient, rpcQuery("bots/list", undefined, spaceId), { reuse }).catch(
             () => undefined,
           ),
+          // Without it only the image and video model rows are missing.
+          bestEffort(
+            "read the image and video models",
+            fetchFresh(queryClient, rpcQuery("models/media", { scope: target.scope }, spaceId), {
+              reuse,
+            }),
+          ),
         ]);
         setLoadError(null);
       } catch (err) {
@@ -103,7 +120,7 @@ export default function Models() {
         if (!isCancelledError(err)) setLoadError(errorText(err, t`Could not load model settings`));
       }
     },
-    [spaceId, t],
+    [spaceId, target.scope, t],
   );
 
   useFocusEffect(
@@ -165,13 +182,13 @@ export default function Models() {
     });
 
   /** Every provider, popular first, plus the hosted presets of the compatible one. */
-  const allProviders = useMemo(() => {
+  const allProviders = (() => {
     const grouped = new Map<string, ConnectableProvider>();
     for (const entry of catalog) {
       if (grouped.has(entry.provider)) continue;
       grouped.set(entry.provider, {
         id: entry.provider,
-        name: entry.providerName ?? entry.provider,
+        name: providerDisplayName(localizeModelEntry(entry)),
       });
     }
     const all = [...grouped.values()];
@@ -182,10 +199,10 @@ export default function Models() {
       (provider) => provider.id,
       (provider) => provider.name,
     );
-  }, [catalog]);
+  })();
 
   // Deployment-funded providers stay listed so people can still add their own key.
-  const providers = useMemo(() => {
+  const providers = (() => {
     const connected = new Set(credentials.map((entry) => canonicalPiProviderId(entry.provider)));
     const savedPreset = (baseUrl: string) =>
       credentials.some(
@@ -198,7 +215,7 @@ export default function Models() {
         ? !savedPreset(provider.baseUrl)
         : !connected.has(canonicalPiProviderId(provider.id)),
     );
-  }, [allProviders, credentials]);
+  })();
 
   const providerKey = (provider: ConnectableProvider) =>
     `connect:${provider.id}:${provider.baseUrl ?? ""}`;
@@ -228,18 +245,30 @@ export default function Models() {
     });
   }
 
-  async function changeConnection(action: () => Promise<unknown>, failure: string) {
-    try {
-      await action();
-      setError(null);
-    } catch (err) {
-      setError(errorText(err, failure));
-    }
-    await load();
+  // Connections belong to the account, so renaming and removing them go to the selected Space.
+  const connectionChange = useSave({
+    target: ACCOUNT_SETTINGS,
+    save: async (
+      input: { action: (send: SaveSend) => Promise<unknown>; failure: string },
+      send,
+    ) => {
+      await input.action(send);
+    },
+    onSaved: () => load(),
+    onFailed: () => load(),
+  });
+  const error = connectionChange.error
+    ? errorText(connectionChange.error, connectionChange.input?.failure)
+    : null;
+  function changeConnection(action: (send: SaveSend) => Promise<unknown>, failure: string) {
+    connectionChange.run({ action, failure });
   }
 
   // Only the first visit waits; a revisit paints what it saw last and refreshes behind it.
-  if (!me && !loadError) {
+  if (
+    (!me || (me.needsModel && target.scope === "account" && credentials === noCredentials)) &&
+    !loadError
+  ) {
     return (
       <SafeAreaView edges={["bottom"]} style={[styles.screen, styles.centered]}>
         <ActivityIndicator color={native.secondaryLabel} />
@@ -249,6 +278,7 @@ export default function Models() {
 
   const failure = error ?? loadError;
   const shownError = error ?? (me ? loadError : null);
+  const firstConnection = isFirstModelConnection(target.scope, me?.needsModel, credentials.length);
   const shared = {
     credentials,
     providers,
@@ -272,7 +302,7 @@ export default function Models() {
           <LoadFailure
             message={failure}
             onRetry={() => {
-              setError(null);
+              connectionChange.reset();
               setLoadError(null);
               void load();
             }}
@@ -287,42 +317,56 @@ export default function Models() {
             <ModelRoleSettings
               {...shared}
               modelRole="main"
-              title={t`Main model`}
-              defaultLabel={t`Choose a model`}
+              title={firstConnection ? t`Connect a model` : t`Main model`}
+              hideHeading={firstConnection}
+              defaultLabel={firstConnection ? t`Connect a model` : t`Choose a model`}
               onChanged={() => void load()}
             />
             {me.needsModel ? null : (
               <SpaceBotsModel bots={bots} spaceId={spaceId} onSwitched={() => load()} />
             )}
-            <ModelRoleSettings
-              {...shared}
-              modelRole="approval"
-              title={t`Approval model`}
-              defaultLabel={t`Choose a model`}
-            />
-            <ModelRoleSettings
-              {...shared}
-              modelRole="computer"
-              title={t`Computer-use model`}
-              defaultLabel={t`Same as main model`}
-            />
+            {firstConnection ? null : (
+              <ModelRoleSettings
+                {...shared}
+                modelRole="approval"
+                title={t`Approval model`}
+                defaultLabel={t`Choose a model`}
+              />
+            )}
+            {firstConnection ? null : (
+              <ModelRoleSettings
+                {...shared}
+                modelRole="computer"
+                title={t`Computer-use model`}
+                defaultLabel={t`Same as main model`}
+              />
+            )}
+            {media && !firstConnection ? (
+              <MediaModelSettings
+                view={media}
+                target={target}
+                scope={target.scope}
+                readKey={mediaRead.queryKey}
+                openPicker={pushModelPicker}
+              />
+            ) : null}
             {/* Connections are the account's in every Space, so a Space's override lists only its models. */}
-            {target.scope === "account" ? (
+            {target.scope === "account" && !firstConnection ? (
               <ModelProviders
                 catalog={catalog}
                 credentials={credentials}
                 onManage={manage}
                 onAdd={addProvider}
                 onRename={(credential, label) =>
-                  void changeConnection(
-                    () => rpc("models/rename", { credentialId: credential.id, label }),
+                  changeConnection(
+                    (send) => send("models/rename", { credentialId: credential.id, label }),
                     t`Could not update name`,
                   )
                 }
                 onDisconnect={(credential) =>
-                  void changeConnection(
-                    () =>
-                      rpc("models/disconnect", {
+                  changeConnection(
+                    (send) =>
+                      send("models/disconnect", {
                         provider: credential.provider,
                         credentialId: credential.id,
                       }),

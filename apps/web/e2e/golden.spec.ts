@@ -1,16 +1,18 @@
 import type { Page } from "@playwright/test";
 import { expect, test } from "@playwright/test";
 import { CONNECTION_LABEL_MAX_LENGTH } from "@rakazo/contracts";
+import { deferred } from "@rakazo/core/test-async";
 import {
   activeBotId,
   captureScreenshot,
+  chooseOption,
   completeOnboarding,
-  openBotPanelTab,
+  openBotPanel,
   openEmailSignIn,
   realSandboxTimeout,
   rpc,
   signup,
-} from "./helpers";
+} from "./helpers/helpers";
 
 function sidebarBotButton(page: Page, name: RegExp | string) {
   return page.locator("[data-sidebar-group] [data-roster-bot-id]").filter({
@@ -65,15 +67,15 @@ test("takeover, routine, plugins, and export are reachable", async ({ page }, te
       message: "the second protected-input run must be ready for takeover",
     })
     .toBe("waiting_takeover");
-  // Reopen the computer tab so Open sees a refreshed computer status.
+  // Reopen the bot panel so Open sees a refreshed computer status.
   const sidePanel = page.getByTestId("side-panel");
   const pill = page.getByTestId("bot-settings-trigger");
   if ((await pill.getAttribute("aria-expanded")) === "true") {
     await pill.click();
     await expect(sidePanel).toHaveAttribute("data-panel", "closed");
   }
-  await openBotPanelTab(page, "Computer");
-  await expect(sidePanel).toHaveAttribute("data-panel", "computer");
+  await openBotPanel(page);
+  await expect(sidePanel).toHaveAttribute("data-panel", "settings");
   await expect(sidePanel).toHaveCSS("width", "384px");
   const [mainBox, panelBox] = await Promise.all([
     page.locator("main").boundingBox(),
@@ -99,8 +101,8 @@ test("takeover, routine, plugins, and export are reachable", async ({ page }, te
   });
   await captureScreenshot(page, testInfo, "09a-computer-takeover-skipped");
 
-  await openBotPanelTab(page, "Routines");
-  await page.getByRole("button", { name: "Create Routine" }).click();
+  await openBotPanel(page);
+  await page.getByTestId("routine-create-button").click();
   await page.locator("label:has-text('Name') input").fill("Monday briefing");
   await page
     .locator("label:has-text('Instruction') textarea")
@@ -114,8 +116,8 @@ test("takeover, routine, plugins, and export are reachable", async ({ page }, te
   await page.getByRole("button", { name: "Save" }).click();
   await savedRoutine;
   await expect(page.getByRole("button", { name: "Save" })).toBeEnabled();
-  await page.getByRole("button", { name: "Back" }).click();
-  await expect(page.getByText("Monday briefing")).toBeVisible();
+  await page.getByRole("button", { name: "Back", exact: true }).click();
+  await expect(page.getByText("Monday briefing", { exact: true })).toBeVisible();
   await captureScreenshot(page, testInfo, "10-routine-created");
 
   let releaseCatalog!: () => void;
@@ -153,7 +155,7 @@ test("takeover, routine, plugins, and export are reachable", async ({ page }, te
   const gmailRow = featured
     .getByText("Gmail", { exact: true })
     .locator("xpath=ancestor::*[.//button][1]");
-  await gmailRow.getByRole("button", { name: "Add", exact: true }).click();
+  await gmailRow.getByRole("button", { name: "Add Gmail", exact: true }).click();
   await expect(gmailRow.getByRole("button", { name: "Added", exact: true })).toBeVisible();
   await expect(page.getByTestId("connection-tile-gmail")).toBeVisible();
   await captureScreenshot(page, testInfo, "11a-connected-plugins");
@@ -191,11 +193,13 @@ test("takeover, routine, plugins, and export are reachable", async ({ page }, te
   await expect(detail.getByLabel("Account label").nth(1)).toHaveValue(accountName);
   await captureScreenshot(page, testInfo, "11a2-multi-account-plugins");
 
-  await page
-    .getByTestId("connection-tools")
-    .getByText(/tools?$/)
-    .click();
-  await expect(detail.getByText("Send email", { exact: true })).toBeVisible();
+  await expect(detail.getByText("Send email", { exact: true })).toBeHidden();
+  await detail.getByRole("button", { name: "Other actions", exact: true }).click();
+  const permission = detail.getByRole("combobox", { name: "Send email", exact: true });
+  await expect(permission).toHaveText("Default");
+  await permission.click();
+  await page.getByRole("option", { name: "Block", exact: true }).click();
+  await expect(permission).toHaveText("Block");
   await captureScreenshot(page, testInfo, "11a3-plugin-tools");
 
   await page.getByRole("button", { name: "Close integrations" }).click();
@@ -210,31 +214,70 @@ test("takeover, routine, plugins, and export are reachable", async ({ page }, te
 
   await detailAgain.getByRole("button", { name: "Remove", exact: true }).last().click();
   await expect(detailAgain.getByLabel("Account label")).toHaveCount(1);
+  await detailAgain.getByRole("button", { name: "Other actions", exact: true }).click();
+  const reopenedPermission = detailAgain.getByRole("combobox", { name: "Send email", exact: true });
+  await expect(reopenedPermission).toHaveText("Block");
+  await reopenedPermission.click();
+  await page.getByRole("option", { name: "Default", exact: true }).click();
+  await expect(reopenedPermission).toHaveText("Default");
+
   await detailAgain.getByRole("button", { name: "Uninstall", exact: true }).click();
   await expect(page.getByTestId("connection-detail")).toHaveCount(0);
   const gmailRowEmpty = page
     .getByTestId("featured-connectors")
     .getByText("Gmail", { exact: true })
     .locator("xpath=ancestor::*[.//button][1]");
-  await expect(gmailRowEmpty.getByRole("button", { name: "Add", exact: true })).toBeVisible();
+  await expect(gmailRowEmpty.getByRole("button", { name: "Add Gmail", exact: true })).toBeVisible();
   await captureScreenshot(page, testInfo, "11b-connected-plugins-empty");
 
   const linearRow = page
     .getByText("Linear", { exact: true })
     .locator("xpath=ancestor::*[.//button][1]");
   const connectPopup = page.waitForEvent("popup");
-  await linearRow.getByRole("button", { name: "Add", exact: true }).click();
+  await linearRow.getByRole("button", { name: "Add Linear", exact: true }).click();
   const popup = await connectPopup;
   await popup.close();
   await expect(linearRow.getByRole("button", { name: "Added", exact: true })).toBeVisible();
-  await linearRow.getByRole("button", { name: "Added", exact: true }).click();
+  // This is Linear's first detail open, so a cached successful read cannot bypass the mock.
+  const toolsRoute = "**/rpc/connections/tools";
+  const toolsResponse = deferred<void>();
+  await page.route(toolsRoute, async (route) => {
+    if (route.request().postDataJSON()?.json?.provider !== "linear") {
+      await route.fallback();
+      return;
+    }
+    await toolsResponse.promise;
+    await route.fulfill({
+      status: 500,
+      json: {
+        json: {
+          defined: false,
+          code: "INTERNAL_SERVER_ERROR",
+          status: 500,
+          message: "Internal server error",
+        },
+      },
+    });
+  });
   const linearDetail = page.getByTestId("connection-detail");
-  await expect(linearDetail).toBeVisible();
+  try {
+    await linearRow.getByRole("button", { name: "Added", exact: true }).click();
+    await expect(
+      linearDetail.getByRole("status", { name: "Loading tool permissions…" }),
+    ).toBeVisible();
+    await captureScreenshot(page, testInfo, "11b2-plugin-tools-loading");
+  } finally {
+    toolsResponse.resolve();
+  }
+  await expect(linearDetail.getByRole("alert")).toHaveText("Could not load permissions");
+  await expect(linearDetail.getByTestId("connection-tools")).toBeHidden();
+  await captureScreenshot(page, testInfo, "11b3-plugin-tools-unavailable");
+  await page.unroute(toolsRoute);
   await linearDetail.getByRole("button", { name: "Uninstall", exact: true }).click();
   await expect(page.getByTestId("connection-detail")).toHaveCount(0);
-  await expect(linearRow.getByRole("button", { name: "Add", exact: true })).toBeVisible();
+  await expect(linearRow.getByRole("button", { name: "Add Linear", exact: true })).toBeVisible();
 
-  // Custom sources live behind one menu: GitHub, then MCP → OpenAPI → GraphQL → Executor.
+  // The Add menu lists custom source kinds before the direct MCP presets.
   await page.getByRole("button", { name: "Add custom", exact: true }).click();
   const addItems = page.getByRole("menuitem");
   await expect(addItems).toHaveText([
@@ -242,6 +285,9 @@ test("takeover, routine, plugins, and export are reachable", async ({ page }, te
     "MCP server",
     "OpenAPI",
     "GraphQL",
+    "GitHub",
+    "Linear",
+    "Notion",
     "Executor",
     "Browse MCP servers",
     "Search by domain",
@@ -264,13 +310,16 @@ test("takeover, routine, plugins, and export are reachable", async ({ page }, te
   await feed.getByRole("textbox", { name: "Integration domain" }).fill("github.com");
   await feed.getByRole("button", { name: "Search", exact: true }).click();
   await expect(feed.getByText("GitHub", { exact: true })).toBeVisible();
+  // The failure and empty-answer live regions stay mounted, and stay silent while results show.
+  await expect(feed.getByRole("alert")).toBeEmpty();
+  await expect(feed.getByRole("status")).toBeEmpty();
   await captureScreenshot(page, testInfo, "11c-catalog-feed");
 
   await feed.getByRole("button", { name: "MCP Add", exact: true }).click();
   const form = page.getByTestId("integrations-source-form");
   await expect(form.getByLabel("Name", { exact: true })).toHaveValue("GitHub");
   await expect(form.getByLabel("URL", { exact: true })).toHaveValue("https://mcp.example.test/mcp");
-  await expect(form.getByLabel("Authentication", { exact: true })).toHaveValue("bearer");
+  await expect(form.getByLabel("Authentication", { exact: true })).toHaveText("Bearer token");
   await form.getByRole("button", { name: "Back", exact: true }).click();
   await expect(page.getByTestId("integrations-catalog-feed")).toBeVisible();
   await page
@@ -293,15 +342,26 @@ test("takeover, routine, plugins, and export are reachable", async ({ page }, te
   await addSource("OpenAPI");
   await form.getByLabel("Name", { exact: true }).fill("Browser API");
   await form.getByLabel("URL", { exact: true }).fill("https://api.example.test/openapi.json");
-  await form.getByLabel("Authentication", { exact: true }).selectOption("bearer");
+  await chooseOption(form.getByLabel("Authentication", { exact: true }), "Bearer token");
   await form.getByLabel("Credential", { exact: true }).fill("fake-openapi-browser-credential");
   await form.getByRole("button", { name: "Verify and add", exact: true }).click();
   await expect(toolSources.getByText(/OpenAPI\s*https:\/\/api\.example\.test\/v1/)).toBeVisible();
 
+  // Executor signs in on its hosted address (editable for a self-hosted one); no token to paste.
   await addSource("Executor");
   await expect(form.getByLabel("Name", { exact: true })).toHaveValue("Executor");
+  await expect(form.getByLabel("URL", { exact: true })).toHaveValue("https://mcp.executor.sh/mcp");
+  await expect(form.getByLabel("Bearer token", { exact: true })).toHaveCount(0);
+  await expect(form.getByRole("button", { name: "Save and sign in", exact: true })).toBeVisible();
+  await captureScreenshot(page, testInfo, "11c-executor-sign-in");
+  await form.getByRole("button", { name: "Back", exact: true }).click();
+
+  // An Executor access token still connects as an ordinary MCP server.
+  await addSource("MCP server");
+  await form.getByLabel("Name", { exact: true }).fill("Executor");
   await form.getByLabel("URL", { exact: true }).fill("https://executor.example.test/mcp");
-  await form.getByLabel("Bearer token", { exact: true }).fill("fake-executor-browser-credential");
+  await chooseOption(form.getByLabel("Authentication", { exact: true }), "Bearer token");
+  await form.getByLabel("Credential", { exact: true }).fill("fake-executor-browser-credential");
   await form.getByRole("button", { name: "Verify and add", exact: true }).click();
   await expect(toolSources.getByText(/MCP\s*https:\/\/executor\.example\.test\/mcp/)).toBeVisible();
   await captureScreenshot(page, testInfo, "11d-provider-emulators");
@@ -313,14 +373,22 @@ test("takeover, routine, plugins, and export are reachable", async ({ page }, te
   await expect(
     toolSources.getByText(/GraphQL\s*https:\/\/graphql\.example\.test\/graphql/),
   ).toBeVisible();
+  // Each Remove button is described by its own source name, so identical buttons tell apart.
+  await expect(
+    toolSources
+      .getByTestId("tool-source")
+      .filter({ hasText: "Browser API" })
+      .getByRole("button", { name: "Remove", exact: true }),
+  ).toHaveAccessibleDescription("Browser API");
   await captureScreenshot(page, testInfo, "02-graphql-installed");
 
   await page.getByRole("button", { name: "Close integrations" }).click();
 
   await page.getByText("Chief").first().click();
-  await openBotPanelTab(page, "Advanced");
+  await openBotPanel(page);
   const downloadPromise = page.waitForEvent("download");
-  await page.getByRole("button", { name: "Export" }).click();
+  await page.getByRole("button", { name: "More actions" }).click();
+  await page.getByRole("menuitem", { name: "Export" }).click();
   const download = await downloadPromise;
   expect(download.suggestedFilename()).toMatch(/chief-export\.json/i);
   await page.getByRole("button", { name: "Close panel" }).click();
@@ -345,9 +413,12 @@ test("sign-in, spawn, and stop work in the shell", async ({ page }, testInfo) =>
     if (message.type() === "error") browserErrors.push(message.text());
   });
   page.on("requestfailed", (request) => {
-    // Leaving a page closes the live streams it held open.
+    // Leaving a page closes its live streams. A live signal replaces any in-flight account read.
+    const pathname = new URL(request.url()).pathname;
     if (
-      request.url().includes("/rpc/notifications/subscribe") &&
+      (pathname === "/rpc/notifications/subscribe" ||
+        pathname === "/rpc/notifications/subscribeCalls" ||
+        pathname === "/rpc/me") &&
       request.failure()?.errorText === "net::ERR_ABORTED"
     )
       return;

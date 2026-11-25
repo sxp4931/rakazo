@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 import type { SourceUpdatePreview, SourceUpdateRun } from "@rakazo/contracts";
-import { captureScreenshot, completeOnboarding, openUserSettings, signup } from "./helpers";
+import { captureScreenshot, completeOnboarding, openUserSettings, signup } from "./helpers/helpers";
 
 test("the owner can review and install a prepared source update", async ({ page }, testInfo) => {
   const currentCommit = "a".repeat(40);

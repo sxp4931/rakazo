@@ -88,11 +88,6 @@ else
   command -v curl >/dev/null 2>&1 || fail "'curl' is required."
 fi
 
-for command_name in docker openssl; do
-  command -v "$command_name" >/dev/null 2>&1 || fail "'$command_name' is required."
-done
-docker compose version >/dev/null 2>&1 || fail "the Docker Compose plugin is required."
-
 # Optional proxy knobs from an existing .env (operators often set them there for
 # containers). Do not override values already present in the shell. Treat each
 # HTTP/HTTPS/NO_PROXY pair as one family so either case in the shell wins.
@@ -190,6 +185,17 @@ prepare_proxy_env() {
 }
 prepare_proxy_env
 
+if ! command -v docker >/dev/null 2>&1 && [[ "$offline" != true && "$(uname -s)" == Linux ]]; then
+  [[ "$(id -u)" == 0 ]] || fail "'docker' is required. Run this installer as root to install it automatically, or install Docker Engine first."
+  echo "Installing Docker Engine with Docker's official script (https://get.docker.com)..."
+  curl -fsSL https://get.docker.com | sh || fail "could not install Docker Engine; install it and rerun."
+fi
+
+for command_name in docker openssl; do
+  command -v "$command_name" >/dev/null 2>&1 || fail "'$command_name' is required."
+done
+docker compose version >/dev/null 2>&1 || fail "the Docker Compose plugin is required."
+
 curl_download() {
   local url="$1"
   local out="$2"
@@ -258,8 +264,8 @@ create_env() {
       "SCREEN_PROXY_SECRET=")
         printf 'SCREEN_PROXY_SECRET=%s\n' "$(openssl rand -hex 32)"
         ;;
-      "SANDBOX_SUPERVISOR_TOKEN=")
-        printf 'SANDBOX_SUPERVISOR_TOKEN=%s\n' "$(openssl rand -hex 32)"
+      "SANDBOX_SUPERVISOR_TOKEN="|"RAKAZO_UPDATER_TOKEN=")
+        printf '%s=%s\n' "${line%%=*}" "$(openssl rand -hex 32)"
         ;;
       *)
         printf '%s\n' "$line"
@@ -334,7 +340,11 @@ YAML
 warn_unpassed_settings() {
   local key unpassed=""
   while IFS= read -r key; do
-    [[ "$key" == COMPOSE_* ]] || grep -qw -e "$key" "$COMPOSE_FILE" ${override_present:+"$OVERRIDE_FILE"} || unpassed+=" $key"
+    # Deployment tooling consumes these; they are deliberately absent from container environments.
+    case "$key" in
+      COMPOSE_*|RAKAZO_IMAGE_TAG_PREVIOUS|RAKAZO_COMPUTER_IMAGE_TAG_PREVIOUS) continue ;;
+    esac
+    grep -qw -e "$key" "$COMPOSE_FILE" ${override_present:+"$OVERRIDE_FILE"} || unpassed+=" $key"
   done < <(sed -nE 's/^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)=.*/\2/p' "$ENV_FILE" | sort -u)
   [[ -n "$unpassed" ]] || return 0
   echo "Warning: no container receives these .env settings:${unpassed}." >&2
@@ -380,18 +390,13 @@ configure_computer_egress() {
 }
 
 remove_replaced_images() {
-  local ref repo id tag repos=" "
+  local ref origin origins=" "
   while IFS= read -r ref; do
-    repo="${ref%@*}"
-    [[ "${repo##*/}" != *:* ]] || repo="${repo%:*}"
-    repo="${repo#docker.io/}"
-    repos+="${repo#library/} "
+    origin=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.source"}}' "$ref" 2>/dev/null) || continue
+    [[ -n "$origin" && "$origins" != *" ${origin} "* ]] || continue
+    origins+="${origin} "
+    docker image prune --force --filter "label=org.opencontainers.image.source=${origin}" >/dev/null 2>&1 || true
   done < <(docker compose --env-file "$ENV_FILE" "${compose_files[@]}" config --images 2>/dev/null)
-  [[ "$repos" != " " ]] || return 0
-  while read -r id repo tag; do
-    [[ "$tag" == "<none>" && "$repos" == *" ${repo} "* ]] || continue
-    docker image rm "$id" >/dev/null 2>&1 || true
-  done < <(docker image ls --no-trunc --format '{{.ID}} {{.Repository}} {{.Tag}}' 2>/dev/null)
 }
 
 for filename in "${required_files[@]}"; do

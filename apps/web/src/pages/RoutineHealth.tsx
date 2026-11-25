@@ -1,21 +1,23 @@
 import { Trans, useLingui } from "@lingui/react/macro";
+import { runStatusLabel } from "@rakazo/i18n/activity";
 import { Switch } from "@rakazo/ui-web";
 import { useQuery } from "@tanstack/react-query";
-import { useId, useState } from "react";
-import { useSpaceQueries } from "../lib/query";
-import { useSpaceRpc } from "../lib/space-rpc";
-import { statusLabel } from "./ActivityList";
+import { useId } from "react";
+import { useSave, useSpaceQueries } from "../lib/query/query";
 
 export function RoutineHealth({ routineId }: { routineId: string }) {
   const { i18n, t } = useLingui();
   const queries = useSpaceQueries();
-  const rpc = useSpaceRpc();
   const fieldId = useId();
-  const [saving, setSaving] = useState(false);
-  const [saveError, setSaveError] = useState(false);
+  const healthRead = queries.routines.health.queryOptions({ input: { routineId } });
   const health = useQuery({
-    ...queries.routines.health.queryOptions({ input: { routineId } }),
-    refetchInterval: 15_000,
+    ...healthRead,
+    refetchOnWindowFocus: "always",
+  });
+  const alerts = useSave({
+    save: (input: { field: "delayed" | "failure"; enabled: boolean }, rpc) =>
+      rpc.routines.setAlerts({ routineId, [input.field]: input.enabled }),
+    stale: [healthRead.queryKey],
   });
   if (health.isError)
     return (
@@ -26,18 +28,8 @@ export function RoutineHealth({ routineId }: { routineId: string }) {
   if (!health.data) return null;
   const date = (value: string) => new Date(value).toLocaleString(i18n.locale || "en");
   const { nextRunAt, delayed, lastAttempt, lastSuccessAt } = health.data;
-  async function setAlert(field: "delayed" | "failure", enabled: boolean) {
-    setSaving(true);
-    setSaveError(false);
-    try {
-      await rpc.routines.setAlerts({ routineId, [field]: enabled });
-      await health.refetch();
-    } catch {
-      setSaveError(true);
-    } finally {
-      setSaving(false);
-    }
-  }
+  const setAlert = (field: "delayed" | "failure", enabled: boolean) =>
+    alerts.run({ field, enabled });
   return (
     <section className="mt-6 space-y-1 text-sm text-muted-foreground" data-testid="routine-health">
       {nextRunAt ? (
@@ -56,7 +48,7 @@ export function RoutineHealth({ routineId }: { routineId: string }) {
       ) : null}
       {lastAttempt ? (
         <p>
-          <Trans>Last attempt</Trans>: {date(lastAttempt.at)} · {statusLabel(lastAttempt.status)}
+          <Trans>Last attempt</Trans>: {date(lastAttempt.at)} ({runStatusLabel(lastAttempt.status)})
         </p>
       ) : null}
       {lastSuccessAt ? (
@@ -73,8 +65,8 @@ export function RoutineHealth({ routineId }: { routineId: string }) {
           id={`${fieldId}-delay`}
           aria-label={t`Delay alerts`}
           checked={health.data.delayAlertsEnabled}
-          disabled={saving}
-          onCheckedChange={(value) => void setAlert("delayed", value)}
+          disabled={alerts.pending}
+          onCheckedChange={(value) => setAlert("delayed", value)}
         />
         <Trans>Delay alerts</Trans>
       </label>
@@ -88,8 +80,8 @@ export function RoutineHealth({ routineId }: { routineId: string }) {
           id={`${fieldId}-failure`}
           aria-label={t`Failure alerts`}
           checked={health.data.failureAlertsEnabled}
-          disabled={saving}
-          onCheckedChange={(value) => void setAlert("failure", value)}
+          disabled={alerts.pending}
+          onCheckedChange={(value) => setAlert("failure", value)}
         />
         <Trans>Failure alerts</Trans>
       </label>
@@ -103,7 +95,7 @@ export function RoutineHealth({ routineId }: { routineId: string }) {
           <Trans>Alert accepted; delivery not confirmed</Trans>
         </p>
       ) : null}
-      {saveError ? (
+      {alerts.error ? (
         <p role="alert">
           <Trans>Could not save</Trans>
         </p>

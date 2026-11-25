@@ -11,7 +11,7 @@ import {
 const url = process.env.DATABASE_URL;
 const database = process.env.VERIFY_DATABASE === "1" && url ? describe : describe.skip;
 
-database("routine delay claims (PostgreSQL)", () => {
+database("routine delay leases (PostgreSQL)", () => {
   let db: ReturnType<typeof createDb>;
   let system: PrismaClient;
   let identity: { userId: string; spaceId: string; botId: string; threadId: string };
@@ -21,12 +21,7 @@ database("routine delay claims (PostgreSQL)", () => {
     system = asSystem(db.prisma);
     const { userId, spaceId, botId, threadId } = await runAsSystem(
       "routine delay alert fixture",
-      () =>
-        provisionMessagingIdentity(
-          db.prisma,
-          { provider: "email", address },
-          { signupsEnabled: undefined, signupAllowlist: undefined },
-        ),
+      () => provisionMessagingIdentity(db.prisma, { provider: "email", address }),
     );
     identity = { userId, spaceId, botId, threadId };
   });
@@ -42,7 +37,7 @@ database("routine delay claims (PostgreSQL)", () => {
     }
   });
 
-  it("claims one alert across detectors and clears the episode after recovery", async () => {
+  it("leases one alert across detectors and clears the episode after recovery", async () => {
     const now = new Date("2026-11-01T06:30:00Z");
     const nextRunAt = new Date("2026-11-01T06:00:00Z");
     const row = await system.routine.create({
@@ -58,10 +53,11 @@ database("routine delay claims (PostgreSQL)", () => {
     });
     const deliver = vi.fn(async () => "delivered" as const);
     const alert = { ...row, threadId: identity.threadId };
-    await Promise.all([
+    const deliveries = await Promise.allSettled([
       sendRoutineDelayAlert(system, deliver, alert, now),
       sendRoutineDelayAlert(system, deliver, alert, now),
     ]);
+    expect(deliveries.filter((delivery) => delivery.status === "fulfilled")).toHaveLength(1);
     expect(deliver).toHaveBeenCalledTimes(1);
     expect(await system.routine.findUniqueOrThrow({ where: { id: row.id } })).toMatchObject({
       delayAlertResult: "sent",
@@ -75,7 +71,7 @@ database("routine delay claims (PostgreSQL)", () => {
     expect(await system.routine.findUniqueOrThrow({ where: { id: row.id } })).toMatchObject({
       delayAlertResult: null,
       delayAlertSchedule: null,
-      delayAlertSentAt: now,
+      delayAlertCooldownAt: now,
     });
   });
 
@@ -100,6 +96,7 @@ database("routine delay claims (PostgreSQL)", () => {
     );
     const saved = await system.routine.findUniqueOrThrow({ where: { id: row.id } });
     expect(saved.delayAlertResult).toBe("failed");
+    expect(saved.delayAlertCooldownAt).toEqual(now);
     expect(shouldAlertDelayedRoutine(saved, now)).toBe(false);
     expect(shouldAlertDelayedRoutine(saved, new Date(now.getTime() + 60 * 60_000))).toBe(true);
   });

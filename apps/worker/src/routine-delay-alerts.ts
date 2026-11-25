@@ -1,7 +1,8 @@
-import { sendRoutineDelayAlert, shouldAlertDelayedRoutine } from "@rakazo/adapters";
 import type { AdapterContext, NotificationMessage } from "@rakazo/adapter-kit";
+import { sendRoutineDelayAlert, shouldAlertDelayedRoutine } from "@rakazo/adapters";
 import { ROUTINE_DELAY_GRACE_MS } from "@rakazo/core";
-import type { PrismaClient } from "@rakazo/db";
+import type { PrismaClient, ThreadEvents } from "@rakazo/db";
+import { LeaseHeldError } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
 
 export { sendRoutineDelayAlert, shouldAlertDelayedRoutine } from "@rakazo/adapters";
@@ -15,6 +16,7 @@ type Deliver = (
 export function startRoutineDelayAlerts(
   prisma: PrismaClient,
   deliver: Deliver,
+  events?: Pick<ThreadEvents, "publishSpaceChange">,
 ): () => Promise<void> {
   let stopping = false;
   let scanning = false;
@@ -26,7 +28,7 @@ export function startRoutineDelayAlerts(
     try {
       let cursor: string | undefined;
       const now = new Date();
-      await clearRecoveredRoutineDelayAlerts(prisma, now);
+      await clearRecoveredRoutineDelayAlerts(prisma, now, events);
       do {
         const rows = await prisma.routine.findMany({
           where: {
@@ -43,9 +45,12 @@ export function startRoutineDelayAlerts(
         for (const row of rows) {
           const threadId = row.threadId ?? row.bot.thread?.id;
           if (!threadId || !shouldAlertDelayedRoutine(row, now)) continue;
-          const work = sendRoutineDelayAlert(prisma, deliver, { ...row, threadId }, now).catch(
-            (error) => getLogger().error("routine delay scan", error),
-          );
+          const work = sendRoutineDelayAlert(prisma, deliver, { ...row, threadId }, now)
+            .then(() => events?.publishSpaceChange?.(row.spaceId, "routines"))
+            .catch((error) => {
+              if (!(error instanceof LeaseHeldError))
+                getLogger().error("routine delay scan", error);
+            });
           pending.add(work);
           void work.finally(() => pending.delete(work));
         }
@@ -76,17 +81,26 @@ export function startRoutineDelayAlerts(
 export async function clearRecoveredRoutineDelayAlerts(
   prisma: PrismaClient,
   now: Date,
+  events?: Pick<ThreadEvents, "publishSpaceChange">,
 ): Promise<void> {
-  await prisma.routine.updateMany({
-    where: {
-      delayAlertSchedule: { not: null },
-      OR: [
-        { active: false },
-        { delayAlertsEnabled: false },
-        { nextRunAt: null },
-        { nextRunAt: { gte: new Date(now.getTime() - ROUTINE_DELAY_GRACE_MS) } },
-      ],
-    },
-    data: { delayAlertSchedule: null, delayAlertClaimedAt: null, delayAlertResult: null },
+  const where = {
+    delayAlertSchedule: { not: null },
+    OR: [
+      { active: false },
+      { delayAlertsEnabled: false },
+      { nextRunAt: null },
+      { nextRunAt: { gte: new Date(now.getTime() - ROUTINE_DELAY_GRACE_MS) } },
+    ],
+  };
+  const spaces = events?.publishSpaceChange
+    ? await prisma.routine.findMany({ where, select: { spaceId: true } })
+    : [];
+  const updated = await prisma.routine.updateMany({
+    where,
+    data: { delayAlertSchedule: null, delayAlertResult: null },
   });
+  if (updated.count > 0) {
+    for (const spaceId of new Set(spaces.map((row) => row.spaceId)))
+      await events?.publishSpaceChange?.(spaceId, "routines");
+  }
 }

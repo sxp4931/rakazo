@@ -70,7 +70,7 @@ async function bootstrap() {
     process.stdout.write("Account verified\n");
   }
   const user = await prisma.user.findUniqueOrThrow({ where: { email } });
-  await bootstrapUserSpace(prisma, user, { signupsEnabled: "false", signupAllowlist: "" });
+  await bootstrapUserSpace(prisma, user);
   const sourceUpdatesEnabled = process.env.RAKAZO_SOURCE_UPDATES_ENABLED === "true";
   const settings = await prisma.deploymentSettings.updateMany({
     where: {

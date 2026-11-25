@@ -44,6 +44,13 @@ export interface SourceUpdatesGateway {
   }): Promise<SourceUpdateRun>;
 }
 
+export function createOptionalSourceUpdatesGateway(
+  token: string | undefined,
+  deps: Omit<Parameters<typeof createSourceUpdatesGateway>[0], "token">,
+): SourceUpdatesGateway | undefined {
+  return token ? createSourceUpdatesGateway({ token, ...deps }) : undefined;
+}
+
 export function createSourceUpdatesGateway(deps: {
   token: string;
   runtime: AgentRuntime;

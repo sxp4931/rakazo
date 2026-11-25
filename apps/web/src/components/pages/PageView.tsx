@@ -1,15 +1,17 @@
 import { useLingui } from "@lingui/react/macro";
+import { useTimeout } from "@rakazo/chat-ui/hooks";
 import { PageIcon } from "@rakazo/chat-ui/web";
+import type { PageSectionAnchor, PageState } from "@rakazo/contracts";
 import { PAGE_TITLE_MAX_LENGTH } from "@rakazo/contracts";
 import { cn, Dialog, DialogClose, DialogContent, DialogTitle } from "@rakazo/ui-web";
 import { Pencil, X } from "lucide-react";
 import type { ReactNode } from "react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import {
   DARWIN_WINDOW_CONTROLS_WIDTH_PX,
   desktopBridge,
   windowChromeKind,
-} from "../../lib/desktop";
+} from "../../lib/platform/desktop";
 import { DownloadPdfButton } from "./DownloadPdfButton";
 import { PageFrame } from "./PageFrame";
 import { PageLoading, PageNotice } from "./PageNotice";
@@ -28,10 +30,12 @@ export function PageView({
   title,
   document,
   onRename,
-  renameError = null,
+  titleError = null,
   share,
   composer,
   onReply,
+  onSections,
+  onSaveState,
   returnFocus,
   compact = false,
   notice = null,
@@ -42,11 +46,13 @@ export function PageView({
   document: string | null;
   /** Absent while a rename is being saved. */
   onRename?: (title: string) => void;
-  renameError?: string | null;
+  titleError?: string | null;
   share: ReactNode;
   composer?: ReactNode;
   /** Takes a page's reply text into the docked composer. */
   onReply?: (text: unknown) => void;
+  onSections?: (sections: PageSectionAnchor[]) => void;
+  onSaveState?: (values: PageState) => void;
   /** Puts focus back on close; false tells the dialog it is done. */
   returnFocus?: () => boolean;
   /** Touch screens get larger round controls. */
@@ -68,12 +74,8 @@ export function PageView({
     setDrawn(false);
     setStalled(false);
   }
-  const waiting = document !== null && !drawn && notice === null;
-  useEffect(() => {
-    if (!waiting) return;
-    const timer = window.setTimeout(() => setStalled(true), FRAME_TIMEOUT_MS);
-    return () => window.clearTimeout(timer);
-  }, [waiting, attempt]);
+  const waiting = document !== null && !drawn && !stalled && notice === null;
+  useTimeout(() => setStalled(true), waiting ? FRAME_TIMEOUT_MS : null, document);
   const onDrawn = useCallback(() => setDrawn(true), []);
   // In the macOS app the window controls sit in the top-left corner over a full-window page, so
   // its top row starts below them, as the main window's rows do.
@@ -105,7 +107,9 @@ export function PageView({
           !next &&
           details.reason === "escape-key" &&
           target instanceof Element &&
-          target.closest('[data-slot="popover-content"], [data-slot="dropdown-menu-content"]')
+          target.closest(
+            '[data-slot="popover-content"], [data-slot="dropdown-menu-content"], [data-slot="select-content"]',
+          )
         ) {
           details.cancel();
           return;
@@ -160,9 +164,9 @@ export function PageView({
               ) : (
                 <DialogTitle className="sr-only">{t`Page`}</DialogTitle>
               )}
-              {renameError ? (
+              {titleError ? (
                 <p role="alert" className="text-label text-destructive">
-                  {renameError}
+                  {titleError}
                 </p>
               ) : null}
             </div>
@@ -197,6 +201,8 @@ export function PageView({
                       title={title}
                       interactive
                       onReply={onReply}
+                      onSections={onSections}
+                      onSaveState={onSaveState}
                       onHeight={onDrawn}
                     />
                   </div>

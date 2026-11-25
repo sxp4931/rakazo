@@ -360,6 +360,19 @@ button.button--secondary:focus-visible {
   text-align: center;
 }
 
+.product-hunt-badge {
+  display: inline-flex;
+  border-radius: 10px;
+}
+
+.product-hunt-badge img {
+  display: block;
+}
+
+.hero__badge {
+  margin-bottom: 28px;
+}
+
 .hero__pill {
   display: inline-flex;
   margin-bottom: 30px;
@@ -5551,4 +5564,13 @@ td:last-child .pricing-hint__tip {
 
 .sandbox-section code {
   overflow-wrap: anywhere;
+}
+
+.selfhost__intro .section-heading a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.selfhost__intro .section-heading a:hover {
+  text-decoration: underline;
 }

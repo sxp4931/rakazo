@@ -7,13 +7,36 @@ import { expect, it, vi } from "vitest";
 
 const health = vi.hoisted(() => vi.fn());
 const setAlerts = vi.hoisted(() => vi.fn());
-vi.mock("../lib/rpc", () => ({
-  rpc: { routines: { health, setAlerts } },
-  rpcForSpace: () => ({ routines: { health, setAlerts } }),
-  createSpaceRpc: () => ({ routines: { health, setAlerts } }),
-  selectedSpaceId: () => null,
+vi.mock("../lib/query/query", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/query/query")>()),
+  useSpaceQueries: () => ({
+    routines: {
+      health: {
+        queryOptions: ({ input }: { input: { routineId: string } }) => ({
+          queryKey: [["user:user-1", "space:space-1", "routines", "health"], { input }],
+          queryFn: () => health(input),
+        }),
+      },
+    },
+  }),
+  useSave: ({ save }: { save: (input: unknown, client: unknown) => Promise<unknown> }) => ({
+    pending: false,
+    error: null,
+    run: (input: unknown) => save(input, { routines: { setAlerts } }),
+  }),
 }));
-vi.mock("./ActivityList", () => ({
+vi.mock("@rakazo/ui-web", () => ({
+  Switch: ({
+    "aria-label": label,
+    checked,
+    onCheckedChange,
+  }: {
+    "aria-label": string;
+    checked: boolean;
+    onCheckedChange: (checked: boolean) => void;
+  }) => <button type="button" aria-label={label} onClick={() => onCheckedChange(!checked)} />,
+}));
+vi.mock("./space/ActivityList", () => ({
   statusLabel: (status: string) => (status === "failed" ? "Failed" : status),
 }));
 vi.mock("@lingui/react/macro", () => ({
@@ -21,9 +44,10 @@ vi.mock("@lingui/react/macro", () => ({
   Trans: ({ children }: { children: ReactNode }) => children,
 }));
 
+import { spaceChanged } from "../lib/query/space-changes";
 import { RoutineHealth } from "./RoutineHealth";
 
-it("shows the schedule, attempt and successful execution without claiming delivery", async () => {
+it("shows routine health and refreshes on routine and run signals", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   health.mockResolvedValue({
     nextRunAt: "2026-11-01T06:00:00Z",
@@ -53,6 +77,14 @@ it("shows the schedule, attempt and successful execution without claiming delive
     expect(container.textContent).toContain("Failed");
     expect(container.textContent).toContain("Last successful run");
     expect(container.textContent).not.toContain("Delivered");
+    await act(async () => {
+      await spaceChanged("runs", client);
+      await vi.waitFor(() => expect(health).toHaveBeenCalledTimes(2));
+    });
+    await act(async () => {
+      await spaceChanged("routines", client);
+      await vi.waitFor(() => expect(health).toHaveBeenCalledTimes(3));
+    });
     await act(async () =>
       container.querySelector<HTMLButtonElement>('[aria-label="Delay alerts"]')!.click(),
     );

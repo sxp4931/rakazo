@@ -35,17 +35,53 @@ PRD="$(git rev-parse --show-toplevel)/.agents/skills/pr-watch/pr-digest"
   change the approach instead of repeating it. Stop and ask when progress needs
   a maintainer decision or access you do not have. Report what was tried and
   what remains unresolved.
-- Repeated base updates can also create a loop. If main keeps advancing before
-  checks finish, explain the cycle and ask for a merge strategy rather than
-  indefinitely merging and restarting CI. Preserve the user's current-base
-  requirement unless they change it.
+- Keep the PR head stable while CI and review run. Being behind the base alone
+  is not a reason to merge it or restart checks.
+- Once checks and reviews finish, fetch the base and review changes since the
+  PR's merge base for interactions with this PR. AI reviewers must assess the
+  combined behavior, including related changes in different files: authorization,
+  secret handling, validation, sandbox boundaries, migrations, dependencies and CI
+  can interact without a textual conflict. Read the relevant implementations;
+  passing checks and separate PR approvals do not establish combined safety.
+- If the base changes are unrelated, merge the reviewed, green head when branch
+  protection and user instructions permit. For conflicts or a plausible material
+  interaction, merge the base, review the combined diff and run affected checks;
+  push and wait for required CI and automated review on that head. Do not restart
+  this cycle for unrelated base advances. Ask when an interaction needs judgment
+  or cannot be adequately verified.
+- Approval to get a PR reviewed, green and merged authorizes routine base-update
+  decisions. Do not pause monitoring or ask for a merge strategy merely because
+  the base advanced, even repeatedly. Review the interaction and proceed: merge
+  the tested head for unrelated advances, or update the base and verify material
+  interactions. Explicit user conditions remain binding: when the user requires
+  the current base, merge it and rerun the affected checks and required CI,
+  continuing without another permission request if it advances again. Do not
+  reinterpret that condition as permission to merge behind the base. Ask only
+  for a concrete unresolved
+  product, security or compatibility decision, or missing access. State that
+  decision and your recommendation, rather than asking permission to continue.
+  Enforced branch protection still applies. Never bypass required checks.
+  Prefer GitHub's merge queue when configured; it tests combined changes but
+  does not replace the interaction review above. Merge base updates; never
+  rebase or force-push without authorization.
 
 ## The cycle
 
 1. Run `"$PRD" --watch` with **`run_in_background: true`**. It blocks until
    there is something to act on: a review finding you have not seen, a check
-   that newly failed, or every check run and commit status on the exact head
-   SHA terminal. Then it prints the digest. You are re-invoked when it exits.
+   that newly failed, or every check run, commit status and workflow run on the
+   exact head SHA terminal. Then it prints the digest. You are re-invoked when it exits.
+   When the base branch names required checks, only those hold it back; optional
+   ones (Web E2E, image validation, code scanning) never make you wait, though a
+   failure in one is still reported and a failure your change caused is yours to fix.
+   Web E2E is optional on purpose: most changes cannot break it. Add
+   `--all-checks` to wait for it too only when the change could plausibly break a
+   browser flow, such as a web UI change, a change to the E2E specs or fixtures,
+   or a change to the auth or chat paths every flow goes through.
+   It exits 0 on every verdict, so a finished watch is never a failure: read its
+   `VERDICT` line. Polling is cheap: unchanged reads are conditional requests that
+   GitHub does not count against the rate limit, and if the limit runs out the
+   watch waits for the reset by itself. Do not diagnose or work around either.
    Review bots usually answer long before the slowest check, so expect to
    handle comments while CI is still running.
 
@@ -75,6 +111,10 @@ rerun as infrastructure when the evidence establishes a setup/infrastructure
 failure, rather than a test assertion — `gh run rerun <run-id> --failed` and go
 back to 1.
 
+A `FAIL workflow` line is a run that ended without a failed job of its own, so
+there is no job log; `gh run view <run-id>` shows why it did not run, such as an
+invalid workflow file.
+
 The logs flag returns the assertion and code frame. Raw CI
 logs prefix every line with job name, step name, and a timestamp, and a
 Playwright job can exceed two megabytes; the flag strips all of that.
@@ -95,7 +135,13 @@ and a wrong fix is worse than a declined comment.
 - Valid → fix, validate, then reply with what changed.
 - Wrong → reply with the evidence that refutes it: the line of code, the
   upstream source, the behaviour on the base branch.
-- A product decision → stop and ask the user.
+- A product decision → stop and ask the user. An implementation call is not one:
+  a small dependency from an established maintainer, dropping a risky option, or
+  moving scope to a follow-up is yours to decide; say what you chose in the report.
+
+Do not add a "just in case" guard for a finding you have shown to be wrong;
+reply instead (AGENTS.md). Every push reruns CI, so handle every finding on the
+current head first and push the real fixes together.
 
 Mark a comment handled only after the change, the validation, and the reply have
 all succeeded.
@@ -169,7 +215,8 @@ gh api graphql -f query='mutation($id:ID!){
 Finish only when one observation of a single SHA proves all of:
 
 1. `VERDICT green` — local, upstream, and PR head agree; no failing check or
-   status.
+   status, and every required check finished (every check, when the base names
+   none).
 2. Every review bot has produced a signal on that SHA. If none has ever
    appeared, require two consecutive observations separated by a full wait
    before concluding none is configured.
@@ -184,7 +231,10 @@ checkpoints as `<source>\t<Markdown image>`; filter by the spec or checkpoint
 name you wrote, pick the frame, and edit the description
 (`gh api -X PATCH repos/{owner}/{repo}/pulls/<n> -F body=@<file>`). If the
 Playwright workflow did not run for that SHA, there is no gallery; say so in
-the description instead of waiting for one.
+the description instead of waiting for one. The gallery never holds up a merge:
+if its "publish Playwright report" run failed or was cancelled, rerun it once
+(`gh run rerun <run-id>`), do not hold a merge for it, and add the screenshot to
+the description when it lands.
 
 Screens you captured yourself (a native simulator, emulator, or a local browser)
 that show the change go in the description too. Leave out any that show private
@@ -223,4 +273,6 @@ the change does at length.
 ```
 
 Exit codes: `0` green · `10` failures · `11` open comments · `12` pending ·
-`20` out of sync · `1` error. Needs `gh`, `jq`, and `perl`.
+`20` out of sync · `1` error. `--watch` exits `0` on any verdict and `1` on an
+error. Vercel's status is ignored: it only deploys the marketing site. Needs
+`gh`, `jq`, and `perl`.

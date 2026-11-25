@@ -1,6 +1,7 @@
 import type { AdapterContext, NotificationMessage } from "@rakazo/adapter-kit";
 import { routineScheduleDelay } from "@rakazo/core";
 import type { PrismaClient } from "@rakazo/db";
+import { withLease } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
 
 type DelayState = {
@@ -8,13 +9,12 @@ type DelayState = {
   delayAlertsEnabled: boolean;
   nextRunAt: Date | null;
   delayAlertSchedule: Date | null;
-  delayAlertClaimedAt: Date | null;
-  delayAlertSentAt: Date | null;
+  delayAlertCooldownAt: Date | null;
   delayAlertResult: string | null;
 };
 
 const HOUR = 60 * 60_000;
-const CLAIM_TTL = 2 * 60_000;
+const LEASE_TTL_MS = 2 * 60_000;
 
 /** A future nextRunAt includes intentional provider backoff and is never overdue. */
 export function shouldAlertDelayedRoutine(row: DelayState, now: Date): boolean {
@@ -26,21 +26,13 @@ export function shouldAlertDelayedRoutine(row: DelayState, now: Date): boolean {
   )
     return false;
   if (row.delayAlertSchedule && row.delayAlertResult === "sent") return false;
-  if (row.delayAlertSentAt && time - row.delayAlertSentAt.getTime() < HOUR) return false;
-  if (row.delayAlertClaimedAt) {
-    const wait = row.delayAlertResult === "pending" ? CLAIM_TTL : HOUR;
-    if (time - row.delayAlertClaimedAt.getTime() < wait) return false;
-  }
+  if (row.delayAlertCooldownAt && time - row.delayAlertCooldownAt.getTime() < HOUR) return false;
   return true;
 }
 
 type AlertRow = Pick<
   DelayState,
-  | "nextRunAt"
-  | "delayAlertSchedule"
-  | "delayAlertClaimedAt"
-  | "delayAlertSentAt"
-  | "delayAlertResult"
+  "nextRunAt" | "delayAlertSchedule" | "delayAlertCooldownAt" | "delayAlertResult"
 > & {
   id: string;
   spaceId: string;
@@ -62,76 +54,79 @@ export async function sendRoutineDelayAlert(
   now: Date,
 ): Promise<void> {
   if (!row.nextRunAt) return;
-  const claimed = await prisma.routine.updateMany({
-    where: {
-      id: row.id,
-      spaceId: row.spaceId,
-      userId: row.userId,
-      active: true,
-      bot: { archivedAt: null },
-      delayAlertsEnabled: true,
-      nextRunAt: row.nextRunAt,
-      delayAlertSchedule: row.delayAlertSchedule,
-      delayAlertClaimedAt: row.delayAlertClaimedAt,
-      delayAlertSentAt: row.delayAlertSentAt,
-      delayAlertResult: row.delayAlertResult,
+  await withLease(
+    prisma,
+    `routine-delay-alert:${row.id}`,
+    { ttlMs: LEASE_TTL_MS },
+    async (lease) => {
+      const claimed = await prisma.routine.updateMany({
+        where: {
+          id: row.id,
+          spaceId: row.spaceId,
+          userId: row.userId,
+          active: true,
+          bot: { archivedAt: null },
+          delayAlertsEnabled: true,
+          nextRunAt: row.nextRunAt,
+          delayAlertSchedule: row.delayAlertSchedule,
+          delayAlertCooldownAt: row.delayAlertCooldownAt,
+          delayAlertResult: row.delayAlertResult,
+        },
+        data: { delayAlertSchedule: row.nextRunAt, delayAlertResult: "pending" },
+      });
+      if (!claimed.count) return;
+      const current = await prisma.routine.findFirst({
+        where: {
+          id: row.id,
+          spaceId: row.spaceId,
+          userId: row.userId,
+          active: true,
+          bot: { archivedAt: null },
+          delayAlertsEnabled: true,
+          nextRunAt: row.nextRunAt,
+          delayAlertSchedule: row.nextRunAt,
+          delayAlertResult: "pending",
+        },
+        select: { id: true },
+      });
+      if (!current) return;
+      let result: "sent" | "failed" = "failed";
+      try {
+        const sent = await deliver(
+          {
+            kind: "failure",
+            title: "Schedule delayed",
+            body: row.name,
+            botId: row.botId,
+            threadId: row.threadId,
+            routineId: row.id,
+          },
+          {
+            operationId: "routine-delay-alert",
+            traceId: row.id,
+            spaceId: row.spaceId,
+            userId: row.userId,
+            botId: row.botId,
+            signal: lease.signal,
+          },
+        );
+        if (sent === "delivered") result = "sent";
+      } catch (error) {
+        getLogger().error("routine delay alert", error);
+      }
+      await prisma.routine.updateMany({
+        where: {
+          id: row.id,
+          active: true,
+          delayAlertsEnabled: true,
+          nextRunAt: row.nextRunAt,
+          delayAlertSchedule: row.nextRunAt,
+          delayAlertResult: "pending",
+        },
+        data: { delayAlertResult: result, delayAlertCooldownAt: now },
+      });
     },
-    data: {
-      delayAlertSchedule: row.nextRunAt,
-      delayAlertClaimedAt: now,
-      delayAlertResult: "pending",
-    },
-  });
-  if (!claimed.count) return;
-  const current = await prisma.routine.findFirst({
-    where: {
-      id: row.id,
-      spaceId: row.spaceId,
-      userId: row.userId,
-      active: true,
-      bot: { archivedAt: null },
-      delayAlertsEnabled: true,
-      nextRunAt: row.nextRunAt,
-      delayAlertSchedule: row.nextRunAt,
-      delayAlertClaimedAt: now,
-      delayAlertResult: "pending",
-    },
-    select: { id: true },
-  });
-  if (!current) return;
-  let result: "sent" | "failed" = "failed";
-  try {
-    const sent = await deliver(
-      {
-        kind: "failure",
-        title: "Schedule delayed",
-        body: row.name,
-        botId: row.botId,
-        threadId: row.threadId,
-        routineId: row.id,
-      },
-      {
-        operationId: "routine-delay-alert",
-        traceId: row.id,
-        spaceId: row.spaceId,
-        userId: row.userId,
-        botId: row.botId,
-        signal: new AbortController().signal,
-      },
-    );
-    if (sent === "delivered") result = "sent";
-  } catch (error) {
-    getLogger().error("routine delay alert", error);
-  }
-  await prisma.routine.updateMany({
-    where: {
-      id: row.id,
-      delayAlertSchedule: row.nextRunAt,
-      delayAlertClaimedAt: now,
-      delayAlertResult: "pending",
-    },
-    data: { delayAlertResult: result, ...(result === "sent" ? { delayAlertSentAt: now } : {}) },
-  });
+  );
 }
 
 /** Run when the scheduled wakeup plus grace period expires. Stale jobs are harmless. */

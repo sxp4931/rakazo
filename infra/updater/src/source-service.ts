@@ -1,7 +1,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
-import { hasValidBearerToken, resolveUpdaterToken } from "@rakazo/core";
+import { hasValidBearerToken, resolveUpdaterToken } from "@rakazo/core/node/secrets-guard";
 import { Hono } from "hono";
 import { createSourceUpdater, createSourceUpdaterCommandRunner } from "./source-updater.js";
 
@@ -62,7 +62,12 @@ export function createSourceUpdaterApp(
   });
   app.get("/source/state", (c) => c.json(updater.state()));
   app.post("/source/check", async (c) => {
-    const body = await c.req.json().catch(() => ({}));
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "The update check request must contain valid JSON." }, 400);
+    }
     const pinnedCommit =
       body && typeof body === "object" && "targetCommit" in body
         ? (body as { targetCommit?: unknown }).targetCommit
@@ -76,23 +81,37 @@ export function createSourceUpdaterApp(
     return c.json(await updater.check(pinnedCommit));
   });
   app.post("/source/apply", async (c) => {
-    const body = await c.req.json().catch(() => null);
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "The update request must contain valid JSON." }, 400);
+    }
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      return c.json({ error: "The reviewed source revision is invalid." }, 400);
+    }
+    const input = body as Record<string, unknown>;
+    const currentCommit = input.currentCommit;
+    const targetCommit = input.targetCommit;
+    const forkCommit = input.forkCommit;
     if (
-      !body ||
-      typeof body !== "object" ||
-      !("currentCommit" in body) ||
-      !("targetCommit" in body) ||
-      typeof body.currentCommit !== "string" ||
-      typeof body.targetCommit !== "string" ||
-      !/^[0-9a-f]{40}$/i.test(body.currentCommit) ||
-      !/^[0-9a-f]{40}$/i.test(body.targetCommit) ||
-      ("forkCommit" in body &&
-        (typeof body.forkCommit !== "string" || !/^[0-9a-f]{40}$/i.test(body.forkCommit)))
+      typeof currentCommit !== "string" ||
+      typeof targetCommit !== "string" ||
+      !/^[0-9a-f]{40}$/i.test(currentCommit) ||
+      !/^[0-9a-f]{40}$/i.test(targetCommit) ||
+      (Object.hasOwn(input, "forkCommit") &&
+        (typeof forkCommit !== "string" || !/^[0-9a-f]{40}$/i.test(forkCommit)))
     ) {
       return c.json({ error: "The reviewed source revision is invalid." }, 400);
     }
     try {
-      return c.json(await updater.apply(body));
+      return c.json(
+        await updater.apply({
+          currentCommit,
+          targetCommit,
+          ...(typeof forkCommit === "string" ? { forkCommit } : {}),
+        }),
+      );
     } catch (error) {
       return c.json(
         { error: error instanceof Error ? error.message : "The source update could not start." },

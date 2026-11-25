@@ -267,7 +267,9 @@ class RakazoNotificationService : Service() {
 
   private fun post(run: RunRecord, copy: NotificationCopy) {
     if (!run.notificationsEnabled || isOpenThread(run)) return
+    // A push can arrive alongside this status fallback. Only the server push can play sound.
     val notification = builder(copy.channel)
+      .withoutSound()
       .setSmallIcon(R.drawable.ic_rakazo_notification)
       .setContentTitle(copy.title)
       .setContentText(copy.body)
@@ -396,7 +398,7 @@ class RakazoNotificationService : Service() {
     private const val LIVE_NOTIFICATION_ID = 1101
     private const val ACTION_THREAD_CHANGED = "com.rakazo.notifications.THREAD_CHANGED"
     private const val PROMOTED_ONGOING_EXTRA = "android.requestPromotedOngoing"
-    private const val RECENT_LIMIT = 20 // Keep in sync with apps/api/src/runs.ts.
+    private const val RECENT_LIMIT = 20 // The API's page size (kept-in-step check).
     private const val EXTRA_RESET_TOKEN = "com.rakazo.notifications.RESET_TOKEN"
     private const val EXTRA_MUTED_BOT_ID = "com.rakazo.notifications.MUTED_BOT_ID"
     private const val STATE_PREFERENCES = "com.rakazo.notification_state"
@@ -475,6 +477,10 @@ private fun attentionCopy(context: Context, run: RunRecord): NotificationCopy = 
   )
 }
 
+/** A child in a summary-only group stays silent even on a channel that allows sound. */
+internal fun Notification.Builder.withoutSound(): Notification.Builder =
+  setGroup("rakazo.silent").setGroupAlertBehavior(Notification.GROUP_ALERT_SUMMARY)
+
 internal object Channels {
   const val LIVE = "rakazo_live"
   const val MESSAGES = "rakazo_messages"
@@ -546,6 +552,7 @@ private fun latestReply(
 
 private val TABLE_ROW = Regex("\\s*\\|(.+)\\|\\s*")
 private val BREAK_LINE = Regex("\\s*[-*_]{3,}\\s*")
+private val ATX_CLOSING_MARKER = Regex("(^|\\n)( {0,3}#{1,6}(?=[ \\t])[^\\n]*?)[ \\t]#+[ \\t]*(?=\\n|\\z)")
 private val FENCE_OPEN = Regex("^ {0,3}(`{3,}|~{3,})(.*)$")
 private const val PAYLOAD_MARK = '\uE000'
 /** A preview is one line. Cap the source so one huge reply cannot stall the poll loop. */
@@ -658,7 +665,7 @@ private fun closerAt(text: String, open: Char, close: Char): Array<Int?> {
 private data class PreviewSource(val text: String, val truncated: Boolean)
 
 private fun boundedPreviewSource(markdown: String): PreviewSource {
-  val normalized = markdown.replace("\r\n", "\n")
+  val normalized = markdown.replace("\r\n", "\n").replace("\r", "\n")
   if (normalized.length <= MAX_PREVIEW_SOURCE) return PreviewSource(normalized, false)
   val body = normalized.trimStart()
   if (body.length <= MAX_PREVIEW_SOURCE) return PreviewSource(body, false)
@@ -974,6 +981,11 @@ internal fun markdownToPreview(markdown: String): String {
   val source = boundedPreviewSource(markdown)
   var text = source.text.replace(mark, markToken)
   text = takeFencedCode(text, stash, source.truncated)
+  // Recognize the closing marker before inline formatting changes the line.
+  text = ATX_CLOSING_MARKER.replace(text) { match ->
+    if (source.truncated && match.range.last == text.lastIndex) match.value
+    else match.groupValues[1] + match.groupValues[2] + " "
+  }
   text = takeInlineCode(text, stash)
   text = takeEscapes(text, stash)
   text = takeLinks(text)

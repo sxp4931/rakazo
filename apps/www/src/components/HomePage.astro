@@ -2,6 +2,7 @@
 import { ANDROID_APP_STORE_URL } from "@rakazo/contracts/client-build";
 import Button from "./Button.astro";
 import Footer from "./Footer.astro";
+import ProductHuntBadge from "./ProductHuntBadge.astro";
 import GetStartedActions from "./GetStartedActions.astro";
 import Header from "./Header.astro";
 import { LandingBotAvatar } from "./LandingBotAvatar";
@@ -108,7 +109,6 @@ const structuredData = homeStructuredData({
   {structuredData}
   locale={locale}
   skipLabel={copy.skipToContent}
-  homeAlternates
   ogImageAlt={copy.ogImageAlt}
 >
   <div class="container">
@@ -143,6 +143,7 @@ const structuredData = homeStructuredData({
       </script>
 
       <section class="hero">
+        <ProductHuntBadge class="hero__badge" />
         <h1>{copy.hero.heading}</h1>
         <p class="lead">
           {copy.hero.lead}
@@ -311,7 +312,7 @@ const structuredData = homeStructuredData({
       <section id="selfhost" class="section">
         <div class="selfhost__intro">
           <div class="section-intro">
-            <h2 class="section-heading">{copy.selfHost.heading}</h2>
+            <h2 class="section-heading"><a href={SELF_HOST_GUIDE_PATH}>{copy.selfHost.heading}</a></h2>
             <p class="section-copy">
               {copy.selfHost.copy}
             </p>

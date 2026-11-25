@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 
+import { flush } from "@rakazo/core/test-async";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, expect, it, vi } from "vitest";
@@ -29,7 +30,7 @@ it("copies what its own page asks from the app's frame and answers whether it wo
   const send = (data: unknown, source: Window | null = frame.contentWindow) =>
     act(async () => {
       window.dispatchEvent(new MessageEvent("message", { data, source }));
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await flush();
     });
 
   await send({ type: "rakazo-page:copy", id: "a", text: "Copy yes", gesture: "k:1" });
@@ -71,7 +72,7 @@ it("copies by selection where the page has no Clipboard API, as on plain http", 
         source: frame.contentWindow,
       }),
     );
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await flush();
   });
   expect(copied).toEqual(["MRR $12,400"]);
   // The hidden field is gone once copied.
@@ -91,13 +92,14 @@ it("acts for a page only in an interactive frame, right after the person used th
   const container = document.body.appendChild(document.createElement("div"));
   const composer = document.body.appendChild(document.createElement("input"));
   const root = createRoot(container);
-  const render = (interactive: boolean) =>
+  const render = (interactive: boolean, previewScrollTop?: number) =>
     act(async () =>
       root.render(
         <PageFrame
           document="<p>x</p>"
           title="Board"
           interactive={interactive}
+          previewScrollTop={previewScrollTop}
           onReply={(text) => replies.push(text)}
           onHeight={(height) => heights.push(height)}
         />,
@@ -107,7 +109,7 @@ it("acts for a page only in an interactive frame, right after the person used th
     act(async () => {
       const source = container.querySelector("iframe")!.contentWindow;
       window.dispatchEvent(new MessageEvent("message", { data, source }));
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await flush();
     });
   let gestures = 0;
   const actions = (vouched: boolean) =>
@@ -118,12 +120,13 @@ it("acts for a page only in an interactive frame, right after the person used th
     ].map((action) => ({ ...action, gesture: vouched ? `k:${++gestures}` : null }));
 
   // A preview only draws: even a focused, vouched-for request does nothing, though it sizes.
-  await render(false);
+  await render(false, 0);
   expect(container.querySelector("iframe")!.hasAttribute("allow")).toBe(false);
   container.querySelector("iframe")!.focus();
   for (const action of actions(true)) await send(action);
-  await send({ type: "rakazo-page:height", height: 300 });
-  expect(heights).toHaveLength(1);
+  await send({ type: "rakazo-page:height", height: 300, scrollHeight: 900 });
+  await send({ type: "rakazo-page:height", height: 320 });
+  expect(heights).toEqual([900, 320]);
 
   await render(true);
   // Not used: the shell does not vouch for a click inside it.
@@ -144,10 +147,11 @@ it("acts for a page only in an interactive frame, right after the person used th
   await send({ type: "rakazo-page:copy", id: "b", text: "first", gesture: "k:once" });
   await send({ type: "rakazo-page:copy", id: "c", text: "second", gesture: "k:once" });
   await send({ type: "rakazo-page:reply", text: "And reply", gesture: "k:once" });
-  await send({ type: "rakazo-page:height", height: 400 });
+  await send({ type: "rakazo-page:height", height: 400, scrollHeight: 1_000 });
   expect(writeText.mock.calls.slice(1)).toEqual([["first"]]);
   expect(replies).toEqual(["Ship it"]);
-  expect(heights).toHaveLength(2);
+  expect(heights).toEqual([900, 320, 400]);
+  expect(container.querySelector("div")?.style.getPropertyValue("--page-height")).toBe("400px");
   // The next click works again.
   await send({ type: "rakazo-page:reply", text: "Next", gesture: "k:again" });
   expect(replies).toEqual(["Ship it", "Next"]);

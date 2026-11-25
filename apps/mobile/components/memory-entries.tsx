@@ -1,103 +1,106 @@
 import { ph } from "@lingui/core/macro";
 import { useLingui } from "@lingui/react/macro";
-import type { MemoryDocument, RpcOutput } from "@rakazo/contracts";
+import type { MemoryDocument } from "@rakazo/contracts";
+import { bestEffort } from "@rakazo/logging/best-effort";
 import { useEffect, useState } from "react";
 import { Alert, Modal, ScrollView, Text, View } from "react-native";
-import { rpc } from "../lib/api";
+import { errorText } from "../lib/api/user-error";
 import { memoryEntries } from "../lib/memory-entries";
-import { useMobileTokens } from "../lib/native";
-import { errorText } from "../lib/user-error";
-import { NativeActionButton } from "./native-action-button";
-import { ProfileEditDialog } from "./profile-edit-dialog";
+import { useMobileTokens } from "../lib/native/native";
+import { refreshRpcQueries, rpcQuery, useSave } from "../lib/query/query";
+import { useScreenQuery } from "../lib/query/screen-query";
+import { ProfileEditDialog } from "./bots/profile-edit-dialog";
+import { NativeActionButton } from "./native/native-action-button";
+
+type MemoryEntryChange =
+  | {
+      kind: "edit";
+      documentId: string;
+      expectedRevision: number;
+      start: number;
+      end: number;
+      expected: string;
+      replacement: string;
+    }
+  | { kind: "undo"; documentId: string; expectedRevision: number };
 
 export function MemoryEntries({
   initial,
   botId,
   onClose,
   onUpdate,
-  onRefresh,
 }: {
   initial: MemoryDocument | null;
   botId?: string;
   onClose: () => void;
   onUpdate: (doc: MemoryDocument) => void;
-  onRefresh: () => Promise<void>;
 }) {
   const { t } = useLingui();
   const tokens = useMobileTokens();
   const [doc, setDoc] = useState(initial);
-  const [busy, setBusy] = useState(false);
   const [undoRevision, setUndoRevision] = useState<number | null>(null);
-  const [prompt, setPrompt] = useState<RpcOutput<"memory/prompt"> | null>(null);
+  const [showPrompt, setShowPrompt] = useState(false);
+  const memoryListRead = rpcQuery(
+    "memory/list",
+    botId ? { botId, scope: "bot" } : { scope: "user" },
+  );
+  const prompt = useScreenQuery(rpcQuery("memory/prompt", { botId: botId ?? "" }), {
+    enabled: showPrompt && Boolean(botId),
+    onForeground: false,
+  });
+  const change = useSave<MemoryEntryChange, MemoryDocument>({
+    save: (input, send) => {
+      if (input.kind === "edit") {
+        const { kind: _kind, ...body } = input;
+        return send("memory/editEntry", body);
+      }
+      const { kind: _kind, ...body } = input;
+      return send("memory/undoEntry", body);
+    },
+    stale: [memoryListRead.queryKey],
+    onSaved: (updated, input) => {
+      setDoc(updated);
+      onUpdate(updated);
+      setUndoRevision(input.kind === "edit" ? updated.revision : null);
+      setShowPrompt(false);
+    },
+    onFailed: async (error) => {
+      await bestEffort("refresh memory after an entry change", refreshRpcQueries("memory/list"));
+      Alert.alert(t`Could not save`, errorText(error, t`Try again.`));
+      onClose();
+    },
+  });
+
   useEffect(() => {
-    if (initial || !botId) return;
-    let current = true;
-    setBusy(true);
-    void rpc("memory/prompt", { botId })
-      .then((result) => {
-        if (current) setPrompt(result);
-      })
-      .catch((error) => {
-        if (current) Alert.alert(t`Could not load`, errorText(error, t`Try again.`));
-      })
-      .finally(() => {
-        if (current) setBusy(false);
-      });
-    return () => {
-      current = false;
-    };
-  }, [botId, initial, t]);
-  async function changed(error: unknown) {
-    await onRefresh().catch(() => undefined);
-    Alert.alert(t`Could not save`, errorText(error, t`Try again.`));
-    onClose();
+    if (prompt.error) Alert.alert(t`Could not load`, errorText(prompt.error, t`Try again.`));
+  }, [prompt.error, t]);
+
+  function replace(entry: { start: number; end: number; text: string }, replacement: string) {
+    if (!doc || change.pending || replacement === entry.text) return Promise.resolve();
+    change.run({
+      kind: "edit",
+      documentId: doc.id,
+      expectedRevision: doc.revision,
+      start: entry.start,
+      end: entry.end,
+      expected: entry.text,
+      replacement,
+    });
+    return Promise.resolve();
   }
-  async function replace(entry: { start: number; end: number; text: string }, replacement: string) {
-    if (!doc || busy || replacement === entry.text) return;
-    setBusy(true);
-    try {
-      const updated = await rpc("memory/editEntry", {
-        documentId: doc.id,
-        expectedRevision: doc.revision,
-        start: entry.start,
-        end: entry.end,
-        expected: entry.text,
-        replacement,
-      });
-      setDoc(updated);
-      onUpdate(updated);
-      setUndoRevision(updated.revision);
-      setPrompt(null);
-    } catch (error) {
-      await changed(error);
-    } finally {
-      setBusy(false);
-    }
+
+  function undo() {
+    if (!doc || change.pending || undoRevision === null) return;
+    change.run({ kind: "undo", documentId: doc.id, expectedRevision: undoRevision });
   }
-  async function undo() {
-    if (!doc || busy || undoRevision === null) return;
-    setBusy(true);
-    try {
-      const updated = await rpc("memory/undoEntry", {
-        documentId: doc.id,
-        expectedRevision: undoRevision,
-      });
-      setDoc(updated);
-      onUpdate(updated);
-      setUndoRevision(null);
-      setPrompt(null);
-    } catch (error) {
-      await changed(error);
-    } finally {
-      setBusy(false);
-    }
-  }
+
   function remove(entry: { start: number; end: number; text: string }) {
     Alert.alert(t`Delete memory?`, entry.text, [
       { text: t`Cancel`, style: "cancel" },
       { text: t`Delete`, style: "destructive", onPress: () => void replace(entry, "") },
     ]);
   }
+
   return (
     <Modal visible presentationStyle="pageSheet" animationType="slide" onRequestClose={onClose}>
       <ScrollView
@@ -110,32 +113,29 @@ export function MemoryEntries({
         {botId ? (
           <NativeActionButton
             label={t`View prompt memory`}
-            disabled={busy}
+            disabled={change.pending || prompt.isFetching}
             onPress={() => {
-              setBusy(true);
-              void rpc("memory/prompt", { botId })
-                .then(setPrompt)
-                .catch((error) => Alert.alert(t`Could not load`, errorText(error, t`Try again.`)))
-                .finally(() => setBusy(false));
+              setShowPrompt(true);
+              if (prompt.isError) void prompt.refetch();
             }}
             prominence="plain"
           />
         ) : null}
-        {prompt ? (
+        {prompt.data ? (
           <>
             <Text style={{ color: tokens.mutedForeground }}>
-              {t`${ph({ used: prompt.usedBytes })} / ${ph({ limit: prompt.limitBytes })} bytes`}
+              {t`${ph({ used: prompt.data.usedBytes })} / ${ph({ limit: prompt.data.limitBytes })} bytes`}
             </Text>
             <Text selectable style={{ color: tokens.foreground }}>
-              {prompt.text}
+              {prompt.data.text}
             </Text>
           </>
         ) : null}
         {undoRevision !== null ? (
           <NativeActionButton
             label={t`Undo`}
-            disabled={busy}
-            onPress={() => void undo()}
+            disabled={change.pending}
+            onPress={undo}
             prominence="plain"
           />
         ) : null}
@@ -154,7 +154,7 @@ export function MemoryEntries({
             <NativeActionButton
               label={t`Delete`}
               accessibilityLabel={t`Delete ${ph({ entry: entry.text })}`}
-              disabled={busy}
+              disabled={change.pending}
               prominence="plain"
               onPress={() => remove(entry)}
             />

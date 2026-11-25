@@ -38,7 +38,7 @@ vi.mock("@rakazo/ui-web", () => ({
   ),
 }));
 
-vi.mock("../lib/rpc", () => ({
+vi.mock("../lib/query/rpc", () => ({
   rpc: {
     sourceUpdates: {
       state: sourceState,
@@ -81,7 +81,7 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-it("reviews the official preview and confirms an update after the API restarts", async () => {
+it("reviews the preview and refreshes status after an uncertain update start", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   vi.useFakeTimers();
   const idle: SourceUpdateState = { running: false, lastRun: null };
@@ -102,19 +102,6 @@ it("reviews the official preview and confirms an update after the API restarts",
     .mockResolvedValueOnce(idle)
     .mockResolvedValueOnce(idle)
     .mockResolvedValueOnce(idle)
-    .mockResolvedValueOnce({
-      running: false,
-      lastRun: {
-        startedAt: "2026-11-03T12:00:00.000Z",
-        finishedAt: "2026-11-03T12:01:00.000Z",
-        ok: true,
-        currentCommit: "c".repeat(40),
-        targetCommit: "d".repeat(40),
-        stage: "complete",
-        error: null,
-        recovery: null,
-      },
-    })
     .mockResolvedValue(running);
   sourceCheck.mockResolvedValue(preview);
   sourceApply.mockRejectedValue(new Error("API restarted before the response arrived"));
@@ -141,29 +128,15 @@ it("reviews the official preview and confirms an update after the API restarts",
       findButton(container, "Install update").click();
     });
     expect(sourceApply).toHaveBeenCalledWith({ currentCommit, targetCommit });
-    expect(container.textContent).toContain("Checking whether the update started…");
+    expect(container.textContent).toContain("Update status is unconfirmed.");
     expect(container.textContent).not.toContain("Update complete.");
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(1_500);
-    });
-    expect(sourceState).toHaveBeenCalledTimes(3);
-    expect(container.textContent).toContain("Checking whether the update started…");
-    expect(container.textContent).not.toContain("Update complete.");
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(1_500);
+      findButton(container, "Refresh status").click();
     });
     expect(sourceState).toHaveBeenCalledTimes(4);
-    expect(container.textContent).toContain("Checking whether the update started…");
-    expect(container.textContent).not.toContain("Update complete.");
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(1_500);
-    });
-    expect(sourceState).toHaveBeenCalledTimes(5);
     expect(container.textContent).toContain("Installing update…");
-    expect(container.textContent).not.toContain("Checking whether the update started…");
+    expect(container.textContent).not.toContain("Update status is unconfirmed.");
   } finally {
     await act(async () => root.unmount());
     container.remove();
@@ -171,7 +144,7 @@ it("reviews the official preview and confirms an update after the API restarts",
   }
 });
 
-it("polls while the apply request is still pending", async () => {
+it("keeps the apply state while its request is pending without polling", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   vi.useFakeTimers();
   const idle: SourceUpdateState = { running: false, lastRun: null };
@@ -195,9 +168,9 @@ it("polls while the apply request is still pending", async () => {
     expect(container.textContent).toContain("Applying the reviewed update…");
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(1_500);
+      await Promise.resolve();
     });
-    expect(sourceState).toHaveBeenCalledTimes(3);
+    expect(sourceState).toHaveBeenCalledTimes(2);
     expect(container.textContent).toContain("Applying the reviewed update…");
   } finally {
     await act(async () => root.unmount());

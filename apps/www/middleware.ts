@@ -1,9 +1,7 @@
-import { next } from "@vercel/functions";
+import { next, rewrite } from "@vercel/functions";
 import {
   AGENT_DISCOVERY_LINKS,
   getMarkdownAlternate,
-  getMarkdownDocument,
-  markdownResponse,
   negotiateRepresentation,
 } from "./src/agent-content.js";
 
@@ -26,7 +24,10 @@ export default function middleware(request: Request): Response {
   const url = new URL(request.url);
 
   if (url.hostname.toLowerCase() === WWW_HOST) {
-    const destination = new URL(`${url.pathname}${url.search}`, APEX_ORIGIN);
+    // Set the path after parsing the origin so leading slashes cannot replace the host.
+    const destination = new URL(APEX_ORIGIN);
+    destination.pathname = url.pathname;
+    destination.search = url.search;
     return permanentRedirect(destination.toString());
   }
 
@@ -37,30 +38,19 @@ export default function middleware(request: Request): Response {
 
   if (request.method !== "GET" && request.method !== "HEAD") return next();
 
-  const acceptHeader = request.headers.get("accept");
-  const representation = negotiateRepresentation(acceptHeader);
-  const markdown = getMarkdownDocument(url.pathname);
-
-  if (representation === "markdown" && markdown) {
-    return markdownResponse(markdown, request.method);
-  }
-
-  if (representation === "not-acceptable") {
-    return new Response(
-      request.method === "HEAD"
-        ? null
-        : "Not acceptable. Request text/html or text/markdown.\n",
-      {
-        status: 406,
-        headers: {
-          "Content-Type": "text/plain; charset=utf-8",
-          Vary: VARY_HEADER,
-        },
-      },
-    );
-  }
-
   const markdownAlternate = getMarkdownAlternate(url.pathname);
+  if (markdownAlternate && negotiateRepresentation(request.headers.get("accept")) === "markdown") {
+    const destination = new URL(url);
+    destination.pathname = markdownAlternate;
+    return rewrite(destination, {
+      headers: {
+        "Content-Language": "en",
+        "Content-Type": "text/markdown; charset=utf-8",
+        Link: AGENT_DISCOVERY_LINKS,
+        Vary: VARY_HEADER,
+      },
+    });
+  }
   return next({
     headers: {
       Link: [

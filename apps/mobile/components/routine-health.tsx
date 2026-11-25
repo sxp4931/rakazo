@@ -1,16 +1,17 @@
+import { t } from "@lingui/core/macro";
 import { useQuery } from "@tanstack/react-query";
 import { useFocusEffect } from "expo-router";
 import { useCallback, useState } from "react";
 import { Text, View } from "react-native";
 import { rpc } from "../lib/api";
-import { dateLocaleForUi, useI18n } from "../lib/i18n";
+import { dateLocaleForUi, useUiLocale } from "../lib/i18n";
 import { useMobileTokens } from "../lib/native";
 import { queryClient, rpcQuery } from "../lib/query";
 import { routineHealthLines } from "../lib/routine-health";
 import { NativeSwitch } from "./native-switch";
 
 export function RoutineHealth({ routineId }: { routineId: string }) {
-  const { t, locale } = useI18n();
+  const locale = useUiLocale();
   const tokens = useMobileTokens();
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState(false);
@@ -22,14 +23,13 @@ export function RoutineHealth({ routineId }: { routineId: string }) {
   useFocusEffect(
     useCallback(() => {
       void refetch();
-      const timer = setInterval(() => void refetch(), 15_000);
-      return () => clearInterval(timer);
+      return undefined;
     }, [refetch]),
   );
   if (query.isError)
     return (
       <Text accessibilityRole="alert" style={{ color: tokens.destructive }}>
-        {t("Could not load schedule status")}
+        {t`Could not load schedule status`}
       </Text>
     );
   if (!query.data) return null;
@@ -54,9 +54,9 @@ export function RoutineHealth({ routineId }: { routineId: string }) {
         </Text>
       ))}
       <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
-        <Text style={{ color: tokens.foreground }}>{t("Delay alerts")}</Text>
+        <Text style={{ color: tokens.foreground }}>{t`Delay alerts`}</Text>
         <NativeSwitch
-          accessibilityLabel={t("Delay alerts")}
+          accessibilityLabel={t`Delay alerts`}
           disabled={saving}
           value={health.delayAlertsEnabled}
           onValueChange={(value) => void setAlert("delayed", value)}
@@ -64,29 +64,29 @@ export function RoutineHealth({ routineId }: { routineId: string }) {
       </View>
       {health.delayAlertsEnabled ? (
         <Text style={{ color: tokens.mutedForeground }}>
-          {t("Delay alerts run while the worker is running.")}
+          {t`Delay alerts run while the worker is running.`}
         </Text>
       ) : null}
       <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
-        <Text style={{ color: tokens.foreground }}>{t("Failure alerts")}</Text>
+        <Text style={{ color: tokens.foreground }}>{t`Failure alerts`}</Text>
         <NativeSwitch
-          accessibilityLabel={t("Failure alerts")}
+          accessibilityLabel={t`Failure alerts`}
           disabled={saving}
           value={health.failureAlertsEnabled}
           onValueChange={(value) => void setAlert("failure", value)}
         />
       </View>
       {health.delayed && health.delayAlertResult === "failed" ? (
-        <Text style={{ color: tokens.destructive }}>{t("Alert could not be sent")}</Text>
+        <Text style={{ color: tokens.destructive }}>{t`Alert could not be sent`}</Text>
       ) : null}
       {health.delayed && health.delayAlertResult === "sent" ? (
         <Text style={{ color: tokens.mutedForeground }}>
-          {t("Alert accepted; delivery not confirmed")}
+          {t`Alert accepted; delivery not confirmed`}
         </Text>
       ) : null}
       {saveError ? (
         <Text accessibilityRole="alert" style={{ color: tokens.destructive }}>
-          {t("Could not save")}
+          {t`Could not save`}
         </Text>
       ) : null}
     </View>

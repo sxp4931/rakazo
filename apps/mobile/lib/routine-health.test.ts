@@ -1,10 +1,4 @@
-import { expect, it, vi } from "vitest";
-
-vi.mock("./api", () => ({ rpc: vi.fn() }));
-vi.mock("./i18n", () => ({
-  t: (message: string, values?: Record<string, string>) =>
-    message.replace(/\{(\w+)\}/g, (_match, key: string) => values?.[key] ?? ""),
-}));
+import { expect, it } from "vitest";
 
 import { routineHealthLines } from "./routine-health";
 

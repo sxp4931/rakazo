@@ -10,7 +10,9 @@ const mocks = vi.hoisted(() => ({
   os: "ios",
 }));
 
-vi.mock("../lib/i18n", () => ({ useI18n: () => ({ t: (text: string) => text }) }));
+vi.mock("@lingui/react/macro", () => ({
+  useLingui: () => ({ t: (parts: TemplateStringsArray) => parts.join("") }),
+}));
 vi.mock("../lib/native", () => ({
   native: { fill: "fill" },
   useMobileTokens: () => ({ foreground: "foreground", mutedForeground: "muted", card: "card" }),

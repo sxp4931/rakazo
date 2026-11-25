@@ -7,23 +7,28 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BotContextCards } from "../components/bot-context-cards";
 
-const { rpc, push } = vi.hoisted(() => ({ rpc: vi.fn(), push: vi.fn() }));
+const { rpc, push, focus } = vi.hoisted(() => ({
+  rpc: vi.fn(),
+  push: vi.fn(),
+  focus: { current: null as null | (() => (() => void) | undefined) },
+}));
 vi.mock("./api-server", () => ({}));
 vi.mock("./api-auth", () => ({}));
 vi.mock("./api-live", () => ({}));
 vi.mock("./api", () => ({ rpc }));
 vi.mock("expo-router", () => ({
   useRouter: () => ({ push }),
-  useFocusEffect: (effect: () => (() => void) | undefined) => useEffect(effect, [effect]),
+  useFocusEffect: (effect: () => (() => void) | undefined) => {
+    focus.current = effect;
+    useEffect(effect, [effect]);
+  },
 }));
-vi.mock("./i18n", () => ({ useI18n: () => ({ t: (text: string) => text }) }));
 vi.mock("./native", () => ({ native: {}, useMobileTokens: () => ({}) }));
 vi.mock("./user-error", () => ({ errorText: (error: Error) => error.message }));
 vi.mock("../components/native-symbol", () => ({ NativeSymbol: () => null }));
-vi.mock("../components/profile-edit-dialog", () => ({ ProfileEditDialog: () => null }));
 vi.mock("../components/native-action-button", () => ({
-  NativeActionButton: ({ label }: { label: string }) =>
-    createElement("button", { type: "button" }, label),
+  NativeActionButton: ({ label, onPress }: { label: string; onPress: () => void }) =>
+    createElement("button", { type: "button", onClick: onPress }, label),
 }));
 vi.mock("react-native", () => {
   const view = ({ children }: { children?: ReactNode }) => createElement("div", null, children);
@@ -41,7 +46,28 @@ vi.mock("react-native", () => {
       { type: "button", "aria-label": accessibilityLabel, onClick: onPress },
       children,
     );
-  return { Pressable, Text: view, View: view };
+  return {
+    Pressable,
+    Text: view,
+    View: view,
+    Platform: { OS: "android" },
+    Alert: {},
+    Modal: view,
+    TextInput: ({
+      value,
+      onChangeText,
+      accessibilityLabel,
+    }: {
+      value: string;
+      onChangeText: (value: string) => void;
+      accessibilityLabel: string;
+    }) =>
+      createElement("input", {
+        value,
+        "aria-label": accessibilityLabel,
+        onChange: (event: { target: { value: string } }) => onChangeText(event.target.value),
+      }),
+  };
 });
 
 let container: HTMLDivElement;
@@ -71,7 +97,7 @@ async function render(botId = "bot-a") {
 describe("bot context cards", () => {
   it.each([
     ["scratchpad/list", "Memory", "notes.md", "Open work"],
-    ["memory/list", "Open work", "Review draft", null],
+    ["memory/list", "Open work", "Review draft", "Memory"],
   ])("renders the other section when %s fails", async (failed, heading, item, hidden) => {
     rpc.mockImplementation(async (method: string) => {
       if (method === failed) throw new Error("Request failed");
@@ -80,7 +106,7 @@ describe("bot context cards", () => {
     await render();
     expect(container.textContent).toContain(heading);
     expect(container.textContent).toContain(item);
-    if (hidden) expect(container.textContent).not.toContain(hidden);
+    expect(container.textContent).not.toContain(hidden);
     expect(container.textContent).toContain("Request failed");
   });
 
@@ -102,7 +128,7 @@ describe("bot context cards", () => {
       method === "scratchpad/list" ? [] : [{ id: "memory-a", path: "MEMORY.md", content: "" }],
     );
     await render();
-    expect(container.textContent).toContain("View prompt memory");
+    expect(container.textContent).toBe("");
   });
 
   it("ignores results from the previous bot", async () => {
@@ -118,7 +144,7 @@ describe("bot context cards", () => {
     await render();
     await render("bot-b");
     await act(async () => resolveWork(work));
-    expect(container.textContent).not.toContain("Review draft");
+    expect(container.textContent).toBe("");
   });
 
   it("opens a remembered note in its editor", async () => {
@@ -145,3 +171,47 @@ describe("bot context cards", () => {
     expect(container.textContent).toContain("Review draft");
   });
 });
+
+it.each(["save", "cancel"])(
+  "preserves an Android draft when a focused refresh empties the list, then %s",
+  async (action) => {
+    let reads = 0;
+    rpc.mockImplementation(async (method: string) => {
+      if (method === "scratchpad/list") return reads++ === 0 ? work : [];
+      if (method === "scratchpad/create") return { ...work[0], id: "new", title: "Retained draft" };
+      return [];
+    });
+    await render();
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('[aria-label="Add open work"]')!.click(),
+    );
+    const input = container.querySelector<HTMLInputElement>("input")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(
+        input,
+        "Retained draft",
+      );
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      focus.current!();
+    });
+    expect(container.querySelector<HTMLInputElement>("input")?.value).toBe("Retained draft");
+    await act(async () =>
+      [...container.querySelectorAll("button")]
+        .find((button) => button.textContent === (action === "save" ? "Save" : "Cancel"))!
+        .click(),
+    );
+    expect(container.querySelector("input")).toBeNull();
+    if (action === "save") {
+      expect(rpc).toHaveBeenCalledWith("scratchpad/create", {
+        botId: "bot-a",
+        title: "Retained draft",
+      });
+      expect(container.textContent).toContain("Retained draft");
+    } else {
+      expect(rpc.mock.calls.filter(([method]) => method === "scratchpad/create")).toHaveLength(0);
+      expect(container.textContent).not.toContain("Open work");
+    }
+  },
+);

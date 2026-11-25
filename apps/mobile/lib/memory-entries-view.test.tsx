@@ -6,11 +6,11 @@ import { createRoot } from "react-dom/client";
 import { expect, it, vi } from "vitest";
 
 const rpc = vi.hoisted(() => vi.fn());
-const translate = vi.hoisted(() => (text: string) => text);
+const translate = vi.hoisted(() => (parts: TemplateStringsArray) => parts.join(""));
 vi.mock("./api", () => ({ rpc }));
 vi.mock("./native", () => ({ useMobileTokens: () => ({}) }));
 vi.mock("./user-error", () => ({ errorText: () => "Error" }));
-vi.mock("./i18n", () => ({ useI18n: () => ({ t: translate }) }));
+vi.mock("@lingui/react/macro", () => ({ useLingui: () => ({ t: translate }) }));
 vi.mock("react-native", () => {
   const wrap = ({ children }: { children?: ReactNode }) => createElement("div", null, children);
   return { Alert: { alert: vi.fn() }, Modal: wrap, ScrollView: wrap, Text: wrap, View: wrap };

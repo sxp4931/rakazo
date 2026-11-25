@@ -128,7 +128,9 @@ Unset, calls are sent as soon as they are ready. Like the other token limits, a 
 a positive integer is rejected when the local provider is configured.
 
 Rakazo keeps a run's earlier messages unchanged between calls so a server's prompt cache keeps
-hitting, and trims old page state only when that saves more than the cache would. A server without
+hitting, and trims old page state only when that saves more than the cache would. A new message in
+the same chat starts with the previous turn exactly as it was sent, so the cache carries over
+between turns too. A server without
 prompt caching (several hosted gateways and confidential-compute endpoints report no cached
 tokens) gets nothing from that, and old page snapshots are only sent again on every call. Set
 `RAKAZO_LOCAL_PROMPT_CACHE=off` to declare this: stale page state is then trimmed once about 3,000
@@ -153,7 +155,8 @@ that only you use can run its deployment model through the official Claude Code 
 or refreshes your Claude sign-in, and every request to Anthropic is the CLI's own. Rakazo keeps the
 conversation, tools, memory and approvals: the CLI only answers as the model, with its own tools,
 settings and project files turned off. Each model turn continues the CLI's saved session from the
-turn before, so its prompt cache carries over, and Rakazo removes each session once it moves on.
+turn before, including the first turn of a new message in the same chat, so its prompt cache
+carries over, and Rakazo removes each session once it moves on.
 
 What it needs:
 
@@ -225,9 +228,11 @@ PI_DEFAULT_MODEL=opencode/big-pickle
 
 Use a model id from `opencode models`. Each chat continues OpenCode's session from its previous
 turn, so OpenCode keeps its context and prompt cache; after a restart, the next turn starts a new
-session with the recent chat. Screen and computer use, and images people send, are not available
-to bots on OpenCode yet. Usage counts against your OpenCode plan or provider, and Rakazo shows no cost for these runs. Your
-use of OpenCode and of the models it reaches is covered by their own terms.
+session with the recent chat. Bots on OpenCode can use their computer's screen and see the images
+people send, through the same tools and approvals as any bot, when the model OpenCode runs takes
+images. Rakazo goes by its own model list where it knows the model, so a text-only model gets
+neither. Usage counts against your OpenCode plan or provider, and Rakazo shows no cost
+for these runs. Your use of OpenCode and of the models it reaches is covered by their own terms.
 
 The CLI runs in a private working folder with an allowlisted environment: API keys and other server
 secrets are never passed to it. Only the deployment model runs on OpenCode; it is not offered as a
@@ -263,9 +268,9 @@ it keeps its sign-in in, so your Antigravity hooks, MCP servers, skills and othe
 of the bot's turns. A sign-in the CLI saves there when it refreshes is replaced by the link again
 before the next turn, so signing out or switching accounts with `agy` reaches your bots.
 
-If the model id is not one the CLI offers, the run's error lists the ones it does. Screen and
-computer use, and images people send, are not available to bots on Antigravity yet. Usage counts
-against your Google plan, and Rakazo shows no cost for these runs. Your use is covered by
+If the model id is not one the CLI offers, the run's error lists the ones it does. Bots on
+Antigravity can use their computer's screen and see the images people send, as on OpenCode. Usage
+counts against your Google plan, and Rakazo shows no cost for these runs. Your use is covered by
 [Google's Antigravity terms](https://antigravity.google/terms).
 
 ## Ollama Cloud
@@ -345,7 +350,8 @@ automatically uses cache-aware context:
 recent history remains bounded on a cold request, and subsequent requests keep
 that selected prefix while it is likely warm and fits the context budget.
 Connections with unknown retention or `retentionMode: "none"` retain the default
-retrieval policy. An explicit executor context strategy still takes precedence.
+retrieval policy, whose kept history starts at the same message for several exchanges in a row
+instead of moving with each one, so the cached prefix holds. An explicit executor context strategy still takes precedence.
 Callers without usable history-retrieval tools keep fitting original history
 under the model's context budget instead of replacing it with snapshots.
 
